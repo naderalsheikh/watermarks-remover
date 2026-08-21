@@ -1134,10 +1134,6 @@ def inspect_xlsx(data: bytes) -> tuple[bool, bool, list[str], dict]:
     return has_c2pa, has_ai or has_c2pa, findings, details
 
 
-def inspect_pptx(data: bytes) -> tuple[bool, bool, list[str], dict]:
-    return _inspect_ooxml_zip(data, "pptx")
-
-
 _XML_CHAR_REF_RE = re.compile(r"&#(?:x([0-9A-Fa-f]+)|([0-9]+));|&(amp|lt|gt|quot|apos);")
 _XML_NAMED_ENTITIES = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
 
@@ -1963,10 +1959,6 @@ def clean_xlsx(
     return data, legal_actions + scrub_actions
 
 
-def clean_pptx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
-    return _scrub_ooxml_zip(data, "pptx", also_layer_a_text=also_layer_a_text)
-
-
 def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
     findings: list[str] = []
     has_c2pa = False
@@ -2000,6 +1992,129 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
             return has_c2pa, has_ai or has_c2pa, findings, {}
         return False, False, ["not a valid ODT zip"], {}
     return has_c2pa, has_ai or has_c2pa, findings, {}
+
+
+# ---------------------------------------------------------------------------
+# PPTX legal content (PR 8): speaker notes, hidden slides, comments
+# ---------------------------------------------------------------------------
+
+_PPTX_HIDDEN_SLIDE_RE = re.compile(rb'<(?:\w+:)?sld\b[^>]*\bshow="(?:0|false)"')
+
+
+def _inspect_pptx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, list[str]]:
+    """Enumerate PPTX legal artifacts: notes slides, comments, hidden slides."""
+    names = zf.namelist()
+    notes_parts = [n for n in names if n.startswith("ppt/notesSlides/")]
+    comment_parts = [
+        n for n in names if n.startswith("ppt/comments/") or n.lower() == "ppt/commentauthors.xml"
+    ]
+    hidden_slides = 0
+    slide_count = 0
+    for info in zf.infolist():
+        if not re.match(r"^ppt/slides/slide\d+\.xml$", info.filename, re.I):
+            continue
+        raw = _read_zip_member(zf, info, budget)
+        slide_count += 1
+        if _PPTX_HIDDEN_SLIDE_RE.search(raw):
+            hidden_slides += 1
+    report = {
+        "slide_count": slide_count,
+        "hidden_slides": hidden_slides,
+        "notes_parts": len(notes_parts),
+        "comment_parts": len(comment_parts),
+    }
+    findings: list[str] = []
+    if notes_parts:
+        findings.append(f"pptx-notes: {len(notes_parts)} speaker-notes part(s)")
+    if comment_parts:
+        findings.append(f"pptx-comments: {len(comment_parts)} comment part(s)")
+    if hidden_slides:
+        findings.append(f"pptx-hidden-slides: {hidden_slides} hidden slide(s)")
+    return report, findings
+
+
+def inspect_pptx(data: bytes) -> tuple[bool, bool, list[str], dict]:
+    has_c2pa, has_ai, findings, details = _inspect_ooxml_zip(data, "pptx")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            budget = [0]
+            legal, extra = _inspect_pptx_legal(zf, budget)
+            findings.extend(extra)
+            details["pptx_legal"] = legal
+    except _ZIP_PARSE_ERRORS:
+        pass  # base call already reported invalid/partial zip
+    return has_c2pa, has_ai or has_c2pa, findings, details
+
+
+def _pptx_legal_clean(
+    data: bytes, *, strip_notes: bool = True, strip_comments: bool = True
+) -> tuple[bytes, list[str]]:
+    """Sharing-path PPTX legal pass; runs before ``_scrub_ooxml_zip``.
+
+    Drops ppt/notesSlides/** (speaker notes) and the comment family
+    (ppt/comments/**, ppt/commentAuthors.xml) when asked. Hidden slides are
+    flag-only: never deleted and the show attribute is left untouched.
+    """
+    actions: list[str] = []
+    budget = [0]
+    dropped: set[str] = set()
+    kept: list[tuple[zipfile.ZipInfo, bytes]] = []
+    with zipfile.ZipFile(io.BytesIO(data)) as zin:
+        for info in zin.infolist():
+            _check_zip_budget(info, budget)
+            name = info.filename
+            if strip_notes and name.startswith("ppt/notesSlides/"):
+                actions.append(f"drop part {name}")
+                dropped.add(name)
+                continue
+            if strip_comments and (
+                name.startswith("ppt/comments/") or name.lower() == "ppt/commentauthors.xml"
+            ):
+                actions.append(f"drop part {name}")
+                dropped.add(name)
+                continue
+            kept.append((info, _read_zip_member(zin, info, budget)))
+
+        if dropped:
+            kept_names = {info.filename for info, _ in kept}
+            rebuilt: list[tuple[zipfile.ZipInfo, bytes]] = []
+            for info, raw in kept:
+                out_raw = raw
+                if info.filename.endswith(".rels"):
+                    out_raw, n = _prune_dangling_relationships(info.filename, raw, kept_names)
+                    if n:
+                        actions.append(f"prune dangling relationships x{n} in {info.filename}")
+                elif info.filename == "[Content_Types].xml":
+                    new, n = _prune_ooxml_overrides(
+                        raw.decode("utf-8", errors="replace"), dropped
+                    )
+                    if n:
+                        actions.append(f"prune Content_Types overrides x{n}")
+                        out_raw = new.encode("utf-8")
+                rebuilt.append((info, out_raw))
+            kept = rebuilt
+
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for info, raw in kept:
+            zout.writestr(info, raw)
+    if not actions:
+        actions.append("no PPTX legal artifacts found")
+    return out_buf.getvalue(), actions
+
+
+def clean_pptx(
+    data: bytes,
+    *,
+    also_layer_a_text: bool = True,
+    strip_notes: bool = True,
+    strip_comments: bool = True,
+) -> tuple[bytes, list[str]]:
+    data, legal_actions = _pptx_legal_clean(
+        data, strip_notes=strip_notes, strip_comments=strip_comments
+    )
+    data, scrub_actions = _scrub_ooxml_zip(data, "pptx", also_layer_a_text=also_layer_a_text)
+    return data, legal_actions + scrub_actions
 
 
 def clean_odt(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:

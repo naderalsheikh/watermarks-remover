@@ -463,6 +463,34 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                     value_redacted=text,
                 )
             )
+        elif text.startswith("pptx-notes:") or text.startswith("pptx-comments:"):
+            out.append(
+                Finding(
+                    category="embedded_content",
+                    subtype="comments_and_notes",
+                    format=fmt,
+                    risk_level="high",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="note" if text.startswith("pptx-notes:") else "comment"),
+                    action_recommended="strip",
+                    value_redacted=text,
+                )
+            )
+        elif text.startswith("pptx-hidden-slides:"):
+            out.append(
+                Finding(
+                    category="hidden_structure",
+                    subtype="hidden_structure",
+                    format=fmt,
+                    risk_level="medium",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="hidden"),
+                    content_visible=False,
+                    action_recommended="flag",
+                    action_allowed_by_policy=("flag", "keep"),
+                    value_redacted=text,
+                )
+            )
     return out
 
 
