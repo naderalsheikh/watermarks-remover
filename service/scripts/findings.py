@@ -295,6 +295,59 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                     notes="a rebuilt copy would break the signature",
                 )
             )
+        elif text.startswith(("pdf-js:", "pdf-openaction:", "pdf-aa:")):
+            out.append(
+                Finding(
+                    category="active_content",
+                    subtype="pdf_js_actions",
+                    format=fmt,
+                    risk_level="high",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="other"),
+                    value_redacted=text,
+                )
+            )
+        elif text.startswith("pdf-acroform:"):
+            out.append(
+                Finding(
+                    category="embedded_content",
+                    subtype="pdf_acroform",
+                    format=fmt,
+                    risk_level="medium",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="body"),
+                    content_visible=True,
+                    action_recommended="flag",
+                    action_allowed_by_policy=("flag", "keep"),
+                    removal_changes_visible_content=True,
+                    value_redacted=text,
+                )
+            )
+        elif text.startswith("pdf-annots:"):
+            out.append(
+                Finding(
+                    category="embedded_content",
+                    subtype="pdf_annots",
+                    format=fmt,
+                    risk_level="medium",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="comment"),
+                    content_visible=True,
+                    value_redacted=text,
+                )
+            )
+        elif text.startswith("pdf-embeddedfiles:"):
+            out.append(
+                Finding(
+                    category="embedded_content",
+                    subtype="pdf_attachments",
+                    format=fmt,
+                    risk_level="high",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="other"),
+                    value_redacted=text,
+                )
+            )
     return out
 
 

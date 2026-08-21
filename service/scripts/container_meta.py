@@ -2046,8 +2046,11 @@ def _pdf_structured_blob(data: bytes) -> bytes:
 
 
 def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
+    import pdf_legal
+
     findings: list[str] = []
-    has_c2pa, has_ai, hits = _blob_hits(_pdf_structured_blob(data))
+    structured = _pdf_structured_blob(data)
+    has_c2pa, has_ai, hits = _blob_hits(structured)
     findings.extend(f"pdf-structured:{h}" for h in hits)
     # XMP packet scan
     xmp_blob = b"\n".join(
@@ -2063,6 +2066,8 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
                 re.I,
             )
         )
+    legal = pdf_legal.scan_pdf_legal(structured)
+    findings.extend(pdf_legal.legal_findings(legal))
     tools = run_optional_tools(path)
     ct = tools.get("c2patool") or {}
     if ct.get("has_manifest"):
@@ -2071,7 +2076,7 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     probe_note = c2patool_probe_note(tools)
     if probe_note:
         findings.append(probe_note)
-    return has_c2pa, has_ai or has_c2pa, findings, {"tools": tools}
+    return has_c2pa, has_ai or has_c2pa, findings, {"tools": tools, "pdf_legal": legal}
 
 
 def _pdf_structural_rewrite(dest: Path, actions: list[str]) -> bool:
@@ -2117,6 +2122,44 @@ def _pdf_structural_rewrite(dest: Path, actions: list[str]) -> bool:
     return False
 
 
+def _pdf_info_clear(dest: Path, actions: list[str]) -> bool:
+    """Second qpdf pass: clear the /Info dictionary (--remove-info).
+
+    Runs after the --linearize structural rewrite; no second exiftool pass.
+    """
+    qpdf = which("qpdf")
+    if not qpdf:
+        return False
+    tmp = dest.with_name(dest.name + ".qdf-info-tmp")
+    try:
+        r = subprocess.run(
+            [
+                qpdf,
+                "--linearize",
+                "--remove-info",
+                "--",
+                safe_arg(str(dest)),
+                safe_arg(str(tmp)),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            preexec_fn=subprocess_preexec_fn,
+        )
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        actions.append(f"qpdf info-clear failed: {e}")
+        return False
+    if r.returncode in (0, 3) and tmp.is_file() and tmp.stat().st_size > 0:
+        tmp.replace(dest)
+        actions.append(f"qpdf --remove-info info-clear (rc={r.returncode})")
+        return True
+    tmp.unlink(missing_ok=True)
+    actions.append(f"qpdf info-clear skipped (rc={r.returncode})")
+    return False
+
+
 def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
     """Best-effort PDF clean. Prefers exiftool; falls back to XMP strip warning."""
     actions: list[str] = []
@@ -2150,11 +2193,18 @@ def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
         # revert them with -PDF-update:all=). A structural rewrite is what
         # actually drops the now-unreferenced objects.
         rewritten = _pdf_structural_rewrite(dest, actions)
+        info_clear = False
+        if rewritten:
+            info_clear = _pdf_info_clear(dest, actions)
         c2patool = which("c2patool")
         # c2patool does not always strip; leave note
         if c2patool:
             actions.append("c2patool available for inspect; strip via exiftool/re-export")
-        return actions, {"mode": "exiftool", "structural_rewrite": rewritten}
+        return actions, {
+            "mode": "exiftool",
+            "structural_rewrite": rewritten,
+            "info_clear": info_clear,
+        }
 
     # Degraded: strip obvious XMP packets between <?xpacket begin and end
     # (linear scan - the lazy .*? form is quadratic on unclosed begin markers)
