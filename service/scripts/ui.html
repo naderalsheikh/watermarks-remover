@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Watermarks remover</title>
+  <title>CounselClear — document sanitization</title>
   <style>
     :root {
       --bg: #f4f1ea;
@@ -143,21 +143,21 @@
 </head>
 <body>
   <main>
-    <h1>Watermarks remover</h1>
-    <p class="lede">Drop a file. It is analyzed immediately on this Mac. Clean strips hidden Unicode and metadata only — it does not rewrite legal language.</p>
+    <h1>CounselClear</h1>
+    <p class="lede">Document sanitization and safe sharing, locally on this Mac. Identify hidden information in a file, keep the original untouched, and produce a clean copy — nothing is rewritten and nothing leaves your machine.</p>
 
     <div class="card">
       <label id="drop">
         <strong>Drop a file here, or click to choose</strong>
-        <span>DOCX, PDF, PNG, JPEG, MD, TXT, HTML, PPTX, XLSX — analysis starts as soon as the file is selected</span>
+        <span>DOCX, PDF, PNG, JPEG, MD, TXT, HTML, PPTX, XLSX — the original is never modified</span>
         <input id="file" type="file">
       </label>
       <div class="row">
-        <button id="inspect" type="button" disabled>Analyze again</button>
+        <button id="inspect" type="button" disabled>Analyze</button>
         <button id="clean" type="button" disabled>Clean (lossless)</button>
         <button id="sample" type="button" class="secondary">Try a sample with a hidden mark</button>
       </div>
-      <p class="note">Sampling watermarks in wording need the generator’s key. Without it, Analyze still reports Unicode, C2PA, metadata, extracted word count, and stylometry.</p>
+      <p class="note">Nothing runs until you click Analyze or Clean. Sampling watermarks in wording need the generator’s key. Without it, Analyze still reports Unicode, C2PA, metadata, extracted word count, and stylometry.</p>
       <p id="status"></p>
       <div id="verdict" class="verdict" hidden></div>
     </div>
@@ -198,10 +198,9 @@
       chosen = file;
       inspectBtn.disabled = !file;
       cleanBtn.disabled = !file;
-      setStatus(file ? "Analyzing " + file.name + "…" : "", file ? "ok" : "");
+      setStatus(file ? "Ready: " + file.name + " — click Analyze or Clean" : "", file ? "ok" : "");
       out.hidden = true;
       dl.hidden = true;
-      if (file) post("/inspect", { detect: true }).catch((e) => setStatus(String(e), "err"));
     }
 
     drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });

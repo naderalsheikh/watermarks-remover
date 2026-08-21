@@ -511,7 +511,7 @@ def openapi_spec() -> dict[str, Any]:
     spec: dict[str, Any] = {
         "openapi": "3.0.3",
         "info": {
-            "title": "watermarks-remover service",
+            "title": "CounselClear sanitization service",
             "version": VERSION,
             "description": "Strip multi-vendor AI provenance marks (Unicode, C2PA/EXIF/XMP, containers). "
             "Files are passed base64-encoded in JSON; cleaned bytes come back base64-encoded.",
