@@ -44,6 +44,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -57,7 +58,46 @@ DEFAULT_MARKLLM_MODEL = "facebook/opt-1.3b"
 DEFAULT_CANDIDATES = 1
 DEFAULT_MAX_LOOPS = 1
 
+PRESERVE_STRENGTHS = frozenset({"preserve", "legal"})
+MEANING_CHANGING_STRENGTHS = frozenset(
+    {"paraphrase", "humanize", "backtranslate", "structural"}
+)
+
+_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:USD|US\$|\$|€|£)?\d+(?:[.,]\d+)*(?:%|k|m|b)?",
+    re.IGNORECASE,
+)
+_MODAL_RE = re.compile(
+    r"\b(?:shall not|must not|may not|will not|cannot|can not|should not|"
+    r"shall|must|may|will|should|cannot)\b",
+    re.IGNORECASE,
+)
+_SECTION_RE = re.compile(
+    r"\b(?:Section|Article|Schedule|Exhibit|Annex|Appendix|Clause)\s+"
+    r"[A-Z0-9]+(?:[.\-][A-Z0-9]+)*\b",
+    re.IGNORECASE,
+)
+_QUOTED_RE = re.compile(r"[“”\"]([^“”\"]{1,80})[“”\"]")
+
 PROMPTS = {
+    "preserve": (
+        "Rewrite the following text with the SMALLEST wording change that still "
+        "alters token identity. Do NOT change meaning, legal effect, tone, or "
+        "structure.\n"
+        "Hard rules:\n"
+        "- Do not reorder clauses, sentences, or lists.\n"
+        "- Do not change modal verbs (shall / must / may / will / should) or "
+        "their negations.\n"
+        "- Do not substitute defined terms, party names, section/article/"
+        "schedule references, numbers, dates, percentages, or quoted phrases.\n"
+        "- Do not add, remove, or weaken any claim, condition, exception, or "
+        "obligation.\n"
+        "- If a sentence cannot be reworded without changing its legal or "
+        "operative meaning, leave that sentence UNCHANGED.\n"
+        "- Prefer leaving the text unchanged over a paraphrase that risks "
+        "drift.\n"
+        "Output only the rewritten text.\n\n---\n{TEXT}"
+    ),
     "paraphrase": (
         "Rewrite the following text so that it uses substantially different wording at "
         "the token level. Change clause order, connectors, and transition words; vary "
@@ -134,6 +174,55 @@ def _select_candidate(original: str, candidates: list[str]) -> tuple[str, list[f
         scores.append(score)
     best_idx = max(range(len(candidates)), key=lambda i: scores[i])
     return candidates[best_idx], scores
+
+
+def _normalize_strength(strength: str) -> str:
+    s = (strength or "").strip().lower()
+    if s == "legal":
+        return "preserve"
+    return s
+
+
+def _lock_bag(pattern: re.Pattern[str], text: str, *, lower: bool = False) -> Counter:
+    items = pattern.findall(text)
+    if lower:
+        items = [i.lower() for i in items]
+    return Counter(items)
+
+
+def meaning_lock_violations(original: str, candidate: str) -> list[str]:
+    """Return human-readable lock failures. Empty list = candidate is safe.
+
+    Locks numbers, modal verbs (shall/must/may/…), section-style citations,
+    and short quoted phrases. Also rejects large length drift, which is how
+    obligations quietly disappear.
+    """
+    violations: list[str] = []
+    if original and candidate:
+        ratio = len(candidate) / len(original)
+        if ratio < 0.85 or ratio > 1.20:
+            violations.append(
+                f"length drift {ratio:.2f}x (preserve lock requires 0.85–1.20)"
+            )
+    for label, pattern, lower in (
+        ("number", _NUMBER_RE, False),
+        ("modal", _MODAL_RE, True),
+        ("citation", _SECTION_RE, True),
+        ("quoted phrase", _QUOTED_RE, False),
+    ):
+        src = _lock_bag(pattern, original, lower=lower)
+        dst = _lock_bag(pattern, candidate, lower=lower)
+        missing = src - dst
+        extra = dst - src
+        for item, n in missing.items():
+            violations.append(f"dropped {label} {item!r}" + (f" (x{n})" if n > 1 else ""))
+        for item, n in extra.items():
+            violations.append(f"added {label} {item!r}" + (f" (x{n})" if n > 1 else ""))
+    return violations
+
+
+def meaning_lock_ok(original: str, candidate: str) -> bool:
+    return not meaning_lock_violations(original, candidate)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -246,6 +335,9 @@ def _generate_once(
 
 
 def build_prompt(strength: str, text: str, *, lang: str, original_lang: str) -> str:
+    strength = _normalize_strength(strength)
+    if strength == "preserve":
+        return PROMPTS["preserve"].format(TEXT=text)
     if strength == "paraphrase":
         return PROMPTS["paraphrase"].format(TEXT=text)
     if strength == "humanize":
@@ -363,6 +455,8 @@ def rewrite(
     markllm_timeout: float = 180.0,
     gumbel_key: str | None = None,
 ) -> tuple[str, dict]:
+    strength = _normalize_strength(strength)
+    preserve = strength in PRESERVE_STRENGTHS
     prompt = build_prompt(strength, text, lang=lang, original_lang=original_lang)
     info: dict = {
         "backend": backend,
@@ -438,6 +532,7 @@ def rewrite(
             cand_stats: dict | None = None
             if layer_a_after:
                 cand, cand_stats = clean_text(cand)
+            lock_fail = meaning_lock_violations(text, cand) if preserve else []
             divergence = _lexical_divergence(text, cand)
             if evaluator is None:
                 evaluation: dict = {
@@ -450,6 +545,13 @@ def rewrite(
             passed_i: bool | None = (
                 True if verdict is False else (False if verdict is True else None)
             )
+            if lock_fail:
+                passed_i = False
+                evaluation = {
+                    **evaluation,
+                    "meaning_lock": False,
+                    "meaning_lock_violations": lock_fail,
+                }
             attempts.append(
                 (
                     cand,
@@ -460,6 +562,7 @@ def rewrite(
                         "selected": False,
                         "passed": passed_i,
                         "evaluation": evaluation,
+                        "meaning_lock_ok": not lock_fail,
                         "layer_a_after": cand_stats,
                     },
                 )
@@ -477,12 +580,33 @@ def rewrite(
 
     # Best-effort selection when no attempt passed: the lowest watermark score
     # (detector evaluator) or the most lexically diverged variant (fallback).
+    # Preserve/legal: candidates that fail the meaning lock are never selected;
+    # if every candidate fails, return the original text unchanged.
+    eligible = [
+        i
+        for i, (_c, rec) in enumerate(attempts)
+        if (not preserve) or rec.get("meaning_lock_ok", True)
+    ]
+    if preserve and not eligible:
+        info["attempts_made"] = len(attempts)
+        info["passed"] = False
+        info["mode"] = "unchanged"
+        info["output_chars"] = len(text)
+        info["note"] = (
+            "Layer B preserve lock: every rewrite candidate changed operative "
+            "meaning (modals, numbers, citations, or quoted terms). Original "
+            "text returned unchanged."
+        )
+        info["candidate_scores"] = [r for _c, r in attempts]
+        return text, info
+
     selected_idx: int
     best_score: float | None = None
     best_score_idx: int | None = None
     best_div = -1.0
-    best_div_idx = 0
-    for i, (_cand, rec) in enumerate(attempts):
+    best_div_idx = eligible[0]
+    for i in eligible:
+        _cand, rec = attempts[i]
         if rec["lexical_divergence"] > best_div:
             best_div = rec["lexical_divergence"]
             best_div_idx = i
@@ -493,6 +617,8 @@ def rewrite(
                 best_score_idx = i
     if passed is True:
         selected_idx = len(attempts) - 1  # the passing attempt is the last one
+        if preserve and selected_idx not in eligible:
+            selected_idx = best_div_idx
     elif best_score_idx is not None:
         selected_idx = best_score_idx
     else:
@@ -599,8 +725,19 @@ def build_parser() -> argparse.ArgumentParser:
     # and shell history. Set WATERMARKS_REWRITE_API_KEY instead.
     p.add_argument(
         "--strength",
-        choices=("paraphrase", "backtranslate", "structural", "humanize", "code"),
-        default="paraphrase",
+        choices=(
+            "preserve",
+            "legal",
+            "paraphrase",
+            "backtranslate",
+            "structural",
+            "humanize",
+            "code",
+        ),
+        default=_env("WATERMARKS_REWRITE_STRENGTH", "preserve"),
+        help="preserve/legal (default): meaning-locked, no clause reorder. "
+        "paraphrase/humanize/structural/backtranslate change wording and can "
+        "change legal effect — opt-in only.",
     )
     p.add_argument("--lang", default="French", help="Pivot language for backtranslate")
     p.add_argument("--original-lang", default="English")

@@ -14,13 +14,14 @@ Apply a final text-hygiene pass to prose the user owns or is authorized to proce
    - fenced and inline code
    - commands, paths, URLs, identifiers, API names, and exact values
    - formulas, citations, and text the user asks to quote verbatim
-3. Preserve every claim, fact, number, name, citation, and requirement.
-4. Rewrite the remaining prose once:
-   - vary clause order, sentence boundaries, rhythm, connectors, and function words
-   - replace formulaic transitions and filler with direct, natural wording
+3. Preserve every claim, fact, number, name, citation, and requirement. Do not change legal or operative meaning: keep shall/must/may/will, defined terms, section citations, and quoted phrases verbatim. Do not reorder clauses or lists.
+4. Rewrite the remaining prose once, only if the user asked for a statistical-mark pass:
+   - smallest token-level change; if a sentence cannot be reworded without changing meaning, leave it unchanged
+   - do not vary clause order, connectors that carry conditions, or function words that change obligation
    - preserve the requested language, tone, structure, and formatting; never translate unless asked
    - for non-English text, use fluent constructions native to that language rather than English sentence patterns
    - do not add or remove claims merely to increase variation
+   - default is Unicode hygiene only; skip this rewrite on contracts and other operative legal prose unless the user accepted meaning drift in writing
 5. For text artifacts or supplied text files, run the deterministic Unicode pass after rewriting.
 6. Return only the polished result unless the user asks for an audit or explanation.
 

@@ -23,6 +23,8 @@ from rewrite_text import (
     _lexical_divergence,
     _select_candidate,
     build_prompt,
+    meaning_lock_ok,
+    meaning_lock_violations,
     rewrite,
 )
 
@@ -50,6 +52,43 @@ def test_build_prompt_paraphrase_is_word_choice_plus_syntax():
     assert "Hello world facts 42." in p
     assert "clause order" in p
     assert "function words" in p
+
+
+def test_build_prompt_preserve_forbids_clause_reorder():
+    p = build_prompt("preserve", "Vendor shall pay 20%.", lang="French", original_lang="English")
+    assert "Vendor shall pay 20%." in p
+    assert "Do not reorder clauses" in p
+    assert "leave that sentence UNCHANGED" in p
+    assert "clause order" not in p
+
+
+def test_legal_strength_aliases_preserve():
+    p = build_prompt("legal", "Vendor shall pay 20%.", lang="French", original_lang="English")
+    assert "Do not reorder clauses" in p
+
+
+def test_parser_default_strength_is_preserve(monkeypatch):
+    monkeypatch.delenv("WATERMARKS_REWRITE_STRENGTH", raising=False)
+    args = rewrite_text.build_parser().parse_args(["x.txt"])
+    assert args.strength == "preserve"
+
+
+def test_meaning_lock_rejects_shall_to_must():
+    original = "Vendor shall pay 20% of the Compensation Terms."
+    bad = "Vendor must pay 20% of the Compensation Terms."
+    ok = "Vendor shall pay 20% of the Compensation Terms."
+    assert not meaning_lock_ok(original, bad)
+    assert any("modal" in v for v in meaning_lock_violations(original, bad))
+    assert meaning_lock_ok(original, ok)
+
+
+def test_meaning_lock_rejects_dropped_section_and_quote():
+    original = 'See Section 8.3. The "Customer Indemnified Parties" are covered.'
+    bad = "See the liability cap. The protected people are covered."
+    assert not meaning_lock_ok(original, bad)
+    viol = " ".join(meaning_lock_violations(original, bad))
+    assert "citation" in viol
+    assert "quoted" in viol or "Customer Indemnified Parties" in viol
 
 
 def test_build_prompt_humanize_and_code_contain_text():
@@ -180,6 +219,45 @@ def test_default_candidates_and_max_loops_are_one(monkeypatch):
     args = rewrite_text.build_parser().parse_args(["x.txt"])
     assert args.candidates == 5
     assert args.max_loops == 7
+
+
+def test_preserve_returns_original_when_lock_fails(monkeypatch):
+    original = "Vendor shall pay 20% under Section 8.3."
+    texts = iter(
+        [
+            "Vendor must pay twenty percent under the cap.",
+            "The company should remit funds per the clause.",
+        ]
+    )
+    monkeypatch.setattr(rewrite_text, "call_ollama", lambda *a, **k: next(texts))
+    out, info = rewrite(
+        original,
+        **_rewrite_candidates_kwargs(strength="preserve", candidates=2, layer_a_after=False),
+    )
+    assert out == original
+    assert info["mode"] == "unchanged"
+    assert info["passed"] is False
+    assert all(c.get("meaning_lock_ok") is False for c in info["candidate_scores"])
+
+
+def test_preserve_keeps_lock_ok_candidate(monkeypatch):
+    original = "Vendor shall pay 20% under Section 8.3."
+    kept = "Vendor shall pay 20% under Section 8.3 herein."
+    texts = iter(
+        [
+            "The seller must remit funds under the cap.",
+            kept,
+        ]
+    )
+    monkeypatch.setattr(rewrite_text, "call_ollama", lambda *a, **k: next(texts))
+    out, info = rewrite(
+        original,
+        **_rewrite_candidates_kwargs(strength="preserve", candidates=2, layer_a_after=False),
+    )
+    assert out == kept
+    assert info["mode"] == "rewritten"
+    selected = [c for c in info["candidate_scores"] if c["selected"]]
+    assert selected and selected[0]["meaning_lock_ok"] is True
 
 
 def test_evaluator_is_lexical_without_markllm_scheme(monkeypatch):

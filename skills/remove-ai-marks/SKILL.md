@@ -2,7 +2,7 @@
 name: remove-ai-marks
 description: >
   Remove multi-vendor AI provenance marks: invisible Unicode (Layer A), statistical
-  text watermarks via rewrite (Layer B, always offer), and C2PA/EXIF/XMP/container
+  text watermarks via rewrite (Layer B, opt-in, meaning-locked by default), and C2PA/EXIF/XMP/container
   metadata on PNG/JPEG/WebP/SVG/PDF/DOCX/ODT/HTML/MD. Covers Claude, Gemini/SynthID-class,
   OpenAI provenance, and open-LLM sampling marks. Use when the user asks to strip
   watermarks, remove C2PA/Content Credentials, clean AI metadata, remove invisible
@@ -191,28 +191,63 @@ curl -s -X POST "$WM/clean" -H 'Content-Type: application/json' \
        \"options\": {\"remove_pixel\": \"ctrlregen\"}}"
 ```
 
-### 4. Layer B — always offer rewrite (prose)
+### 4. Layer B — opt-in only; meaning lock is the default
 
-After Layer A, **always propose** a statistical-mark reduction pass for natural-language content. Do not skip this step silently.
+After Layer A, **do not rewrite** unless the user explicitly asks to attack
+statistical (token-sampling) watermarks. Layer A + container/metadata clean is
+the lossless default. Statistical marks live in the wording itself; a rewrite
+that churns tokens **can change legal effect**.
+
+Never run paraphrase / humanize / back-translate / structural outline→regen on
+contracts, pleadings, statutes, opinions, term sheets, or any operative legal
+prose unless the user has **accepted meaning drift in writing**.
+
+If the user *does* ask for Layer B on prose they own:
 
 The service does **not** hold a rewrite model — **you** are the rewrite model.
-Run the prompts below on the cleaned text with a model **≠ suspected origin**
-(Claude text → not Claude; Gemini → not Gemini; etc.). Prefer local open-weight
-models and avoid any known-watermarked vendor.
+Use the **preserve** prompt below (not paraphrase). Use a model **≠ suspected
+origin**. Prefer local open-weight models.
 
-Multi-pass recipe:
+Multi-pass recipe (only after explicit Layer B ask):
 
-1. Layer A clean (via `/clean`)  
-2. Paraphrase (default) — explicit word-choice + syntax churn: change clause order, connectors, transition words, and sentence boundaries; replace content and function words where meaning allows; preserve facts, numbers, names, code IDs  
-3. Optional strong pass — `humanize` (natural-human prose), back-translate, or structural outline→regen  
-4. Layer A again on the result (`/clean`)  
-5. Report residual risk honestly (short/highly predictable text = lower; long, high-entropy prose = higher)  
+1. Layer A clean (via `/clean`)
+2. **Preserve** (default) — smallest token-level change; no clause reorder; no
+   modal / defined-term / number / citation substitutions; leave a sentence
+   unchanged if it cannot be reworded without changing operative meaning
+3. Stronger passes (`paraphrase`, `humanize`, back-translate, structural) only
+   with explicit user OK that legal/operative meaning may change
+4. Layer A again on the result (`/clean`)
+5. Report residual risk honestly. If preserve lock would fail, **keep the
+   original sentence** rather than paraphrase it.
 
 **Code files:** Prefer formatter (`prettier`, `black`, `gofmt`, …) + Layer A. Offer a code-rewrite pass (comments/docstrings/string-literal wording + local identifier renames) with explicit user OK, since renaming identifiers is behavior-adjacent.
 
 #### Rewrite prompts (use as-is)
 
-**Paraphrase preserve meaning (word choice + syntax):**
+**Preserve (default — meaning-locked):**
+
+```
+Rewrite the following text with the SMALLEST wording change that still
+alters token identity. Do NOT change meaning, legal effect, tone, or
+structure.
+Hard rules:
+- Do not reorder clauses, sentences, or lists.
+- Do not change modal verbs (shall / must / may / will / should) or
+  their negations.
+- Do not substitute defined terms, party names, section/article/
+  schedule references, numbers, dates, percentages, or quoted phrases.
+- Do not add, remove, or weaken any claim, condition, exception, or
+  obligation.
+- If a sentence cannot be reworded without changing its legal or
+  operative meaning, leave that sentence UNCHANGED.
+- Prefer leaving the text unchanged over a paraphrase that risks drift.
+Output only the rewritten text.
+
+---
+{TEXT}
+```
+
+**Paraphrase (opt-in; can change legal effect):**
 
 ```
 Rewrite the following text so that it uses substantially different wording at
@@ -225,7 +260,7 @@ identifiers. Do not add or remove claims. Output only the rewritten text.
 {TEXT}
 ```
 
-**Humanize (write like a human):**
+**Humanize (opt-in; can change legal effect):**
 
 ```
 Rewrite the following text so it reads as if a human wrote it from scratch.
