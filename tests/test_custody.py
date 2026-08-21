@@ -149,7 +149,9 @@ def test_bundle_text_fixture_end_to_end(tmp_path):
     assert m["derivative"]["bytes"] == len(cleaned)
     assert m["policy"]["id"] == "external_sharing"
     assert any("removed" in a for a in m["actions"])
-    assert m["verification"]["exit_code"] == 0
+    verification = result["verification"]
+    assert verification["pass"] is True
+    assert any(c["name"] == "reinspect_targeted_gone" for c in verification["checks"])
     assert isinstance(m["findings_before"], list)
 
     # files locked read-only
@@ -157,7 +159,7 @@ def test_bundle_text_fixture_end_to_end(tmp_path):
         assert stat.S_IMODE(f.stat().st_mode) & 0o222 == 0
 
 
-def test_bundle_docx_and_refuses_rerun_with_drift(tmp_path):
+def test_bundle_docx_privacy_and_refuses_rerun_with_drift(tmp_path):
     src = FIXTURES / "spa.docx"
     out = tmp_path / "b1"
     r1 = clean_to_bundle(src, out, policy_id="privacy_only", matter_id="m1")
@@ -167,7 +169,13 @@ def test_bundle_docx_and_refuses_rerun_with_drift(tmp_path):
 
     with zipfile.ZipFile(deriv) as zf:
         names = zf.namelist()
-    assert "word/comments.xml" not in names
+        core = zf.read("docProps/core.xml").decode("utf-8")
+    assert "word/comments.xml" in names  # privacy keeps comments
+    assert "<dc:creator>Jane Associate</dc:creator>" not in core
+    verification = r1["verification"]
+    assert verification["pass"] is True
+    m = json.loads(Path(r1["manifest"]).read_text())
+    assert m["verification"]["pass"] is True
 
     # identical rerun: idempotent everywhere
     r2 = clean_to_bundle(src, out, policy_id="privacy_only", matter_id="m1")
@@ -181,6 +189,16 @@ def test_bundle_docx_and_refuses_rerun_with_drift(tmp_path):
     stored.write_bytes(b"tampered")
     with pytest.raises(CustodyError, match="write-once violation"):
         clean_to_bundle(src, conflict_dir)
+
+
+def test_bundle_refuses_signed_pdf_without_attestation(tmp_path):
+    src = FIXTURES / "signed.pdf"
+    out = tmp_path / "signed-bundle"
+    with pytest.raises(CustodyError, match="plan refused"):
+        clean_to_bundle(src, out)
+    assert not (out / "manifest.json").exists()
+    r = clean_to_bundle(src, out, signature_break_attestation=True)
+    assert Path(r["derivative"]).is_file()
 
 
 def test_bundle_refuses_in_place_collision(tmp_path):

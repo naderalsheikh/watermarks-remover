@@ -555,18 +555,23 @@ def clean_to_bundle(
     policy_id: str = "external_sharing",
     operator_id: str | None = None,
     matter_id: str | None = None,
-    also_layer_a_text: bool = True,
-    layer_a_scope: str = "body",
+    signature_break_attestation: bool = False,
 ) -> dict[str, Any]:
-    """Inspect -> clean -> store original + derivative write-once + manifest.
+    """Inspect -> plan -> apply -> verify -> store write-once + manifest.
 
-    Layout: ``{out_dir}/original/{name}``, ``{out_dir}/derivative/
+    Product path (PR 13): the derivative is produced by
+    ``policies.apply_actions`` under ``policy_id``, gated by
+    ``verify.verify_derivative`` BEFORE anything is written. A failed gate
+    or refused plan raises and leaves ``out_dir`` untouched. Layout:
+    ``{out_dir}/original/{name}``, ``{out_dir}/derivative/
     {stem}.{policy}.{ext}``, ``{out_dir}/manifest.json``. Never touches
-    ``src``; refuses when a bundle path would resolve onto the input file.
-    Re-running into the same bundle is idempotent only when every stored
-    byte matches (write-once), otherwise :class:`CustodyError` is raised.
+    ``src``; refuses any bundle path resolving onto the input. Re-running a
+    completed job with identical inputs short-circuits on the existing
+    manifest; conflicting content raises :class:`CustodyError`.
     """
     import custody as custody_mod
+    from policies import PolicyError, apply_actions, plan_actions
+    from verify import verify_derivative
 
     src = Path(src)
     if not src.is_file():
@@ -575,14 +580,25 @@ def clean_to_bundle(
     data = src.read_bytes()
 
     result = inspect_bytes(data, src.name)
-    cleaned, meta = clean_bytes(
+    try:
+        plan = plan_actions(
+            result,
+            policy_id,
+            signature_break_attestation=signature_break_attestation,
+        )
+        cleaned, records = apply_actions(data, plan)
+    except PolicyError as e:
+        raise custody_mod.CustodyError(f"plan refused: {e}") from e
+
+    verification = verify_derivative(
         data,
-        src.name,
-        options={
-            "also_layer_a_text": also_layer_a_text,
-            "layer_a_scope": layer_a_scope,
-        },
+        cleaned,
+        plan,
+        pre_present=set(plan.present_subtypes),
     )
+    if not verification["pass"]:
+        failed = [c["name"] for c in verification["checks"] if not c["pass"]]
+        raise custody_mod.CustodyError(f"verification failed: {', '.join(failed)}")
 
     original_path, _orig_created = custody_mod.write_once(
         out_dir / "original" / src.name, data
@@ -601,23 +617,9 @@ def clean_to_bundle(
         except OSError:
             continue
 
-    post = inspect_bytes(cleaned, deriv_rel)
-    verification: dict[str, Any] = {
-        "reinspect_findings": post.findings,
-        "exit_code": clean_exit_code({"kind": post.kind, **post.report}),
-        "bytes_in": len(data),
-        "bytes_out": len(cleaned),
-    }
-
-    actions = list(meta.get("actions") or [])
-    stats = meta.get("stats")
-    if not actions and isinstance(stats, dict) and (
-        stats.get("removed_count") or stats.get("replaced_count")
-    ):
-        actions.append(
-            f"text: removed={stats.get('removed_count', 0)}"
-            f" replaced={stats.get('replaced_count', 0)}"
-        )
+    actions = [
+        f"{r.subtype}:{r.action}: {r.detail}" for r in records
+    ] or list(result.findings)  # keep-all plans still show what was seen
 
     proc = _processor()
     processor_dict: dict[str, Any] = {
@@ -649,7 +651,7 @@ def clean_to_bundle(
                 "derivative": str(derivative_path),
                 "manifest": str(manifest_path),
                 "manifest_data": existing,
-                "clean_report": meta,
+                "verification": verification,
             }
 
     manifest = custody_mod.emit_manifest(
@@ -675,5 +677,5 @@ def clean_to_bundle(
         "derivative": str(derivative_path),
         "manifest": str(manifest_path),
         "manifest_data": manifest,
-        "clean_report": meta,
+        "verification": verification,
     }

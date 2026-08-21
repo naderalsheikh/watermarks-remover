@@ -914,6 +914,34 @@ Rebrand copy; stop implicit `detect: true`. Operator packaging is already the v1
 
 Library + findings + legal inspectors + policies + custody + re-inspect. CLI is the test harness (`make test`).
 
+#### Engine MVP implementation status (PRs 1–13 — complete)
+
+All thirteen PRs are implemented and gated by the full suite (`775` tests). Actual landing points, including honest deviations from the outlines above:
+
+| PR | Landed in |
+| --- | --- |
+| 1 engine contract | `engine_api.py` (`inspect_bytes`, `clean_bytes`, exit codes) |
+| 2 rebrand | `server.py`, `ui.html` (CounselClear; no implicit detect) |
+| 3 findings schema | `findings.py`, `schemas/finding.schema.json`, JPEG/TIFF GPS detection |
+| 4 refuse list | `container_meta.container_clean_refusal` (macros, signatures, encrypted OOXML) |
+| 5 PDF legal | `pdf_legal.py`, second `qpdf --remove-info` pass, producer allowlist |
+| 6 DOCX legal | comments, Accept All via stdlib ET, embeddings, quote-tolerant Content_Types prune |
+| 7 XLSX legal | hidden sheets flag-only, external links, named ranges, persons part |
+| 8 PPTX legal | notes/comments strip, hidden slides flag-only |
+| 9 reviewer diff | `text_unicode.diff_entries`, `ooxml_review_diff`, non-body Layer A switch (`layer_a_scope`) |
+| 10 corpus | `tests/fixtures/legal/` generator + golden inspect snapshots + sharing-clean invariants |
+| 11 policy engine | `policies.py`: four frozen policies, decision/attestation gating, `apply_actions` composition, privacy field list + PII regex |
+| 12 custody | `custody.py` write-once (O_EXCL + 0444), `emit_manifest`, `clean_to_bundle` |
+| 13 verification | `verify.py` (`verify_derivative`): targeted-subtype re-inspect gate, format sniffing, policy-scoped structural invariants, privacy body-diff; wired into `clean_to_bundle` before any write |
+
+Deviations worth knowing:
+
+- `verify_derivative` lives in its own module (spec sketch said `engine_api.verify_derivative`); `clean_to_bundle` runs plan → apply → **verify** → write-once, so a failed gate leaves the bundle untouched.
+- Format validation is magic-byte + zip-integrity + `[Content_Types].xml` presence + header-parsed image dimensions; `qpdf --check` and PDF raster compare remain future work (PR 14).
+- Unimplemented PDF content strips (JS actions, annots, attachments, AcroForm fields) raise `PolicyError` instead of shipping a silently partial derivative.
+- Product bundling has no `--in-place`; prototype `clean_file.py` keeps it for legacy tests, per the migration rule above.
+
+
 ### Phase 2 — Product MVP (PRs 15–18)
 
 FastAPI, local auth, matter ACL, workers, malware, bundle download. Visual compare warn (PR 14) may land in parallel but stays flag-off.
