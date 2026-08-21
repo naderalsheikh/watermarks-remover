@@ -41,7 +41,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from functools import cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,20 +50,14 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from av_meta import clean_av, inspect_av
 from common import (
     MAX_INPUT_BYTES,
     eprint,
-    looks_binary,
     subprocess_preexec_fn,
     which,
 )
-from container_meta import clean_container, extract_ooxml_plaintext, inspect_container
-from format_dispatch import classify_bytes
-from image_meta import clean_image, inspect_image, run_synthid_score
-from score_stylometry import score_text_stylometry
-from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
-from text_unicode import clean_text, inspect_text
+from engine_api import clean_bytes, detect_bytes, inspect_http
+from text_detectors import detector_status
 
 VERSION = os.environ.get("WATERMARKS_SERVER_VERSION", "dev")
 
@@ -549,19 +542,6 @@ def _safe_name(name: str) -> str:
     return base
 
 
-def _tmp_path(tmpdir: Path, *parts: str) -> Path:
-    """Join *parts* under *tmpdir* and refuse anything that escapes it.
-
-    Defense-in-depth for the CodeQL "uncontrolled data in path expression"
-    findings: even if a caller slips a separator through, the write can never
-    land outside the request temp dir.
-    """
-    path = tmpdir.joinpath(*parts)
-    if path.parent != tmpdir:
-        raise ValueError("unsafe filename")
-    return path
-
-
 def _decode_input(body: dict[str, Any]) -> tuple[bytes, str]:
     raw = body.get("file")
     if not isinstance(raw, str):
@@ -630,254 +610,19 @@ def _batch_items(
     return items
 
 
-def _body_text(data: bytes, name: str, kind: str) -> str | None:
-    """Plain wording for sampling-watermark detectors (not a full renderer)."""
-    if kind == "text":
-        if looks_binary(data):
-            return None
-        return data.decode("utf-8", errors="surrogateescape")
-    if kind == "container":
-        from container_meta import detect_container_format
-
-        fmt = detect_container_format(Path(name or "input"), data)
-        if fmt in ("docx", "xlsx", "pptx"):
-            text = extract_ooxml_plaintext(data, fmt)
-            return text or None
-        if fmt in ("markdown", "html"):
-            return data.decode("utf-8", errors="surrogateescape")
-    return None
-
-
-def _wording_detections(text: str) -> list[dict[str, Any]]:
-    detections = run_all_text_detectors(text)
-    s_rep = score_text_stylometry(text, path="<wording>")
-    detections.append({"detector": "stylometry", "available": True, **s_rep.to_dict()})
-    return detections
-
-
 def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]:
-    kind = classify_bytes(data, Path(name).suffix)
-    if kind == "unknown":
-        return {
-            "ok": True,
-            "kind": "unknown",
-            "report": {"note": "unrecognized format; use a filename with a known extension"},
-            "suspicious": False,
-        }
-    with tempfile.TemporaryDirectory(prefix="wm-inspect-") as tmp:
-        path = _tmp_path(Path(tmp), name or "input")
-        path.write_bytes(data)
-        if kind == "text":
-            if looks_binary(data):
-                raise ValueError(
-                    "refusing to inspect bytes that look like a binary container as text"
-                )
-            raw_text = data.decode("utf-8", errors="surrogateescape")
-            report = inspect_text(raw_text).to_dict()
-            s_rep = score_text_stylometry(raw_text, path=name or "<text>")
-            report["stylometry"] = s_rep.to_dict()
-            if run_detect:
-                report["text_detectors"] = run_all_text_detectors(raw_text)
-        elif kind == "image":
-            report = inspect_image(path).to_dict()
-        elif kind == "av":
-            report = inspect_av(path).to_dict()
-        else:
-            report = inspect_container(path).to_dict()
-            fmt = report.get("format")
-            if fmt in ("docx", "xlsx", "pptx"):
-                body_text = extract_ooxml_plaintext(data, fmt)
-                if body_text.strip():
-                    report["stylometry"] = score_text_stylometry(
-                        body_text, path=name or "<container>"
-                    ).to_dict()
-                    report["body_chars"] = len(body_text)
-                    report["body_words"] = report["stylometry"].get("word_count")
-                    if run_detect:
-                        report["text_detectors"] = run_all_text_detectors(body_text)
-    body = _body_text(data, name, kind)
-    if body:
-        report.setdefault("body_chars", len(body))
-        report.setdefault("body_words", len(body.split()))
-        report["body_preview"] = body[:600]
-        if "stylometry" not in report:
-            report["stylometry"] = score_text_stylometry(
-                body, path=name or "<text>"
-            ).to_dict()
-        if run_detect and "text_detectors" not in report:
-            report["text_detectors"] = run_all_text_detectors(body)
-    detected_wm = any(
-        entry.get("available") and entry.get("is_watermarked")
-        for entry in report.get("text_detectors") or []
-    )
-    suspicious = (
-        bool(report.get("suspicious_total"))
-        or bool(report.get("has_c2pa") or report.get("has_ai_metadata"))
-        or bool(report.get("stylometry", {}).get("score", 0.0) >= 0.65)
-        or detected_wm
-    )
-    return {"ok": True, "kind": kind, "report": report, "suspicious": suspicious}
+    return inspect_http(data, name, run_detect)
 
 
 def _detect_payload(data: bytes, name: str) -> dict[str, Any]:
-    kind = classify_bytes(data, Path(name).suffix)
-    with tempfile.TemporaryDirectory(prefix="wm-detect-") as tmp:
-        path = _tmp_path(Path(tmp), name or "input")
-        path.write_bytes(data)
-        if kind == "text":
-            if looks_binary(data):
-                raise ValueError(
-                    "refusing to detect bytes that look like a binary container as text"
-                )
-            raw_text = data.decode("utf-8", errors="surrogateescape")
-            detections: list[dict[str, Any]] = run_all_text_detectors(raw_text)
-            s_rep = score_text_stylometry(raw_text, path=name or "<text>")
-            detections.append({"detector": "stylometry", "available": True, **s_rep.to_dict()})
-            return {"ok": True, "kind": kind, "detections": detections}
-        elif kind == "image":
-            score = run_synthid_score(path)
-            if score is None:
-                score = {
-                    "detector": "synthid",
-                    "available": False,
-                    "error": (
-                        "no SynthID scorer configured (set "
-                        "WATERMARKS_SYNTHID_SCORER_URL or REVERSE_SYNTHID_DIR)"
-                    ),
-                }
-            else:
-                score.setdefault("detector", "synthid")
-            detections = [score]
-            return {"ok": True, "kind": kind, "detections": detections}
-        elif kind == "av":
-            return {
-                "ok": True,
-                "kind": kind,
-                "detections": [],
-                "report": inspect_av(path).to_dict(),
-            }
-        else:
-            report = inspect_container(path).to_dict()
-            body = _body_text(data, name, kind)
-            detections = _wording_detections(body) if body else []
-            if not detections:
-                detections = [
-                    {
-                        "detector": "wording",
-                        "available": False,
-                        "error": "no extractable body text for sampling-watermark detectors",
-                    }
-                ]
-            return {
-                "ok": True,
-                "kind": kind,
-                "detections": detections,
-                "report": report,
-            }
+    return detect_bytes(data, name)
 
 
 def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str, Any]:
-    kind = classify_bytes(data, Path(name).suffix)
-    if kind == "unknown":
-        raise ValueError(
-            "unrecognized file format; use a filename with a known extension "
-            "(e.g. notes.txt) or a supported image/container name"
-        )
-
-    with tempfile.TemporaryDirectory(prefix="wm-clean-") as tmp:
-        tmpdir = Path(tmp)
-        src = _tmp_path(tmpdir, name or "input")
-        src.write_bytes(data)
-        if kind == "text":
-            if looks_binary(data):
-                raise ValueError(
-                    "refusing to clean bytes that look like a binary container as text"
-                )
-            text = data.decode("utf-8", errors="surrogateescape")
-            detect_before = bool(options.get("detect_before"))
-            detect_after = bool(options.get("detect_after"))
-            detector_reports: dict[str, Any] = {}
-            if detect_before:
-                detector_reports["before"] = run_text_detectors(text)
-            cleaned, stats = clean_text(
-                text,
-                nfkc=bool(options.get("nfkc")),
-                aggressive_homoglyphs=bool(options.get("aggressive_homoglyphs")),
-            )
-            if detect_after:
-                detector_reports["after"] = run_text_detectors(cleaned)
-            cleaned_bytes = cleaned.encode("utf-8", errors="surrogateescape")
-            report: dict[str, Any] = {"kind": "text", "stats": stats, "length": len(cleaned)}
-            if detector_reports:
-                report["text_detectors"] = detector_reports
-        elif kind == "image":
-            ext = Path(name).suffix
-            if not ext:
-                from image_meta import detect_format
-
-                fmt_name = detect_format(data)
-                ext = f".{fmt_name}" if fmt_name != "unknown" else ".png"
-            dest = _tmp_path(tmpdir, f"out{ext}")
-            strip_all = not bool(options.get("keep_non_ai_metadata"))
-            if "strip_all_metadata" in options:
-                strip_all = bool(options["strip_all_metadata"])
-            remove_pixel = options.get("remove_pixel")
-            if remove_pixel not in (None, "ctrlregen", "diffusion"):
-                raise ValueError("remove_pixel must be one of: ctrlregen, diffusion")
-            result = clean_image(
-                src,
-                dest,
-                strip_all_metadata=strip_all,
-                remove_pixel=remove_pixel,
-            )
-            if bool(options.get("detect_before")) and result.get("synthid_before") is None:
-                result["synthid_before"] = run_synthid_score(src)
-            if bool(options.get("detect_after")) and result.get("synthid_after") is None:
-                result["synthid_after"] = run_synthid_score(dest)
-            cleaned_bytes = dest.read_bytes()
-            report = {"kind": "image", **result}
-        elif kind == "av":
-            dest = _tmp_path(tmpdir, f"out{Path(name).suffix or '.bin'}")
-            strip_all = not bool(options.get("keep_non_ai_metadata"))
-            if "strip_all_metadata" in options:
-                strip_all = bool(options["strip_all_metadata"])
-            result = clean_av(src, dest, strip_all_metadata=strip_all)
-            cleaned_bytes = dest.read_bytes()
-            report = {"kind": "av", **result}
-        else:
-            ext = Path(name).suffix
-            container_fmt = None
-            if not ext:
-                from container_meta import detect_container_format
-
-                container_fmt = detect_container_format(Path("input"), data)
-                ext_map = {
-                    "svg": ".svg",
-                    "pdf": ".pdf",
-                    "docx": ".docx",
-                    "xlsx": ".xlsx",
-                    "pptx": ".pptx",
-                    "odt": ".odt",
-                    "epub": ".epub",
-                    "html": ".html",
-                    "markdown": ".md",
-                }
-                ext = ext_map.get(container_fmt, "")
-            dest = _tmp_path(tmpdir, f"out{ext}")
-            result = clean_container(
-                src,
-                dest,
-                fmt=container_fmt,
-                also_layer_a_text=bool(options.get("also_layer_a_text", True)),
-            )
-            cleaned_bytes = dest.read_bytes()
-            report = {"kind": "container", **result}
-        report.pop("input", None)
-        report.pop("output", None)
-
+    cleaned_bytes, report = clean_bytes(data, name, options)
     return {
         "ok": True,
-        "kind": kind,
+        "kind": report["kind"],
         "cleaned": base64.b64encode(cleaned_bytes).decode("ascii"),
         "report": report,
     }

@@ -11,6 +11,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import clean_file
 import clean_image
+import engine_api
 
 
 def _container_result(dest: Path, residual: bool, degraded: bool = False) -> dict:
@@ -33,7 +34,7 @@ def _run_clean_file(monkeypatch, tmp_path, *, json_flag, residual, degraded=Fals
     src.write_text("---\ngenerator: Claude\n---\nhi\n", encoding="utf-8")
     dest = tmp_path / "x.cleaned.md"
     monkeypatch.setattr(
-        clean_file, "clean_container", lambda *a, **k: _container_result(dest, residual, degraded)
+        engine_api, "clean_container", lambda *a, **k: _container_result(dest, residual, degraded)
     )
     argv = ["clean_file.py", str(src), "-o", str(dest)]
     if json_flag:

@@ -10,7 +10,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from av_meta import clean_av
 from common import (
     MAX_INPUT_BYTES,
     ROUTER_ADVICE,
@@ -18,12 +17,10 @@ from common import (
     cleaned_path,
     eprint,
     guard_binary,
-    safe_write_text,
 )
-from container_meta import clean_container, detect_container_format
+from container_meta import detect_container_format
+from engine_api import clean_exit_code, clean_path
 from format_dispatch import classify
-from image_meta import clean_image
-from text_unicode import clean_text
 
 
 def main() -> int:
@@ -104,81 +101,62 @@ def main() -> int:
         src = args.path
         dest = args.output or cleaned_path(args.path)
 
+    text = raw.decode("utf-8", errors="surrogateescape") if raw is not None else None
     if kind == "text":
-        text = raw.decode("utf-8", errors="surrogateescape")
-        cleaned, stats = clean_text(
-            text,
+        result = clean_path(
+            src,
+            dest,
+            kind="text",
             nfkc=args.nfkc,
             aggressive_homoglyphs=args.aggressive_homoglyphs,
+            text=text,
+            input_path=args.path,
         )
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        safe_write_text(dest, cleaned)
-        result = {
-            "kind": "text",
-            "input": str(args.path),
-            "output": str(dest),
-            "stats": stats,
-        }
         if args.json:
             print(json.dumps(result, indent=2, ensure_ascii=False))
         else:
+            stats = result["stats"]
             eprint(
                 f"wrote {dest} removed={stats['removed_count']} replaced={stats['replaced_count']}"
             )
-        return 0
-
-    if kind == "image":
-        try:
-            result = clean_image(
-                src,
-                dest,
-                strip_all_metadata=not args.keep_non_ai_metadata,
-            )
-        except Exception as e:
-            eprint(f"error: {e}")
-            return 1
-        result = {"kind": "image", **result}
-        residual = result["still_has_c2pa"] or result["still_has_ai_metadata"]
-        if args.json:
-            print(json.dumps(result, indent=2))
-        else:
-            eprint(f"wrote {result['output']} ({result['bytes_in']} -> {result['bytes_out']})")
-            for a in result["actions"]:
-                eprint(f"  - {a}")
-            if residual:
-                eprint("warning: residual C2PA/AI signals may remain")
-        return 1 if residual else 0
-
-    if kind == "av":
-        try:
-            result = clean_av(
-                src,
-                dest,
-                strip_all_metadata=not args.keep_non_ai_metadata,
-            )
-        except Exception as e:
-            eprint(f"error: {e}")
-            return 1
-        result = {"kind": "av", **result}
-        residual = result["still_has_c2pa"] or result["still_has_ai_metadata"]
-        if args.json:
-            print(json.dumps(result, indent=2))
-        else:
-            eprint(f"wrote {result['output']} ({result['bytes_in']} -> {result['bytes_out']})")
-            for a in result["actions"]:
-                eprint(f"  - {a}")
-            if residual:
-                eprint("warning: residual C2PA/AI signals may remain")
-        return 1 if residual else 0
+        return clean_exit_code(result)
 
     try:
-        result = clean_container(src, dest, fmt=container_fmt)
+        result = clean_path(
+            src,
+            dest,
+            kind=kind,  # type: ignore[arg-type]
+            container_fmt=container_fmt,
+            keep_non_ai_metadata=args.keep_non_ai_metadata,
+            input_path=args.path,
+        )
     except Exception as e:
         eprint(f"error: {e}")
         return 1
-    result = {"kind": "container", **result}
+
     residual = result["still_has_c2pa"] or result["still_has_ai_metadata"]
-    degraded = bool(result.get("meta", {}).get("degraded"))
+    if kind == "image":
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            eprint(f"wrote {result['output']} ({result['bytes_in']} -> {result['bytes_out']})")
+            for a in result["actions"]:
+                eprint(f"  - {a}")
+            if residual:
+                eprint("warning: residual C2PA/AI signals may remain")
+        return clean_exit_code(result)
+
+    if kind == "av":
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            eprint(f"wrote {result['output']} ({result['bytes_in']} -> {result['bytes_out']})")
+            for a in result["actions"]:
+                eprint(f"  - {a}")
+            if residual:
+                eprint("warning: residual C2PA/AI signals may remain")
+        return clean_exit_code(result)
+
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
@@ -190,7 +168,7 @@ def main() -> int:
             for f in result.get("post_findings") or []:
                 eprint(f"  ! {f}")
     # A degraded (best-effort) PDF copy warns but is not a hard failure.
-    return 1 if (residual and not degraded) else 0
+    return clean_exit_code(result)
 
 
 if __name__ == "__main__":
