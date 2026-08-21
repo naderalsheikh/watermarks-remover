@@ -889,6 +889,18 @@ DOCX_SCRUB_FIELDS = (
     ("Manager", "Manager"),
 )
 
+_PRIVACY_PROP_FIELDS = (
+    ("dc:creator", "dc:creator"),
+    ("cp:lastModifiedBy", "cp:lastModifiedBy"),
+    ("Company", "Company"),
+    ("Manager", "Manager"),
+)
+
+_PII_VALUE_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+    r"|\+?\d[\d\s().-]{7,}\d"
+)
+
 
 def _zip_namelist(data: bytes) -> list[str]:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -1543,6 +1555,9 @@ def _scrub_ooxml_zip(
     *,
     also_layer_a_text: bool = True,
     layer_a_scope: str = "body",
+    prop_fields: tuple[tuple[str, str], ...] | None = None,
+    drop_custom_xml: bool = True,
+    pii_blank_extra: bool = False,
 ) -> tuple[bytes, list[str]]:
     actions: list[str] = []
     budget = [0]
@@ -1592,18 +1607,19 @@ def _scrub_ooxml_zip(
                 continue
 
             # 2. Drop customXml trees
-            if name.startswith("customXml/"):
+            if drop_custom_xml and name.startswith("customXml/"):
                 actions.append(f"drop part {name}")
                 continue
 
             # 3. docProps/ provenance
             if name in DOCX_META_PARTS or name.startswith("docProps/"):
-                if name.endswith("custom.xml"):
+                if drop_custom_xml and name.endswith("custom.xml"):
                     actions.append(f"drop part {name}")
                     continue
+                fields = DOCX_SCRUB_FIELDS if prop_fields is None else prop_fields
                 text = raw.decode("utf-8", errors="replace")
                 new = text
-                for tag, label in DOCX_SCRUB_FIELDS:
+                for tag, label in fields:
                     open_re = re.compile(rf"<{tag}\b[^>]*>", re.I)
                     close_re = re.compile(rf"</{tag}>", re.I)
                     out = []
@@ -1619,6 +1635,20 @@ def _scrub_ooxml_zip(
                     if n:
                         out.append(new[last:])
                         new = "".join(out)
+                if pii_blank_extra:
+                    listed = {tag for tag, _ in fields}
+                    for tag, label in DOCX_SCRUB_FIELDS:
+                        if tag in listed:
+                            continue
+                        open_re = re.compile(rf"<{tag}\b[^>]*>(.*?)</{tag}>", re.I | re.S)
+                        for m in open_re.finditer(new):
+                            if _PII_VALUE_RE.search(m.group(1)):
+                                new = (
+                                    new[: m.start()]
+                                    + open_re.sub(rf"<{tag}></{tag}>", m.group(0), count=1)
+                                    + new[m.end() :]
+                                )
+                                actions.append(f"scrub {name} field {label} (PII match)")
                 raw = new.encode("utf-8")
 
             # 4. [Content_Types].xml overrides
@@ -1629,7 +1659,7 @@ def _scrub_ooxml_zip(
                     "",
                     text,
                 )
-                if n:
+                if n and drop_custom_xml:
                     actions.append(f"drop Content_Types customXml overrides x{n}")
                     raw = new.encode("utf-8")
                 new, n = re.subn(
@@ -1637,7 +1667,7 @@ def _scrub_ooxml_zip(
                     "",
                     raw.decode("utf-8", errors="replace"),
                 )
-                if n:
+                if n and drop_custom_xml:
                     actions.append(f"drop Content_Types custom.xml override x{n}")
                     raw = new.encode("utf-8")
 
@@ -1802,7 +1832,11 @@ def _prune_ooxml_overrides(text: str, dropped_names: set[str]) -> tuple[str, int
 
 
 def _docx_legal_clean(
-    data: bytes, *, accept_all: bool = True, strip_embeddings: bool = False
+    data: bytes,
+    *,
+    accept_all: bool = True,
+    strip_embeddings: bool = False,
+    strip_comments: bool = True,
 ) -> tuple[bytes, list[str]]:
     """Sharing-path DOCX legal pass; runs before ``_scrub_ooxml_zip``.
 
@@ -1820,7 +1854,7 @@ def _docx_legal_clean(
         for info in zin.infolist():
             _check_zip_budget(info, budget)
             name = info.filename
-            if name in _DOCX_COMMENT_PARTS:
+            if strip_comments and name in _DOCX_COMMENT_PARTS:
                 actions.append(f"drop part {name}")
                 dropped.add(name)
                 continue
@@ -1878,13 +1912,26 @@ def clean_docx(
     also_layer_a_text: bool = True,
     accept_all: bool = True,
     strip_embeddings: bool = False,
+    strip_comments: bool = True,
     layer_a_scope: str = "body",
+    prop_fields: tuple[tuple[str, str], ...] | None = None,
+    drop_custom_xml: bool = True,
+    pii_blank_extra: bool = False,
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _docx_legal_clean(
-        data, accept_all=accept_all, strip_embeddings=strip_embeddings
+        data,
+        accept_all=accept_all,
+        strip_embeddings=strip_embeddings,
+        strip_comments=strip_comments,
     )
     data, scrub_actions = _scrub_ooxml_zip(
-        data, "docx", also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+        data,
+        "docx",
+        also_layer_a_text=also_layer_a_text,
+        layer_a_scope=layer_a_scope,
+        prop_fields=prop_fields,
+        drop_custom_xml=drop_custom_xml,
+        pii_blank_extra=pii_blank_extra,
     )
     return data, legal_actions + scrub_actions
 
@@ -1979,12 +2026,21 @@ def clean_xlsx(
     strip_comments: bool = True,
     strip_external_links: bool = True,
     layer_a_scope: str = "body",
+    prop_fields: tuple[tuple[str, str], ...] | None = None,
+    drop_custom_xml: bool = True,
+    pii_blank_extra: bool = False,
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _xlsx_legal_clean(
         data, strip_comments=strip_comments, strip_external_links=strip_external_links
     )
     data, scrub_actions = _scrub_ooxml_zip(
-        data, "xlsx", also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+        data,
+        "xlsx",
+        also_layer_a_text=also_layer_a_text,
+        layer_a_scope=layer_a_scope,
+        prop_fields=prop_fields,
+        drop_custom_xml=drop_custom_xml,
+        pii_blank_extra=pii_blank_extra,
     )
     return data, legal_actions + scrub_actions
 
@@ -2218,12 +2274,21 @@ def clean_pptx(
     strip_notes: bool = True,
     strip_comments: bool = True,
     layer_a_scope: str = "body",
+    prop_fields: tuple[tuple[str, str], ...] | None = None,
+    drop_custom_xml: bool = True,
+    pii_blank_extra: bool = False,
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _pptx_legal_clean(
         data, strip_notes=strip_notes, strip_comments=strip_comments
     )
     data, scrub_actions = _scrub_ooxml_zip(
-        data, "pptx", also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+        data,
+        "pptx",
+        also_layer_a_text=also_layer_a_text,
+        layer_a_scope=layer_a_scope,
+        prop_fields=prop_fields,
+        drop_custom_xml=drop_custom_xml,
+        pii_blank_extra=pii_blank_extra,
     )
     return data, legal_actions + scrub_actions
 
@@ -2680,6 +2745,11 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
         )
     legal = pdf_legal.scan_pdf_legal(structured)
     findings.extend(pdf_legal.legal_findings(legal))
+    if _PDF_SIG_FLAGS_RE.search(data) or _PDF_BYTE_RANGE_RE.search(data):
+        findings.append("digital_signature: /SigFlags or /ByteRange present")
+        findings.append(
+            "pdf-incremental: signed/incremental structure; rebuild would break signature"
+        )
     tools = run_optional_tools(path)
     ct = tools.get("c2patool") or {}
     if ct.get("has_manifest"):

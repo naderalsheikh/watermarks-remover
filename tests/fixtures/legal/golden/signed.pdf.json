@@ -2,7 +2,9 @@
   "findings": [
     "pdf-structured:ai:Claude",
     "pdf-structured:ai:Anthropic",
-    "pdf-acroform: interactive form present (flag-only in v1)"
+    "pdf-acroform: interactive form present (flag-only in v1)",
+    "digital_signature: /SigFlags or /ByteRange present",
+    "pdf-incremental: signed/incremental structure; rebuild would break signature"
   ],
   "format": "pdf",
   "kind": "container",
@@ -29,11 +31,15 @@
     "findings": [
       "pdf-structured:ai:Claude",
       "pdf-structured:ai:Anthropic",
-      "pdf-acroform: interactive form present (flag-only in v1)"
+      "pdf-acroform: interactive form present (flag-only in v1)",
+      "digital_signature: /SigFlags or /ByteRange present",
+      "pdf-incremental: signed/incremental structure; rebuild would break signature"
     ],
     "findings_confidence": [
       "probable",
       "probable",
+      "informational",
+      "informational",
       "informational"
     ],
     "format": "pdf",
