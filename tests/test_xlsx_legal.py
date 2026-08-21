@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "service" / "scripts"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SCRIPTS))
-
 import pytest
 import xlsx_legal
+from container_meta import clean_xlsx, inspect_container
 
 CONTENT_TYPES_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -76,14 +76,18 @@ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
 
 
 def _xlsx(*members: tuple[str, bytes | str], workbook_xml: str | None = None) -> bytes:
+    member_names = {name for name, _ in members}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", CONTENT_TYPES_XML)
-        zf.writestr("xl/_rels/workbook.xml.rels", WORKBOOK_RELS_XML)
+        if "[Content_Types].xml" not in member_names:
+            zf.writestr("[Content_Types].xml", CONTENT_TYPES_XML)
+        if "xl/_rels/workbook.xml.rels" not in member_names:
+            zf.writestr("xl/_rels/workbook.xml.rels", WORKBOOK_RELS_XML)
         zf.writestr(
             "xl/workbook.xml", workbook_xml if workbook_xml is not None else _workbook_xml()
         )
-        zf.writestr("xl/worksheets/sheet1.xml", SHEET1_XML)
+        if "xl/worksheets/sheet1.xml" not in member_names:
+            zf.writestr("xl/worksheets/sheet1.xml", SHEET1_XML)
         for name, content in members:
             zf.writestr(name, content)
     return buf.getvalue()
@@ -120,6 +124,8 @@ CLEAN_SCAN = {
     "defined_name_count": 0,
     "defined_names_hidden": 0,
     "persons_part": False,
+    "hidden_rows": 0,
+    "hidden_cols": 0,
     "core_info": None,
 }
 
@@ -287,3 +293,160 @@ def test_non_zip_bytes_raise_value_error_with_cause():
 def test_findings_empty_for_clean_scan():
     assert xlsx_legal.legal_findings(xlsx_legal.scan_xlsx_legal(_xlsx())) == []
     assert xlsx_legal.legal_findings(dict(CLEAN_SCAN)) == []
+
+
+# --- hidden rows/cols (PR 7 addition) ------------------------------------------
+
+
+def test_hidden_rows_and_cols_counted():
+    ws = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<cols><col min="2" max="3" width="9" hidden="1"/><col min="5" max="5" width="9"/></cols>'
+        '<sheetData>'
+        '<row r="1"><c r="A1"><v>visible</v></c></row>'
+        '<row r="4" hidden="1"><c r="A4"><v>secret</v></c></row>'
+        '<row r="7" hidden="true"><c r="A7"><v>also</v></c></row>'
+        "</sheetData></worksheet>"
+    )
+    data = _xlsx(("xl/worksheets/sheet1.xml", ws))
+    scan = xlsx_legal.scan_xlsx_legal(data)
+    assert scan["hidden_rows"] == 2
+    assert scan["hidden_cols"] == 1
+
+
+# --- engine wiring: inspect -----------------------------------------------------
+
+
+def _full_xlsx() -> bytes:
+    wb = _workbook_xml(
+        sheets=(
+            '<sheet name="Public" sheetId="1" r:id="rId1"/>'
+            '<sheet name="Secret" sheetId="2" state="hidden" r:id="rId2"/>'
+        ),
+        defined_names='<definedName name="HiddenRange" hidden="1">\'Secret\'!$A$1</definedName>',
+    ) + '<externalReferences><externalReference r:id="rIdX"/></externalReferences>'
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rIdX" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>'
+        "</Relationships>"
+    )
+    ct = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        "<Override PartName='/xl/comments1.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml'/>"
+        "<Override PartName='/xl/externalLinks/externalLink1.xml' ContentType='application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml'/>"
+        "</Types>"
+    )
+    return _xlsx(
+        ("xl/comments1.xml", "<comments><comment ref=\"A1\"/></comments>"),
+        ("xl/threadedComments/threadedComment1.xml", "<threadedComments/>"),
+        ("xl/persons/person.xml", "<persons><person/></persons>"),
+        ("xl/externalLinks/externalLink1.xml", "<externalLink/>"),
+        (
+            "xl/worksheets/sheet1.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<legacyDrawing r:id="rId1"/><sheetData><row r="9" hidden="1"/></sheetData></worksheet>',
+        ),
+        ("xl/_rels/workbook.xml.rels", rels),
+        ("[Content_Types].xml", ct),
+        workbook_xml=wb,
+    )
+
+
+def test_inspect_xlsx_surfaces_legal_findings(tmp_path):
+    p = tmp_path / "t.xlsx"
+    p.write_bytes(_full_xlsx())
+    rep = inspect_container(p).to_dict()
+    scan = rep["details"]["xlsx_legal"]
+    assert scan["hidden_sheets"] == ["Secret"]
+    assert scan["comment_count"] == 1
+    assert scan["external_links"] == 1
+    assert scan["defined_names_hidden"] == 1
+    assert scan["hidden_rows"] == 1
+    joined = "\n".join(rep["findings"])
+    assert "xlsx-hidden-sheets: 1 hidden (0 veryHidden)" in joined
+    assert "xlsx-comments:" in joined
+    assert "xlsx-threaded-comments:" in joined
+    assert "xlsx-external-links:" in joined
+    assert "xlsx-hidden-names:" in joined
+    assert "xlsx-hidden-rows-cols: 1 row(s) 0 col(s)" in joined
+
+
+# --- engine wiring: clean --------------------------------------------------------
+
+
+def test_clean_strips_comments_and_external_links_keeps_visibility(tmp_path):
+    out, actions = clean_xlsx(_full_xlsx())
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        names = zf.namelist()
+        assert "xl/comments1.xml" not in names
+        assert "xl/threadedComments/threadedComment1.xml" not in names
+        assert "xl/persons/person.xml" not in names
+        assert not any(n.startswith("xl/externalLinks") for n in names)
+        wb = zf.read("xl/workbook.xml").decode()
+        sheet = zf.read("xl/worksheets/sheet1.xml").decode()
+        ct = zf.read("[Content_Types].xml").decode()
+        rels = zf.read("xl/_rels/workbook.xml.rels").decode()
+    assert "externalReferences" not in wb
+    assert "legacyDrawing" not in sheet
+    assert "/xl/comments1.xml" not in ct and "externalLink" not in ct
+    # workbook-level dangling relationship to externalLink pruned
+    assert 'Id="rIdX"' not in rels
+    # flag-only: hidden sheet still present, still marked hidden
+    assert any("drop part xl/comments1.xml" in a for a in actions)
+    assert any("externalReferences" in a for a in actions)
+
+    p = tmp_path / "cleaned.xlsx"
+    p.write_bytes(out)
+    scan = xlsx_legal.scan_xlsx_legal(p.read_bytes())
+    assert scan["hidden_sheets"] == ["Secret"]  # never auto-unhide
+    assert scan["comment_part_count"] == 0
+    assert scan["external_links"] == 0
+
+
+def test_clean_xlsx_opt_out_flags_keep_parts():
+    out, _actions = clean_xlsx(_full_xlsx(), strip_comments=False, strip_external_links=False)
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        names = zf.namelist()
+    assert "xl/comments1.xml" in names
+    assert "xl/persons/person.xml" in names
+    assert "xl/externalLinks/externalLink1.xml" in names
+
+
+# --- canonical findings projection ----------------------------------------------
+
+
+def test_findings_project_xlsx_legal_signals(tmp_path):
+    from findings import findings_for_report
+
+    p = tmp_path / "t.xlsx"
+    p.write_bytes(_full_xlsx())
+    rep = inspect_container(p).to_dict()
+    found = findings_for_report("container", rep)
+    by_subtype = {f.subtype: f for f in found}
+    assert {"hidden_structure", "comments_and_notes", "external_links"} <= set(by_subtype)
+    assert by_subtype["hidden_structure"].category == "hidden_structure"
+    assert by_subtype["hidden_structure"].action_recommended == "flag"
+    assert by_subtype["comments_and_notes"].action_recommended == "strip"
+    assert by_subtype["external_links"].risk_level == "high"
+
+
+def test_findings_project_defined_names_and_rows_cols():
+    from findings import findings_for_report
+
+    rep = {
+        "format": "xlsx",
+        "findings": [
+            "xlsx-hidden-names: 2 hidden defined name(s)",
+            "xlsx-hidden-rows-cols: 3 row(s) 1 col(s)",
+        ],
+    }
+    found = {f.subtype: f for f in findings_for_report("container", rep)}
+    assert set(found) == {"defined_names_hidden_range", "hidden_structure"}
+    assert found["defined_names_hidden_range"].risk_level == "low"
+    assert found["defined_names_hidden_range"].confidence == "probable"

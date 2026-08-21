@@ -30,7 +30,8 @@
         "embedded_content",
         "revision_history",
         "active_content",
-        "digital_signature"
+        "digital_signature",
+        "hidden_structure"
       ]
     },
     "subtype": { "type": "string", "minLength": 1 },

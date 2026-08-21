@@ -34,6 +34,7 @@ CATEGORIES = (
     "revision_history",
     "active_content",
     "digital_signature",
+    "hidden_structure",
 )
 
 
@@ -401,6 +402,64 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                     confidence="confirmed",
                     location=FindingLocation(pane="other"),
                     action_recommended="strip",
+                    value_redacted=text,
+                )
+            )
+        elif text.startswith("xlsx-hidden-sheets:") or text.startswith(
+            "xlsx-hidden-rows-cols:"
+        ):
+            out.append(
+                Finding(
+                    category="hidden_structure",
+                    subtype="hidden_structure",
+                    format=fmt,
+                    risk_level="medium",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="hidden"),
+                    content_visible=False,
+                    action_recommended="flag",
+                    action_allowed_by_policy=("flag", "keep"),
+                    value_redacted=text,
+                )
+            )
+        elif text.startswith(("xlsx-comments:", "xlsx-threaded-comments:")):
+            out.append(
+                Finding(
+                    category="embedded_content",
+                    subtype="comments_and_notes",
+                    format=fmt,
+                    risk_level="high",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="comment"),
+                    action_recommended="strip",
+                    value_redacted=text,
+                )
+            )
+        elif text.startswith("xlsx-external-links:"):
+            out.append(
+                Finding(
+                    category="embedded_content",
+                    subtype="external_links",
+                    format=fmt,
+                    risk_level="high",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="metadata"),
+                    action_recommended="strip",
+                    notes="external workbook references disclose other file locations",
+                    value_redacted=text,
+                )
+            )
+        elif text.startswith("xlsx-hidden-names:"):
+            out.append(
+                Finding(
+                    category="hidden_structure",
+                    subtype="defined_names_hidden_range",
+                    format=fmt,
+                    risk_level="low",
+                    confidence="probable",
+                    location=FindingLocation(pane="hidden"),
+                    action_recommended="flag",
+                    action_allowed_by_policy=("flag", "keep"),
                     value_redacted=text,
                 )
             )

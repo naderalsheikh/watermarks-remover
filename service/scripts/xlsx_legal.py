@@ -24,6 +24,8 @@ from typing import Any
 _SHEET_TAG_RE = re.compile(r"<(?:\w+:)?sheet\b[^>]*>", re.IGNORECASE)
 _DEFINED_NAME_TAG_RE = re.compile(r"<(?:\w+:)?definedName\b[^>]*>", re.IGNORECASE)
 _COMMENT_ELEMENT_RE = re.compile(r"<(?:\w+:)?comment(?=[\s/>])", re.IGNORECASE)
+_HIDDEN_ROW_RE = re.compile(r'<(?:\w+:)?row\b[^>]*\bhidden="(?:1|true)"', re.IGNORECASE)
+_HIDDEN_COL_RE = re.compile(r"<(?:\w+:)?col\b[^>]*\bhidden=", re.IGNORECASE)
 
 # Part-name patterns (zip entry paths).
 _WORKBOOK_PART_RE = re.compile(r"^xl/workbook\.xml$", re.IGNORECASE)
@@ -31,9 +33,10 @@ _COMMENTS_PART_RE = re.compile(r"^xl/comments\d*\.xml$", re.IGNORECASE)
 _THREADED_PART_RE = re.compile(r"^xl/threadedComments/[^/]+\.xml$", re.IGNORECASE)
 _EXTERNAL_LINK_PART_RE = re.compile(r"^xl/externalLinks/[^/]+\.xml$", re.IGNORECASE)
 _PERSONS_PART_RE = re.compile(r"^xl/persons/person\.xml$", re.IGNORECASE)
+_WORKSHEET_PART_RE = re.compile(r"^xl/worksheets/sheet\d+\.xml$", re.IGNORECASE)
 _CORE_PART_RE = re.compile(r"^docProps/core\.xml$", re.IGNORECASE)
 
-# Only these members are decompressed; worksheets/sharedStrings can be huge.
+# Only these members are decompressed; sharedStrings can be huge.
 _INTERESTING_PART_RES = (
     _WORKBOOK_PART_RE,
     _CORE_PART_RE,
@@ -41,6 +44,7 @@ _INTERESTING_PART_RES = (
     _THREADED_PART_RE,
     _EXTERNAL_LINK_PART_RE,
     _PERSONS_PART_RE,
+    _WORKSHEET_PART_RE,
 )
 
 _HIDDEN_STATES = {"hidden", "veryhidden"}
@@ -100,6 +104,8 @@ def scan_xlsx_legal(data: bytes) -> dict[str, Any]:
         "defined_name_count": 0,
         "defined_names_hidden": 0,
         "persons_part": False,
+        "hidden_rows": 0,
+        "hidden_cols": 0,
         "core_info": None,
     }
 
@@ -138,6 +144,14 @@ def scan_xlsx_legal(data: bytes) -> dict[str, Any]:
     report["external_links"] = sum(1 for name in members if _EXTERNAL_LINK_PART_RE.match(name))
     report["persons_part"] = any(_PERSONS_PART_RE.match(name) for name in members)
 
+    # Hidden rows/cols: flag-only on sharing (never auto-unhide).
+    for name, blob in members.items():
+        if not _WORKSHEET_PART_RE.match(name):
+            continue
+        text = blob.decode("utf-8", errors="replace")
+        report["hidden_rows"] += len(_HIDDEN_ROW_RE.findall(text))
+        report["hidden_cols"] += len(_HIDDEN_COL_RE.findall(text))
+
     core = next((blob for name, blob in members.items() if _CORE_PART_RE.match(name)), None)
     if core is not None:
         report["core_info"] = xlsx_core_info(core)
@@ -159,4 +173,8 @@ def legal_findings(scan: dict[str, Any]) -> list[str]:
         out.append(f"xlsx-external-links: {scan['external_links']} part(s)")
     if scan["defined_names_hidden"]:
         out.append(f"xlsx-hidden-names: {scan['defined_names_hidden']} hidden defined name(s)")
+    if scan["hidden_rows"] or scan["hidden_cols"]:
+        out.append(
+            f"xlsx-hidden-rows-cols: {scan['hidden_rows']} row(s) {scan['hidden_cols']} col(s)"
+        )
     return out

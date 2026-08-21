@@ -1122,7 +1122,16 @@ def inspect_docx(data: bytes) -> tuple[bool, bool, list[str], dict]:
 
 
 def inspect_xlsx(data: bytes) -> tuple[bool, bool, list[str], dict]:
-    return _inspect_ooxml_zip(data, "xlsx")
+    has_c2pa, has_ai, findings, details = _inspect_ooxml_zip(data, "xlsx")
+    try:
+        import xlsx_legal
+
+        scan = xlsx_legal.scan_xlsx_legal(data)
+        findings.extend(xlsx_legal.legal_findings(scan))
+        details["xlsx_legal"] = scan
+    except ValueError:
+        pass  # base call already reported invalid zip
+    return has_c2pa, has_ai or has_c2pa, findings, details
 
 
 def inspect_pptx(data: bytes) -> tuple[bool, bool, list[str], dict]:
@@ -1857,8 +1866,101 @@ def clean_docx(
     return data, legal_actions + scrub_actions
 
 
-def clean_xlsx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
-    return _scrub_ooxml_zip(data, "xlsx", also_layer_a_text=also_layer_a_text)
+_XLSX_COMMENTS_PART_RE = re.compile(r"^xl/comments\d*\.xml$", re.I)
+_XLSX_LEGACY_DRAWING_RE = re.compile(r"<legacyDrawing\b[^>]*/>")
+_XLSX_EXTERNAL_REFS_RE = re.compile(
+    r"<externalReferences\b[^>]*>.*?</externalReferences>|<externalReferences\b[^>]*/>", re.S
+)
+
+
+def _xlsx_legal_clean(
+    data: bytes, *, strip_comments: bool = True, strip_external_links: bool = True
+) -> tuple[bytes, list[str]]:
+    """Sharing-path XLSX legal pass; runs before ``_scrub_ooxml_zip``.
+
+    Drops the comment family (legacy comments, threadedComments, persons) and
+    externalLinks when asked; removes the in-sheet legacyDrawing anchors and
+    the workbook externalReferences block so the package stays valid. Hidden
+    sheets/rows/cols are flag-only: never auto-unhidden here.
+    """
+    actions: list[str] = []
+    budget = [0]
+    dropped: set[str] = set()
+    kept: list[tuple[zipfile.ZipInfo, bytes]] = []
+    with zipfile.ZipFile(io.BytesIO(data)) as zin:
+        for info in zin.infolist():
+            _check_zip_budget(info, budget)
+            name = info.filename
+            if strip_comments and (
+                _XLSX_COMMENTS_PART_RE.match(name)
+                or name.lower().startswith("xl/threadedcomments/")
+                or name.lower() == "xl/persons/person.xml"
+            ):
+                actions.append(f"drop part {name}")
+                dropped.add(name)
+                continue
+            if strip_external_links and name.lower().startswith("xl/externallinks"):
+                actions.append(f"drop part {name}")
+                dropped.add(name)
+                continue
+            raw = _read_zip_member(zin, info, budget)
+            if name == "xl/workbook.xml":
+                text = raw.decode("utf-8", errors="replace")
+                new, n = _XLSX_EXTERNAL_REFS_RE.subn("", text)
+                if n:
+                    actions.append(f"drop workbook externalReferences x{n}")
+                    text = new
+                raw = text.encode("utf-8")
+            elif name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
+                if strip_comments:
+                    text = raw.decode("utf-8", errors="replace")
+                    new, n = _XLSX_LEGACY_DRAWING_RE.subn("", text)
+                    if n:
+                        actions.append(f"remove legacyDrawing anchors x{n} in {name}")
+                        text = new
+                    raw = text.encode("utf-8")
+            kept.append((info, raw))
+
+        if dropped:
+            kept_names = {info.filename for info, _ in kept}
+            rebuilt: list[tuple[zipfile.ZipInfo, bytes]] = []
+            for info, raw in kept:
+                out_raw = raw
+                if info.filename.endswith(".rels"):
+                    out_raw, n = _prune_dangling_relationships(info.filename, raw, kept_names)
+                    if n:
+                        actions.append(f"prune dangling relationships x{n} in {info.filename}")
+                elif info.filename == "[Content_Types].xml":
+                    new, n = _prune_ooxml_overrides(
+                        raw.decode("utf-8", errors="replace"), dropped
+                    )
+                    if n:
+                        actions.append(f"prune Content_Types overrides x{n}")
+                        out_raw = new.encode("utf-8")
+                rebuilt.append((info, out_raw))
+            kept = rebuilt
+
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for info, raw in kept:
+            zout.writestr(info, raw)
+    if not actions:
+        actions.append("no XLSX legal artifacts found")
+    return out_buf.getvalue(), actions
+
+
+def clean_xlsx(
+    data: bytes,
+    *,
+    also_layer_a_text: bool = True,
+    strip_comments: bool = True,
+    strip_external_links: bool = True,
+) -> tuple[bytes, list[str]]:
+    data, legal_actions = _xlsx_legal_clean(
+        data, strip_comments=strip_comments, strip_external_links=strip_external_links
+    )
+    data, scrub_actions = _scrub_ooxml_zip(data, "xlsx", also_layer_a_text=also_layer_a_text)
+    return data, legal_actions + scrub_actions
 
 
 def clean_pptx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
