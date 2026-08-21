@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://counselclear.local/schemas/finding.schema.json",
+  "title": "CounselClear Finding",
+  "type": "object",
+  "required": [
+    "finding_id",
+    "category",
+    "subtype",
+    "format",
+    "location",
+    "action_recommended",
+    "action_allowed_by_policy",
+    "content_visible",
+    "risk_level",
+    "confidence",
+    "removal_changes_visible_content"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "finding_id": {
+      "type": "string",
+      "pattern": "^f_[0-9a-f]{4}$"
+    },
+    "category": {
+      "enum": [
+        "file_metadata",
+        "invisible_text",
+        "provenance_metadata",
+        "embedded_content",
+        "revision_history",
+        "active_content",
+        "digital_signature"
+      ]
+    },
+    "subtype": { "type": "string", "minLength": 1 },
+    "format": { "type": "string", "minLength": 1 },
+    "field": { "type": ["string", "null"] },
+    "value_redacted": { "type": ["string", "null"] },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pane"],
+      "properties": {
+        "part": { "type": ["string", "null"] },
+        "xpath_or_field": { "type": ["string", "null"] },
+        "page": { "type": ["integer", "null"], "minimum": 0 },
+        "sheet": { "type": ["integer", "null"], "minimum": 0 },
+        "slide": { "type": ["integer", "null"], "minimum": 0 },
+        "offset": { "type": ["integer", "null"], "minimum": 0 },
+        "bbox": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 4,
+              "maxItems": 4
+            }
+          ]
+        },
+        "pane": {
+          "enum": [
+            "body",
+            "comment",
+            "note",
+            "header",
+            "footer",
+            "footnote",
+            "markup",
+            "hidden",
+            "metadata",
+            "other"
+          ]
+        }
+      }
+    },
+    "action_recommended": {
+      "enum": [
+        "keep",
+        "strip",
+        "replace",
+        "rebuild",
+        "sanitize",
+        "refuse",
+        "accept_all",
+        "flag"
+      ]
+    },
+    "action_allowed_by_policy": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "keep",
+          "strip",
+          "replace",
+          "rebuild",
+          "sanitize",
+          "refuse",
+          "accept_all",
+          "flag"
+        ]
+      }
+    },
+    "content_visible": { "type": "boolean" },
+    "risk_level": {
+      "enum": ["critical", "high", "medium", "low", "info"]
+    },
+    "confidence": {
+      "enum": ["confirmed", "probable", "informational", "likely_false_positive"]
+    },
+    "removal_changes_visible_content": { "type": "boolean" },
+    "requires_approval": { "type": "boolean" },
+    "requires_attestation": { "type": "boolean" },
+    "notes": { "type": ["string", "null"] }
+  }
+}

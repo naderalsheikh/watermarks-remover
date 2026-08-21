@@ -163,6 +163,7 @@ class ImageInspectReport:
     tools: dict[str, Any] = field(default_factory=dict)
     synthid: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
+    has_gps: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -175,6 +176,7 @@ class ImageInspectReport:
             "tools": self.tools,
             "synthid": self.synthid,
             "notes": self.notes,
+            "has_gps": self.has_gps,
         }
 
 
@@ -1122,6 +1124,58 @@ def _tiff_entry_payload(data: bytes, ent: dict[str, Any]) -> bytes | None:
     return data[vo : vo + ent["byte_size"]]
 
 
+def _ifds_have_gps(data: bytes) -> bool:
+    """True when any parsed IFD carries a non-empty GPSInfo pointer (tag 34853)."""
+    try:
+        bo, bigtiff, ifds = _parse_tiff_ifds(data)
+    except ValueError:
+        return False
+    off_len = 8 if bigtiff else 4
+    off_fmt = bo + ("Q" if bigtiff else "I")
+    for ifd in ifds.values():
+        for ent in ifd["entries"]:
+            if ent["tag"] != 34853 or not ent["count"]:
+                continue
+            raw = ent["value"][:off_len]
+            if len(raw) == off_len and struct.unpack(off_fmt, raw)[0]:
+                return True
+    return False
+
+
+def _jpeg_has_gps(data: bytes) -> bool:
+    """True when a JPEG APP1 Exif segment contains a GPSInfo IFD."""
+    if not data.startswith(JPEG_SOI):
+        return False
+    i = 2
+    n = len(data)
+    while i + 4 <= n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        while i < n and data[i] == 0xFF:
+            i += 1
+        if i >= n:
+            break
+        marker = data[i]
+        i += 1
+        if marker in (0xD8, 0xD9):
+            continue
+        if marker == 0xDA:  # SOS — Exif only lives before scan data
+            break
+        if marker >= 0xD0 and marker <= 0xD7:
+            continue
+        if i + 2 > n:
+            break
+        seglen = struct.unpack(">H", data[i : i + 2])[0]
+        if seglen < 2 or i + seglen > n:
+            break
+        payload = data[i + 2 : i + seglen]
+        i += seglen
+        if marker == 0xE1 and payload.startswith(b"Exif\x00\x00") and _ifds_have_gps(payload[6:]):
+            return True
+    return False
+
+
 def inspect_tiff(data: bytes) -> tuple[bool, bool, list[str]]:
     """Walk the IFD chains (classic or BigTIFF) and report metadata tags."""
     findings: list[str] = []
@@ -1716,6 +1770,14 @@ def inspect_image(
             "format not fully inspected; only PNG/JPEG/WebP/AVIF/HEIC/BMP/GIF/TIFF are supported"
         )
 
+    has_gps = False
+    if fmt == "jpeg":
+        has_gps = _jpeg_has_gps(data)
+    elif fmt == "tiff":
+        has_gps = _ifds_have_gps(data)
+    if has_gps:
+        findings.append(f"{fmt.upper()} EXIF GPS location data present")
+
     tools = run_optional_tools(path)
     # Elevate flags from tools
     ct = tools.get("c2patool") or {}
@@ -1735,6 +1797,7 @@ def inspect_image(
         tools=tools,
         synthid=run_synthid_score(path, synthid_dir),
         notes=notes,
+        has_gps=has_gps,
     )
 
 
