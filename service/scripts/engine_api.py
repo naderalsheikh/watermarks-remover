@@ -543,3 +543,137 @@ def clean_path(
 
     result = clean_container(src, dest, fmt=container_fmt)
     return {"kind": "container", **result}
+
+
+# --- Custodial bundle (PR 12) ------------------------------------------------
+
+
+def clean_to_bundle(
+    src: Path,
+    out_dir: Path,
+    *,
+    policy_id: str = "external_sharing",
+    operator_id: str | None = None,
+    matter_id: str | None = None,
+    also_layer_a_text: bool = True,
+    layer_a_scope: str = "body",
+) -> dict[str, Any]:
+    """Inspect -> clean -> store original + derivative write-once + manifest.
+
+    Layout: ``{out_dir}/original/{name}``, ``{out_dir}/derivative/
+    {stem}.{policy}.{ext}``, ``{out_dir}/manifest.json``. Never touches
+    ``src``; refuses when a bundle path would resolve onto the input file.
+    Re-running into the same bundle is idempotent only when every stored
+    byte matches (write-once), otherwise :class:`CustodyError` is raised.
+    """
+    import custody as custody_mod
+
+    src = Path(src)
+    if not src.is_file():
+        raise FileNotFoundError(str(src))
+    out_dir = Path(out_dir)
+    data = src.read_bytes()
+
+    result = inspect_bytes(data, src.name)
+    cleaned, meta = clean_bytes(
+        data,
+        src.name,
+        options={
+            "also_layer_a_text": also_layer_a_text,
+            "layer_a_scope": layer_a_scope,
+        },
+    )
+
+    original_path, _orig_created = custody_mod.write_once(
+        out_dir / "original" / src.name, data
+    )
+    deriv_rel = custody_mod.derivative_name(src.name, policy_id)
+    derivative_path, _deriv_created = custody_mod.write_once(
+        out_dir / "derivative" / deriv_rel, cleaned
+    )
+
+    for p in (original_path, derivative_path):
+        try:
+            if p.resolve() == src.resolve():
+                raise custody_mod.CustodyError(
+                    f"bundle path collides with the original input: {p}"
+                )
+        except OSError:
+            continue
+
+    post = inspect_bytes(cleaned, deriv_rel)
+    verification: dict[str, Any] = {
+        "reinspect_findings": post.findings,
+        "exit_code": clean_exit_code({"kind": post.kind, **post.report}),
+        "bytes_in": len(data),
+        "bytes_out": len(cleaned),
+    }
+
+    actions = list(meta.get("actions") or [])
+    stats = meta.get("stats")
+    if not actions and isinstance(stats, dict) and (
+        stats.get("removed_count") or stats.get("replaced_count")
+    ):
+        actions.append(
+            f"text: removed={stats.get('removed_count', 0)}"
+            f" replaced={stats.get('replaced_count', 0)}"
+        )
+
+    proc = _processor()
+    processor_dict: dict[str, Any] = {
+        "git_sha": proc.git_sha,
+        "image_digest": proc.image_digest,
+        "tools": {**proc.tools, **custody_mod.tool_presence()},
+    }
+    orig_sha = custody_mod.sha256_bytes(data)
+    deriv_sha = custody_mod.sha256_bytes(cleaned)
+
+    # Idempotent completion: a manifest already binding these exact hashes
+    # means this exact job finished before; keep the original timestamp.
+    import json as _json
+
+    manifest_path = out_dir / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            existing = _json.loads(manifest_path.read_text())
+        except ValueError:
+            existing = None
+        if (
+            isinstance(existing, dict)
+            and existing.get("original", {}).get("sha256") == orig_sha
+            and existing.get("derivative", {}).get("sha256") == deriv_sha
+        ):
+            return {
+                "bundle": str(out_dir),
+                "original": str(original_path),
+                "derivative": str(derivative_path),
+                "manifest": str(manifest_path),
+                "manifest_data": existing,
+                "clean_report": meta,
+            }
+
+    manifest = custody_mod.emit_manifest(
+        original_name=src.name,
+        original_sha256=orig_sha,
+        original_bytes=len(data),
+        derivative_name_=deriv_rel,
+        derivative_sha256=deriv_sha,
+        derivative_bytes=len(cleaned),
+        policy_id=policy_id,
+        actions=actions,
+        processor=processor_dict,
+        findings_before=result.findings,
+        verification=verification,
+        operator_id=operator_id,
+        matter_id=matter_id,
+    )
+    manifest_path, _m_created = custody_mod.write_manifest(out_dir, manifest)
+
+    return {
+        "bundle": str(out_dir),
+        "original": str(original_path),
+        "derivative": str(derivative_path),
+        "manifest": str(manifest_path),
+        "manifest_data": manifest,
+        "clean_report": meta,
+    }
