@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watermarks remover</title>
+  <style>
+    :root {
+      --bg: #f4f1ea;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --card: #fffcf7;
+      --line: #e7e0d6;
+      --accent: #1d4ed8;
+      --ok: #166534;
+      --warn: #9a3412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    main {
+      max-width: 44rem;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 4rem;
+    }
+    h1 { font-size: 1.5rem; font-weight: 650; margin: 0 0 0.35rem; }
+    .lede { color: var(--muted); margin: 0 0 1.5rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    #drop {
+      border: 1.5px dashed #c4b8a8;
+      border-radius: 10px;
+      padding: 1.75rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      background: #faf7f2;
+    }
+    #drop.drag { background: #eef4ff; border-color: var(--accent); }
+    #drop strong { display: block; margin-bottom: 0.25rem; }
+    #drop span { color: var(--muted); font-size: 0.9rem; }
+    input[type=file] { display: none; }
+    .row { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 1rem; }
+    button {
+      font: inherit;
+      font-weight: 600;
+      border: 0;
+      border-radius: 8px;
+      padding: 0.55rem 1rem;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+    }
+    button.secondary { background: #44403c; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .note {
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin: 0.85rem 0 0;
+    }
+    #status { font-size: 0.9rem; margin: 0.75rem 0 0; min-height: 1.2em; }
+    #status.err { color: var(--warn); }
+    #status.ok { color: var(--ok); }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #1c1917;
+      color: #f5f5f4;
+      border-radius: 8px;
+      padding: 0.9rem 1rem;
+      max-height: 22rem;
+      overflow: auto;
+      margin: 0;
+    }
+    .file { font-weight: 600; margin: 0 0 0.5rem; }
+    a.download {
+      display: inline-block;
+      margin-top: 0.75rem;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .meta { color: var(--muted); font-size: 0.9rem; margin: 0 0 0.9rem; }
+    .group { margin: 0 0 0.9rem; }
+    .group h3 {
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--muted);
+      margin: 0 0 0.45rem;
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+    .dot.hit { background: #c2410c; }
+    .dot.miss { background: #166534; }
+    .dot.na { background: #a8a29e; }
+    .count { font-weight: 600; color: var(--ink); }
+    .item {
+      padding: 0.55rem 0.8rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      margin-bottom: 0.4rem;
+    }
+    .item .t { font-weight: 600; }
+    .item .d { color: var(--muted); font-size: 0.88rem; margin-top: 0.15rem; }
+    .chip {
+      display: inline-block;
+      background: #f5f5f4;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 0 0.55rem;
+      font-size: 0.76rem;
+      font-weight: 500;
+      color: var(--ink);
+      margin: 0.35rem 0.3rem 0 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .tools { font-size: 0.85rem; color: var(--muted); margin-top: 1.25rem; }
+    .verdict {
+      margin-top: 1rem;
+      padding: 0.9rem 1rem;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+    .verdict strong { display: block; font-size: 1.05rem; margin-bottom: 0.45rem; }
+    .verdict.empty { border-color: #a8a29e; }
+    .verdict.found { border-color: #c2410c; background: #fff7ed; }
+    details { margin-top: 0.75rem; color: var(--muted); font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Watermarks remover</h1>
+    <p class="lede">Drop a file. It is analyzed immediately on this Mac. Clean strips hidden Unicode and metadata only — it does not rewrite legal language.</p>
+
+    <div class="card">
+      <label id="drop">
+        <strong>Drop a file here, or click to choose</strong>
+        <span>DOCX, PDF, PNG, JPEG, MD, TXT, HTML, PPTX, XLSX — analysis starts as soon as the file is selected</span>
+        <input id="file" type="file">
+      </label>
+      <div class="row">
+        <button id="inspect" type="button" disabled>Analyze again</button>
+        <button id="clean" type="button" disabled>Clean (lossless)</button>
+        <button id="sample" type="button" class="secondary">Try a sample with a hidden mark</button>
+      </div>
+      <p class="note">Sampling watermarks in wording need the generator’s key. Without it, Analyze still reports Unicode, C2PA, metadata, extracted word count, and stylometry.</p>
+      <p id="status"></p>
+      <div id="verdict" class="verdict" hidden></div>
+    </div>
+
+    <div class="card" id="out" hidden>
+      <p class="file" id="fname"></p>
+      <p class="meta" id="meta"></p>
+      <div id="report-body"></div>
+      <p class="note" id="preview" hidden></p>
+      <details>
+        <summary>Raw report</summary>
+        <pre id="report"></pre>
+      </details>
+      <a class="download" id="dl" hidden></a>
+    </div>
+
+    <p class="tools" id="caps">Checking service…</p>
+  </main>
+  <script>
+    const fileInput = document.getElementById("file");
+    const drop = document.getElementById("drop");
+    const inspectBtn = document.getElementById("inspect");
+    const cleanBtn = document.getElementById("clean");
+    const sampleBtn = document.getElementById("sample");
+    const statusEl = document.getElementById("status");
+    const out = document.getElementById("out");
+    const fname = document.getElementById("fname");
+    const report = document.getElementById("report");
+    const dl = document.getElementById("dl");
+    let chosen = null;
+
+    function setStatus(msg, cls) {
+      statusEl.textContent = msg || "";
+      statusEl.className = cls || "";
+    }
+
+    function setFile(file) {
+      chosen = file;
+      inspectBtn.disabled = !file;
+      cleanBtn.disabled = !file;
+      setStatus(file ? "Analyzing " + file.name + "…" : "", file ? "ok" : "");
+      out.hidden = true;
+      dl.hidden = true;
+      if (file) post("/inspect", { detect: true }).catch((e) => setStatus(String(e), "err"));
+    }
+
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.classList.remove("drag");
+      if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files[0]) setFile(fileInput.files[0]);
+    });
+
+    function toB64(buf) {
+      const bytes = new Uint8Array(buf);
+      let bin = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(bin);
+    }
+
+    function fromB64(b64) {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    function cleanedName(name) {
+      const i = name.lastIndexOf(".");
+      if (i <= 0) return name + ".cleaned";
+      return name.slice(0, i) + ".cleaned" + name.slice(i);
+    }
+
+    function el(tag, cls, text) {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    }
+
+    const DETECTOR_INFO = {
+      markllm: {
+        label: "MarkLLM research harness",
+        skip: "Optional research toolkit, not installed on this machine. Everything else was still checked.",
+      },
+      gumbel: {
+        label: "Gumbel sampling watermark",
+        skip: "No key configured. This check only works on text that was stamped with your own Gumbel key.",
+      },
+      kgw: {
+        label: "Green-list sampling watermark (KGW)",
+        skip: "No key configured. Checking wording for a sampling watermark needs the exact key used when the text was generated.",
+      },
+      "claude-text": {
+        label: "Claude text watermark",
+        skip: "Anthropic has not released a public detection endpoint yet.",
+      },
+    };
+
+    function detectorInfo(d) {
+      const known = DETECTOR_INFO[d.detector] || {};
+      const stats = [];
+      if (d.score != null) stats.push("score " + d.score);
+      if (d.threshold != null && d.available) stats.push("threshold " + d.threshold);
+      if (d.green_fraction != null) stats.push("green tokens " + Math.round(d.green_fraction * 100) + "%");
+      if (d.tokens_scored != null) stats.push(d.tokens_scored + " tokens scored");
+      return {
+        label: known.label || d.detector || "detector",
+        skip: known.skip || d.error || "Not configured.",
+        stats: stats,
+      };
+    }
+
+    function renderGroup(title, cls, items) {
+      if (!items.length) return null;
+      const g = el("div", "group");
+      const h = el("h3");
+      h.appendChild(el("span", "dot " + cls));
+      h.appendChild(document.createTextNode(title + " "));
+      h.appendChild(el("span", "count", "(" + items.length + ")"));
+      g.appendChild(h);
+      items.forEach((it) => {
+        const box = el("div", "item");
+        box.appendChild(el("p", "t", it.t));
+        if (it.d) box.appendChild(el("p", "d", it.d));
+        (it.chips || []).forEach((c) => box.appendChild(el("span", "chip", c)));
+        g.appendChild(box);
+      });
+      return g;
+    }
+
+    function fillSummary(data) {
+      const body = document.getElementById("report-body");
+      const verdict = document.getElementById("verdict");
+      const meta = document.getElementById("meta");
+      const r = data.report || {};
+      const hits = [];
+      const clears = [];
+      const nas = [];
+
+      const words = r.body_words || (r.stylometry && r.stylometry.word_count);
+      meta.textContent = words
+        ? "Read " + words.toLocaleString() + " words from the file body (" + (r.body_chars || "?").toLocaleString() + " characters)."
+        : "No extractable body text (image-only PDF or scan, or unsupported container).";
+
+      const layerA = Number(r.suspicious_total || r.layer_a_total || 0);
+      if (layerA) {
+        hits.push({
+          t: "Invisible Unicode characters \u00d7" + layerA,
+          d: "Zero-width or control characters hidden in the body \u2014 a classic watermark carrier. Clean removes them without changing any visible wording.",
+        });
+      } else {
+        clears.push({ t: "No invisible Unicode", d: "Body text scanned for zero-width and control characters." });
+      }
+
+      if (r.has_c2pa === true) {
+        hits.push({ t: "Content Credentials (C2PA) present", d: "The file carries signed provenance metadata identifying its origin and edits." });
+      } else if (r.has_c2pa === false) {
+        clears.push({ t: "No Content Credentials (C2PA)", d: "No signed provenance manifest found." });
+      }
+
+      if (r.has_ai_metadata === true) {
+        hits.push({ t: "Generator / AI metadata present", d: "File properties name an AI generator or carry generation tooling tags." });
+      } else if (r.has_ai_metadata === false) {
+        clears.push({ t: "No generator / AI metadata", d: "File properties are clean of AI tooling tags." });
+      }
+
+      const sty = r.stylometry && typeof r.stylometry.score === "number" ? r.stylometry.score : null;
+      if (sty !== null) {
+        const styWords = r.stylometry.word_count;
+        if (r.stylometry.status === "insufficient_length" || (styWords != null && styWords < 30)) {
+          nas.push({
+            t: "Prose cadence check skipped",
+            d: "Statistical stylometry needs at least 30 words; this file has " + (styWords != null ? styWords : "too few") + ".",
+          });
+        } else {
+          const markers = (r.stylometry.matched_markers || []).slice(0, 5)
+            .map((m) => (m.phrase || m) + (m.count ? " \u00d7" + m.count : ""));
+          const base = { chips: ["stylometry " + sty.toFixed(2)] };
+          if (sty >= 0.65) {
+            hits.push({
+              ...base,
+              t: "Cadence reads as machine-generated",
+              d: "Stylometric score " + sty.toFixed(2) + " from " + styWords + " words"
+                + (markers.length ? " \u2014 matched phrases: " + markers.join(", ") : "")
+                + ". This measures writing style, not a hidden mark \u2014 treat as a signal, not proof.",
+            });
+          } else {
+            clears.push({
+              ...base,
+              t: "Cadence reads human",
+              d: "Stylometric score " + sty.toFixed(2) + " from " + styWords + " words. Style analysis only \u2014 not a provenance check.",
+            });
+          }
+        }
+      }
+
+      const dets = data.detections || r.text_detectors || [];
+      if (Array.isArray(dets) && dets.length) {
+        dets.forEach((d) => {
+          if (d.detector === "stylometry") return;
+          const info = detectorInfo(d);
+          if (d.available && d.is_watermarked) {
+            hits.push({
+              t: info.label + ": DETECTED",
+              d: "Same-key match \u2014 the wording carries this key's sampling pattern. Valid only against this exact key; not a vendor oracle.",
+              chips: info.stats,
+            });
+          } else if (d.available && d.is_watermarked === false && !d.error) {
+            clears.push({
+              t: info.label + ": no match",
+              d: "Under the configured key the wording looks unmarked. A negative result does not prove the text is unmarked.",
+              chips: info.stats,
+            });
+          } else if (d.available && d.error) {
+            nas.push({ t: info.label + ": not enough text", d: d.error });
+          } else {
+            nas.push({ t: info.label, d: info.skip });
+          }
+        });
+      } else {
+        nas.push({
+          t: "Sampling-watermark checks unavailable",
+          d: "Wording-level watermarks can only be identified with the generator's key. Vendor keys (Claude/Gemini/Grok) are not public.",
+        });
+      }
+
+      if (Array.isArray(r.findings) && r.findings.length) {
+        r.findings.slice(0, 8).forEach((f) => nas.push({ t: "Note", d: f }));
+      }
+
+      body.replaceChildren();
+      [renderGroup("Found", "hit", hits),
+       renderGroup("Checked \u2014 clean", "miss", clears),
+       renderGroup("Couldn\u2019t check", "na", nas)].forEach((g) => { if (g) body.appendChild(g); });
+
+      verdict.hidden = false;
+      verdict.className = "verdict " + (hits.length ? "found" : "empty");
+      const head = el("strong", null, hits.length
+        ? "Found " + hits.length + " verifiable mark" + (hits.length > 1 ? "s" : "")
+        : "Nothing verifiable found");
+      const p = el("p", null, hits.length
+        ? "See \u201cFound\u201d below. Clean (lossless) strips invisible Unicode and metadata only \u2014 it never rewrites wording."
+        : "A real negative on metadata, C2PA, and hidden-character channels. Wording-level sampling watermarks stay invisible without the generator's key.");
+      verdict.replaceChildren(head, p);
+
+      const counts = [
+        hits.length + " found",
+        clears.length + " clean",
+        nas.length + " skipped",
+      ].join(" \u00b7 ");
+      setStatus("Report ready \u2014 " + counts, hits.length ? "err" : "ok");
+    }
+
+    async function post(path, extra) {
+      if (!chosen) return;
+      setStatus("Working…");
+      inspectBtn.disabled = true;
+      cleanBtn.disabled = true;
+      const buf = await chosen.arrayBuffer();
+      const body = { file: toB64(buf), name: chosen.name, ...extra };
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      inspectBtn.disabled = false;
+      cleanBtn.disabled = false;
+      if (!res.ok || data.ok === false) {
+        setStatus(data.error || ("HTTP " + res.status), "err");
+        return;
+      }
+      fname.textContent = chosen.name + (data.kind ? " · " + data.kind : "");
+      fillSummary(data);
+      report.textContent = JSON.stringify(data.report || data, null, 2);
+      const preview = document.getElementById("preview");
+      const excerpt = (data.report && data.report.body_preview) || "";
+      if (excerpt) {
+        preview.hidden = false;
+        preview.textContent = "Extracted text starts: “" + excerpt.replace(/\s+/g, " ").slice(0, 280) + "”";
+      } else {
+        preview.hidden = true;
+        preview.textContent = "";
+      }
+      out.hidden = false;
+      if (data.cleaned) {
+        const blob = new Blob([fromB64(data.cleaned)]);
+        const name = cleanedName(chosen.name);
+        dl.href = URL.createObjectURL(blob);
+        dl.download = name;
+        dl.textContent = "Download " + name;
+        dl.hidden = false;
+        setStatus("Cleaned. Download the copy — original is untouched.", "ok");
+      } else {
+        dl.hidden = true;
+        if (!document.getElementById("verdict").textContent) {
+          setStatus(data.suspicious ? "Verifiable marks found — see the report." : "No verifiable marks.", data.suspicious ? "err" : "ok");
+        }
+      }
+    }
+
+    inspectBtn.addEventListener("click", () => post("/inspect", { detect: true }).catch((e) => setStatus(String(e), "err")));
+    cleanBtn.addEventListener("click", () => post("/clean").catch((e) => setStatus(String(e), "err")));
+    sampleBtn.addEventListener("click", () => {
+      const blob = new Blob(["Hello\u200bWorld — Vendor shall pay 20% under Section 8.3.\n"], { type: "text/plain" });
+      setFile(new File([blob], "sample-hidden-mark.txt", { type: "text/plain" }));
+    });
+
+    fetch("/capabilities")
+      .then((r) => r.json())
+      .then((c) => {
+        const t = c.tools || {};
+        const bits = ["c2patool", "exiftool", "qpdf"].map((k) => k + (t[k] ? " on" : " off"));
+        document.getElementById("caps").textContent = "Service " + (c.version || "") + " · " + bits.join(" · ") + " · loopback only";
+      })
+      .catch(() => {
+        document.getElementById("caps").textContent = "Service not reachable. Start: python3 ~/watermarks-remover/service/scripts/server.py";
+      });
+  </script>
+</body>
+</html>
