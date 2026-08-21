@@ -11,6 +11,7 @@ not replaced. Policy, structured findings, and custody land in later PRs.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import tempfile
 from dataclasses import dataclass, field
@@ -422,6 +423,10 @@ def clean_bytes(
                 detector_reports["after"] = run_text_detectors(cleaned)
             cleaned_bytes = cleaned.encode("utf-8", errors="surrogateescape")
             report: dict[str, Any] = {"kind": "text", "stats": stats, "length": len(cleaned)}
+            if bool(stats.get("removed_count") or stats.get("replaced_count")):
+                from text_unicode import diff_entries
+
+                report["unicode_diff"] = diff_entries(text, cleaned)
             if detector_reports:
                 report["text_detectors"] = detector_reports
         elif kind == "image":
@@ -468,9 +473,22 @@ def clean_bytes(
                 dest,
                 fmt=container_fmt,
                 also_layer_a_text=bool(options.get("also_layer_a_text", True)),
+                layer_a_scope=str(options.get("layer_a_scope", "body")),
             )
             cleaned_bytes = dest.read_bytes()
             report = {"kind": "container", **result}
+            fmt_known = container_fmt
+            if fmt_known is None:
+                with contextlib.suppress(Exception):
+                    fmt_known = detect_container_format(Path("input"), data)
+            if (
+                fmt_known in ("docx", "xlsx", "pptx")
+                and bool(options.get("also_layer_a_text", True))
+                and options.get("review_diff", True)
+            ):
+                from container_meta import ooxml_review_diff
+
+                report["unicode_diff"] = ooxml_review_diff(data, cleaned_bytes, fmt_known)
         report.pop("input", None)
         report.pop("output", None)
 

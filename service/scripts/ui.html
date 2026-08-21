@@ -166,6 +166,10 @@
       <p class="file" id="fname"></p>
       <p class="meta" id="meta"></p>
       <div id="report-body"></div>
+      <details id="diff-block" hidden>
+        <summary>What changed, character by character</summary>
+        <div id="diff-list" class="note"></div>
+      </details>
       <p class="note" id="preview" hidden></p>
       <details>
         <summary>Raw report</summary>
@@ -293,6 +297,41 @@
         g.appendChild(box);
       });
       return g;
+    }
+
+    function renderUnicodeDiff(diff) {
+      const block = document.getElementById("diff-block");
+      const list = document.getElementById("diff-list");
+      if (!diff || !diff.changed_total) { block.hidden = true; list.textContent = ""; return; }
+      const lines = [];
+      for (const p of diff.parts || []) {
+        if (p.removed_part) {
+          lines.push(p.part + " — removed with the part (" + (p.pane || "part") + ")");
+          continue;
+        }
+        for (const e of p.entries || []) {
+          const where = p.part && p.part !== "text" ? " in " + p.part : "";
+          lines.push(
+            (e.action === "replace" ? "Replaced" : "Removed") + " " + e.codepoint +
+            " " + e.label + " @ offset " + e.offset + where +
+            (e.replaced_with ? " → " + e.replaced_with : "")
+          );
+        }
+        if (p.truncated) lines.push("… more changes in " + (p.part || "this part") + " not listed");
+      }
+      if (!lines.length) {
+        // plain-text shape: entries at top level
+        for (const e of diff.entries || []) {
+          lines.push(
+            (e.action === "replace" ? "Replaced" : "Removed") + " " + e.codepoint +
+            " " + e.label + " @ offset " + e.offset +
+            (e.replaced_with ? " → " + e.replaced_with : "")
+          );
+        }
+      }
+      if (diff.truncated && !(diff.parts || []).length) lines.push("… more changes not listed");
+      list.textContent = lines.join("\n");
+      block.hidden = false;
     }
 
     function fillSummary(data) {
@@ -440,6 +479,7 @@
       fname.textContent = chosen.name + (data.kind ? " · " + data.kind : "");
       fillSummary(data);
       report.textContent = JSON.stringify(data.report || data, null, 2);
+      renderUnicodeDiff(data.report && data.report.unicode_diff);
       const preview = document.getElementById("preview");
       const excerpt = (data.report && data.report.body_preview) || "";
       if (excerpt) {

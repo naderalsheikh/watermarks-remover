@@ -1520,8 +1520,29 @@ def _prune_opf_manifest(raw: bytes, opf_name: str, dropped: set[str]) -> tuple[b
     return new.encode("utf-8"), removed[0]
 
 
+def _layer_a_body_part(fmt: str, name: str) -> bool:
+    """True when a package part is *body* for Layer A purposes.
+
+    Composition rule (v1): Layer A runs on a part only when that part's
+    subtype action is strip or accept_all. Kept/flagged parts — headers,
+    footers, footnotes, masters, layouts — stay byte-identical except for
+    Accept All markup resolution.
+    """
+    if fmt == "docx":
+        return name == "word/document.xml"
+    if fmt == "xlsx":
+        return bool(re.match(r"^xl/worksheets/sheet\d+\.xml$", name)) or name == "xl/sharedStrings.xml"
+    if fmt == "pptx":
+        return bool(re.match(r"^ppt/slides/slide\d+\.xml$", name))
+    return True
+
+
 def _scrub_ooxml_zip(
-    data: bytes, fmt: str, *, also_layer_a_text: bool = True
+    data: bytes,
+    fmt: str,
+    *,
+    also_layer_a_text: bool = True,
+    layer_a_scope: str = "body",
 ) -> tuple[bytes, list[str]]:
     actions: list[str] = []
     budget = [0]
@@ -1622,6 +1643,9 @@ def _scrub_ooxml_zip(
 
             # 5. Layer A text runs
             if also_layer_a_text and name.endswith(".xml"):
+                if layer_a_scope == "body" and not _layer_a_body_part(fmt, name):
+                    kept.append((info, raw))
+                    continue
                 if fmt == "docx" and name.startswith("word/"):
                     text = raw.decode("utf-8", errors="replace")
                     new, r, rp = _scrub_docx_text(text)
@@ -1854,11 +1878,14 @@ def clean_docx(
     also_layer_a_text: bool = True,
     accept_all: bool = True,
     strip_embeddings: bool = False,
+    layer_a_scope: str = "body",
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _docx_legal_clean(
         data, accept_all=accept_all, strip_embeddings=strip_embeddings
     )
-    data, scrub_actions = _scrub_ooxml_zip(data, "docx", also_layer_a_text=also_layer_a_text)
+    data, scrub_actions = _scrub_ooxml_zip(
+        data, "docx", also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+    )
     return data, legal_actions + scrub_actions
 
 
@@ -1951,11 +1978,14 @@ def clean_xlsx(
     also_layer_a_text: bool = True,
     strip_comments: bool = True,
     strip_external_links: bool = True,
+    layer_a_scope: str = "body",
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _xlsx_legal_clean(
         data, strip_comments=strip_comments, strip_external_links=strip_external_links
     )
-    data, scrub_actions = _scrub_ooxml_zip(data, "xlsx", also_layer_a_text=also_layer_a_text)
+    data, scrub_actions = _scrub_ooxml_zip(
+        data, "xlsx", also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+    )
     return data, legal_actions + scrub_actions
 
 
@@ -1999,6 +2029,84 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
 # ---------------------------------------------------------------------------
 
 _PPTX_HIDDEN_SLIDE_RE = re.compile(rb'<(?:\w+:)?sld\b[^>]*\bshow="(?:0|false)"')
+
+_PART_PANE_MAP = (
+    (re.compile(r"^word/document\.xml$"), "body"),
+    (re.compile(r"^word/header"), "header"),
+    (re.compile(r"^word/footer"), "footer"),
+    (re.compile(r"^word/footnotes\.xml$|^word/endnotes\.xml$"), "footnote"),
+    (re.compile(r"^(?:word|xl|ppt)/comments|^xl/threadedComments/|^ppt/commentAuthors\.xml$"), "comment"),
+    (re.compile(r"^ppt/notesSlides/"), "note"),
+    (re.compile(r"^docProps/|^customXml/"), "metadata"),
+)
+
+
+def _part_pane(name: str) -> str:
+    for rx, pane in _PART_PANE_MAP:
+        if rx.search(name):
+            return pane
+    return "other"
+
+
+def ooxml_review_diff(
+    orig: bytes, cleaned: bytes, fmt: str, *, limit: int = 50
+) -> dict:
+    """Per-part reviewer diff of an OOXML clean.
+
+    For each part present in both archives, reports per-character Layer A
+    changes (codepoint, label, offset, action). Parts dropped entirely
+    (comments, notes, embeddings...) surface as ``removed_part`` entries.
+    """
+    from text_unicode import diff_entries
+
+    def _members(data: bytes) -> dict[str, bytes]:
+        out = {}
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                budget = [0]
+                for info in zf.infolist():
+                    if info.filename.endswith((".xml", ".rels")):
+                        out[info.filename] = _read_zip_member(zf, info, budget)
+        except _ZIP_PARSE_ERRORS:
+            pass
+        return out
+
+    before = _members(orig)
+    after = _members(cleaned)
+    parts: list[dict] = []
+    total_changed = 0
+    total_removed_parts = 0
+    truncated = False
+    for name in sorted(before):
+        pane = _part_pane(name)
+        if name not in after:
+            if name.startswith(("docProps/", "customXml/", "[Content_Types]")) or name.endswith(".rels"):
+                continue  # plumbing drops are already itemized in actions
+            parts.append({"part": name, "pane": pane, "removed_part": True})
+            total_removed_parts += 1
+            continue
+        if before[name] == after[name]:
+            continue
+        d = diff_entries(before[name].decode("utf-8", errors="surrogateescape"),
+                         after[name].decode("utf-8", errors="surrogateescape"), limit=limit)
+        if d["changed_total"]:
+            parts.append({
+                "part": name,
+                "pane": pane,
+                "changed_total": d["changed_total"],
+                "truncated": d["truncated"],
+                "entries": d["entries"],
+            })
+            total_changed += d["changed_total"]
+            truncated = truncated or d["truncated"]
+    return {
+        "format": fmt,
+        "parts_changed": len([p for p in parts if p.get("changed_total")]),
+        "parts_removed_legal": total_removed_parts,
+        "changed_total": total_changed,
+        "truncated": truncated,
+        "parts": parts,
+    }
 
 
 def _inspect_pptx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, list[str]]:
@@ -2109,11 +2217,14 @@ def clean_pptx(
     also_layer_a_text: bool = True,
     strip_notes: bool = True,
     strip_comments: bool = True,
+    layer_a_scope: str = "body",
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _pptx_legal_clean(
         data, strip_notes=strip_notes, strip_comments=strip_comments
     )
-    data, scrub_actions = _scrub_ooxml_zip(data, "pptx", also_layer_a_text=also_layer_a_text)
+    data, scrub_actions = _scrub_ooxml_zip(
+        data, "pptx", also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+    )
     return data, legal_actions + scrub_actions
 
 
@@ -2878,6 +2989,7 @@ def clean_container(
     fmt: str | None = None,
     *,
     also_layer_a_text: bool = True,
+    layer_a_scope: str = "body",
 ) -> dict[str, Any]:
     """Clean container metadata; optionally Layer-A scrub text bodies for md/html.
 
@@ -2904,13 +3016,19 @@ def clean_container(
         actions, meta_extra = clean_pdf(path, dest)
         meta.update(meta_extra)
     elif fmt == "docx":
-        cleaned, actions = clean_docx(data, also_layer_a_text=also_layer_a_text)
+        cleaned, actions = clean_docx(
+            data, also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+        )
         safe_write_bytes(dest, cleaned)
     elif fmt == "xlsx":
-        cleaned, actions = clean_xlsx(data, also_layer_a_text=also_layer_a_text)
+        cleaned, actions = clean_xlsx(
+            data, also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+        )
         safe_write_bytes(dest, cleaned)
     elif fmt == "pptx":
-        cleaned, actions = clean_pptx(data, also_layer_a_text=also_layer_a_text)
+        cleaned, actions = clean_pptx(
+            data, also_layer_a_text=also_layer_a_text, layer_a_scope=layer_a_scope
+        )
         safe_write_bytes(dest, cleaned)
     elif fmt == "odt":
         cleaned, actions = clean_odt(data, also_layer_a_text=also_layer_a_text)

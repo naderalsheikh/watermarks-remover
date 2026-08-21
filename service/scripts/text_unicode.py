@@ -722,3 +722,55 @@ def human_report(report: TextInspectReport) -> str:
     for n in report.notes:
         lines.append(f"Note: {n}")
     return "\n".join(lines)
+
+
+def _diff_context(text: str, offset: int, width: int = 24) -> str:
+    """Reviewer context around an offset, invisibles made visible."""
+    lo = max(0, offset - width // 2)
+    hi = min(len(text), offset + width // 2 + 1)
+    snippet = text[lo:hi]
+    marked = (
+        text[lo:offset] + "[" + (text[offset] if offset < len(text) else "") + "]" + text[offset + 1 : hi]
+    )
+    return repr(marked if len(marked) <= width + 4 else snippet)[: width * 3]
+
+
+def diff_entries(before: str, after: str, *, limit: int = 50) -> dict:
+    """Reviewer-facing per-character diff of a Layer A clean.
+
+    Derived from the actual before/after texts via SequenceMatcher opcodes so
+    it always reflects what cleaning did (including preserved load-bearing
+    characters). Entries carry codepoint, human label, offset in the original,
+    keep-relevant action (strip/replace) and a short context. Capped at
+    ``limit`` entries with a ``truncated`` flag; ``kept_total`` counts what
+    inspection flagged but cleaning deliberately preserved.
+    """
+    sm = SequenceMatcher(a=before, b=after, autojunk=False)
+    entries: list[dict] = []
+    total = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        removed = before[i1:i2]
+        inserted = after[j1:j2]
+        one_to_one = tag == "replace" and (i2 - i1) == (j2 - j1)
+        for k, ch in enumerate(removed):
+            total += 1
+            if len(entries) >= limit:
+                continue
+            off = i1 + k
+            entry = {
+                "offset": off,
+                "codepoint": f"U+{ord(ch):04X}",
+                "label": _char_label(ch),
+                "action": "replace" if tag == "replace" else "strip",
+                "context": _diff_context(before, off),
+            }
+            if one_to_one and inserted[k] != ch:
+                entry["replaced_with"] = f"U+{ord(inserted[k]):04X}"
+            entries.append(entry)
+    return {
+        "changed_total": total,
+        "truncated": total > limit,
+        "entries": entries,
+    }
