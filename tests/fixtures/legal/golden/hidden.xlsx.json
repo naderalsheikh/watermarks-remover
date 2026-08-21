@@ -1,0 +1,51 @@
+{
+  "findings": [
+    "xlsx-hidden-sheets: 1 hidden (0 veryHidden)",
+    "xlsx-comments: 1 comment(s)",
+    "xlsx-external-links: 1 part(s)"
+  ],
+  "format": "xlsx",
+  "kind": "container",
+  "report": {
+    "details": {
+      "parts": 7,
+      "xlsx_legal": {
+        "comment_count": 1,
+        "comment_part_count": 1,
+        "core_info": null,
+        "defined_name_count": 0,
+        "defined_names_hidden": 0,
+        "external_links": 1,
+        "hidden_cols": 0,
+        "hidden_rows": 0,
+        "hidden_sheets": [
+          "SideTerms"
+        ],
+        "persons_part": true,
+        "threaded_comment_parts": 0,
+        "very_hidden_sheets": [],
+        "visible_sheet_count": 1
+      }
+    },
+    "findings": [
+      "xlsx-hidden-sheets: 1 hidden (0 veryHidden)",
+      "xlsx-comments: 1 comment(s)",
+      "xlsx-external-links: 1 part(s)"
+    ],
+    "findings_confidence": [
+      "informational",
+      "informational",
+      "informational"
+    ],
+    "format": "xlsx",
+    "has_ai_metadata": false,
+    "has_c2pa": false,
+    "layer_a_hits": [],
+    "notes": [
+      "XLSX: metadata/provenance, embedded media, and body text runs (invisible Unicode) are scanned"
+    ],
+    "refuse_reason": null,
+    "suspicious_total": 0
+  },
+  "unsupported_reason": null
+}

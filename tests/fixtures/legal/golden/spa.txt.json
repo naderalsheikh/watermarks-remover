@@ -1,0 +1,30 @@
+{
+  "findings": [
+    "U+200B ZERO WIDTH SPACE (Cf)"
+  ],
+  "format": "txt",
+  "kind": "text",
+  "report": {
+    "hits": [
+      {
+        "codepoint": "U+200B",
+        "confidence": "probable",
+        "count": 1,
+        "kind": "zwj_family",
+        "label": "U+200B ZERO WIDTH SPACE (Cf)",
+        "sample_offsets": [
+          231
+        ]
+      }
+    ],
+    "length": 251,
+    "notes": [
+      "Layer A only: invisible/format Unicode and space homoglyphs (edit-based carriers).",
+      "Statistical (token-sampling) watermarks are not detectable here; use Layer B rewrite.",
+      "Inspect kinds: strip, bidi, tag_chars, variation_selector, zwj_family, private_use, space, confusable, other_cf.",
+      "Load-bearing invisibles are preserved by default during cleaning: emoji glue, CJK/Mongolian variation selectors, script joiners, complete flag tag sequences, same-script fillers/selectors (Mongolian FVS, Khmer inherent vowels, Hangul jamo fillers), RTL directional marks/paired embeddings, orthographic Arabic/Syriac Cf marks, and visible-layout format controls next to their own script (Egyptian hieroglyph quadrat, Duployan shorthand, musical beaming). Inspection still reports bidi controls. Use explicit strip flags only after review."
+    ],
+    "suspicious_total": 1
+  },
+  "unsupported_reason": null
+}

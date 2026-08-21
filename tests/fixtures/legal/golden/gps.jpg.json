@@ -1,0 +1,22 @@
+{
+  "findings": [
+    "JPEG EXIF GPS location data present"
+  ],
+  "format": "jpeg",
+  "kind": "image",
+  "report": {
+    "findings": [
+      "JPEG EXIF GPS location data present"
+    ],
+    "findings_confidence": [
+      "probable"
+    ],
+    "format": "jpeg",
+    "has_ai_metadata": false,
+    "has_c2pa": false,
+    "has_gps": true,
+    "notes": [],
+    "synthid": null
+  },
+  "unsupported_reason": null
+}

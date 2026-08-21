@@ -1,0 +1,50 @@
+{
+  "findings": [
+    "pdf-structured:ai:Claude",
+    "pdf-structured:ai:Anthropic",
+    "pdf-acroform: interactive form present (flag-only in v1)"
+  ],
+  "format": "pdf",
+  "kind": "container",
+  "report": {
+    "details": {
+      "pdf_legal": {
+        "acroform": true,
+        "additional_actions": false,
+        "annots": 0,
+        "embedded_files": 0,
+        "incremental_updates": 0,
+        "info": {
+          "author": null,
+          "creator": "present (16 chars)",
+          "keywords": null,
+          "producer": "Claude Opus",
+          "subject": null,
+          "title": null
+        },
+        "javascript": false,
+        "open_action": false
+      }
+    },
+    "findings": [
+      "pdf-structured:ai:Claude",
+      "pdf-structured:ai:Anthropic",
+      "pdf-acroform: interactive form present (flag-only in v1)"
+    ],
+    "findings_confidence": [
+      "probable",
+      "probable",
+      "informational"
+    ],
+    "format": "pdf",
+    "has_ai_metadata": true,
+    "has_c2pa": false,
+    "layer_a_hits": [],
+    "notes": [
+      "PDF inspection is best-effort; exiftool/c2patool give more reliable metadata detection"
+    ],
+    "refuse_reason": "digitally signed PDF; a rebuilt copy would break the signature",
+    "suspicious_total": 0
+  },
+  "unsupported_reason": null
+}

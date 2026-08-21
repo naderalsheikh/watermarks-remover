@@ -1,0 +1,45 @@
+{
+  "findings": [
+    "docx-comments: 1 comment(s) across 1 part(s)",
+    "docx-tracked-changes: insertions=1 deletions=2 format-changes=0"
+  ],
+  "format": "docx",
+  "kind": "container",
+  "report": {
+    "details": {
+      "docx_legal": {
+        "comment_count": 1,
+        "comment_markers": 3,
+        "comment_parts": [
+          "word/comments.xml"
+        ],
+        "deletions": 2,
+        "embeddings": 0,
+        "format_changes": 0,
+        "hidden_highlight": 0,
+        "hidden_vanish": 0,
+        "hidden_white": 0,
+        "insertions": 1
+      },
+      "parts": 6
+    },
+    "findings": [
+      "docx-comments: 1 comment(s) across 1 part(s)",
+      "docx-tracked-changes: insertions=1 deletions=2 format-changes=0"
+    ],
+    "findings_confidence": [
+      "informational",
+      "informational"
+    ],
+    "format": "docx",
+    "has_ai_metadata": false,
+    "has_c2pa": false,
+    "layer_a_hits": [],
+    "notes": [
+      "DOCX: metadata/provenance, embedded media, and body text runs (invisible Unicode) are scanned"
+    ],
+    "refuse_reason": null,
+    "suspicious_total": 0
+  },
+  "unsupported_reason": null
+}

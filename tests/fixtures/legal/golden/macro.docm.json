@@ -1,0 +1,41 @@
+{
+  "findings": [
+    "macros-office: macro-enabled Office file (docm); clean is refused"
+  ],
+  "format": "docm",
+  "kind": "container",
+  "report": {
+    "details": {
+      "docx_legal": {
+        "comment_count": 0,
+        "comment_markers": 0,
+        "comment_parts": [],
+        "deletions": 0,
+        "embeddings": 0,
+        "format_changes": 0,
+        "hidden_highlight": 0,
+        "hidden_vanish": 0,
+        "hidden_white": 0,
+        "insertions": 0
+      },
+      "parts": 3,
+      "unsupported": true
+    },
+    "findings": [
+      "macros-office: macro-enabled Office file (docm); clean is refused"
+    ],
+    "findings_confidence": [
+      "informational"
+    ],
+    "format": "docm",
+    "has_ai_metadata": false,
+    "has_c2pa": false,
+    "layer_a_hits": [],
+    "notes": [
+      "format not fully inspected: docm"
+    ],
+    "refuse_reason": "macro-enabled Word file (vbaProject/macro storage may be present)",
+    "suspicious_total": 0
+  },
+  "unsupported_reason": null
+}

@@ -1,0 +1,47 @@
+{
+  "findings": [
+    "pdf-structured:ai:Claude",
+    "pdf-incremental-updates: 1 update section(s)"
+  ],
+  "format": "pdf",
+  "kind": "container",
+  "report": {
+    "details": {
+      "pdf_legal": {
+        "acroform": false,
+        "additional_actions": false,
+        "annots": 0,
+        "embedded_files": 0,
+        "incremental_updates": 1,
+        "info": {
+          "author": "present (10 chars)",
+          "creator": null,
+          "keywords": null,
+          "producer": "Claude Opus",
+          "subject": null,
+          "title": "present (12 chars)"
+        },
+        "javascript": false,
+        "open_action": false
+      }
+    },
+    "findings": [
+      "pdf-structured:ai:Claude",
+      "pdf-incremental-updates: 1 update section(s)"
+    ],
+    "findings_confidence": [
+      "probable",
+      "informational"
+    ],
+    "format": "pdf",
+    "has_ai_metadata": true,
+    "has_c2pa": false,
+    "layer_a_hits": [],
+    "notes": [
+      "PDF inspection is best-effort; exiftool/c2patool give more reliable metadata detection"
+    ],
+    "refuse_reason": null,
+    "suspicious_total": 0
+  },
+  "unsupported_reason": null
+}
