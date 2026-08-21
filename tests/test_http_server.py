@@ -91,7 +91,7 @@ def test_browser_ui(conn):
     assert resp.status == 200
     assert resp.getheader("Content-Type", "").startswith("text/html")
     html = data.decode("utf-8")
-    assert "Watermarks remover" in html
+    assert "CounselClear" in html
     assert "/inspect" in html
     assert "/clean" in html
     assert "Try a sample" in html
@@ -110,7 +110,7 @@ def test_openapi_spec_covers_all_endpoints(conn):
     status, body = _get(conn, "/openapi.json")
     assert status == 200
     assert body["openapi"] == "3.0.3"
-    assert body["info"]["title"] == "watermarks-remover service"
+    assert body["info"]["title"] == "CounselClear sanitization service"
     expected = {
         "/health": {"get"},
         "/capabilities": {"get"},
