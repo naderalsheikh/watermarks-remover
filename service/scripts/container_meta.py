@@ -1024,8 +1024,101 @@ def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], di
     return has_c2pa, has_ai or has_c2pa, findings, {"parts": len(parts)}
 
 
+# ---------------------------------------------------------------------------
+# DOCX legal content (PR 6): comments, tracked changes, hidden text, embeddings
+# ---------------------------------------------------------------------------
+
+_DOCX_COMMENT_PARTS = (
+    "word/comments.xml",
+    "word/commentsExtended.xml",
+    "word/commentsIds.xml",
+    "word/commentsExtensible.xml",
+    "word/people.xml",
+)
+_DOCX_INS_RE = re.compile(rb"<w:(?:ins|moveTo)\b")
+_DOCX_DEL_RE = re.compile(rb"<w:(?:del|moveFrom|delText)\b")
+_DOCX_FMT_CHANGE_RE = re.compile(rb"<w:(?:rPrChange|pPrChange|sectPrChange|tblPrChange)\b")
+_DOCX_VANISH_RE = re.compile(rb"<w:vanish\b")
+_DOCX_WHITE_RE = re.compile(rb'<w:color\b[^>]*w:val="[Ff]{6}"')
+_DOCX_HIGHLIGHT_RE = re.compile(rb"<w:highlight\b")
+_DOCX_COMMENT_MARKER_RE = re.compile(rb"<w:(?:commentRangeStart|commentRangeEnd|commentReference)\b")
+# Anything that makes a part worth an XML-aware pass on clean.
+_DOCX_LEGAL_MARKUP_RE = re.compile(
+    rb"<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange"
+    rb"|tblPrChange|delText|commentRangeStart|commentRangeEnd|commentReference)\b"
+)
+
+
+def _is_docx_content_part(name: str) -> bool:
+    """True for word/*.xml body-bearing parts (not rels, not [Content_Types])."""
+    return (
+        name.startswith("word/")
+        and name.endswith(".xml")
+        and "/_rels/" not in name
+        and not name.endswith("[Content_Types].xml")
+    )
+
+
+def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, list[str]]:
+    """Enumerate DOCX legal artifacts: comments, revisions, hidden text, embeddings."""
+    names = set(zf.namelist())
+    comment_parts = sorted(n for n in _DOCX_COMMENT_PARTS if n in names)
+    comment_count = 0
+    if "word/comments.xml" in names:
+        raw = _read_zip_member(zf, zf.getinfo("word/comments.xml"), budget)
+        comment_count = len(re.findall(rb"<w:comment\b", raw))
+    ins = de = fmt_changes = vanish = white = highlight = markers = embeddings = 0
+    for info in zf.infolist():
+        name = info.filename
+        if name.startswith("word/embeddings/"):
+            embeddings += 1
+        if not _is_docx_content_part(name):
+            continue
+        raw = _read_zip_member(zf, info, budget)
+        ins += len(_DOCX_INS_RE.findall(raw))
+        de += len(_DOCX_DEL_RE.findall(raw))
+        fmt_changes += len(_DOCX_FMT_CHANGE_RE.findall(raw))
+        vanish += len(_DOCX_VANISH_RE.findall(raw))
+        white += len(_DOCX_WHITE_RE.findall(raw))
+        highlight += len(_DOCX_HIGHLIGHT_RE.findall(raw))
+        markers += len(_DOCX_COMMENT_MARKER_RE.findall(raw))
+    report = {
+        "comment_parts": comment_parts,
+        "comment_count": comment_count,
+        "insertions": ins,
+        "deletions": de,
+        "format_changes": fmt_changes,
+        "hidden_vanish": vanish,
+        "hidden_white": white,
+        "hidden_highlight": highlight,
+        "comment_markers": markers,
+        "embeddings": embeddings,
+    }
+    findings: list[str] = []
+    if comment_parts:
+        findings.append(f"docx-comments: {comment_count} comment(s) across {len(comment_parts)} part(s)")
+    if ins or de or fmt_changes:
+        findings.append(
+            f"docx-tracked-changes: insertions={ins} deletions={de} format-changes={fmt_changes}"
+        )
+    if vanish or white or highlight:
+        findings.append(f"docx-hidden-text: vanish={vanish} white={white} highlight={highlight}")
+    if embeddings:
+        findings.append(f"docx-embeddings: {embeddings} embedded object(s)")
+    return report, findings
+
+
 def inspect_docx(data: bytes) -> tuple[bool, bool, list[str], dict]:
-    return _inspect_ooxml_zip(data, "docx")
+    has_c2pa, has_ai, findings, details = _inspect_ooxml_zip(data, "docx")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            budget = [0]
+            legal, extra = _inspect_docx_legal(zf, budget)
+            findings.extend(extra)
+            details["docx_legal"] = legal
+    except _ZIP_PARSE_ERRORS:
+        pass  # base call already reported invalid/partial zip
+    return has_c2pa, has_ai or has_c2pa, findings, details
 
 
 def inspect_xlsx(data: bytes) -> tuple[bool, bool, list[str], dict]:
@@ -1569,8 +1662,199 @@ def _scrub_ooxml_zip(
     return out_buf.getvalue(), actions
 
 
-def clean_docx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:
-    return _scrub_ooxml_zip(data, "docx", also_layer_a_text=also_layer_a_text)
+_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_DOCX_ACCEPT_UNWRAP = frozenset({_W_NS + "ins", _W_NS + "moveTo"})
+_DOCX_ACCEPT_DROP = frozenset(
+    {
+        _W_NS + "del",
+        _W_NS + "moveFrom",
+        _W_NS + "rPrChange",
+        _W_NS + "pPrChange",
+        _W_NS + "sectPrChange",
+        _W_NS + "tblPrChange",
+        _W_NS + "delText",
+    }
+)
+_DOCX_COMMENT_MARKER_TAGS = frozenset(
+    {_W_NS + "commentRangeStart", _W_NS + "commentRangeEnd", _W_NS + "commentReference"}
+)
+_XMLNS_PREFIXED_RE = re.compile(r'xmlns:([\w.\-]+)="([^"]+)"')
+_XMLNS_DEFAULT_RE = re.compile(r'xmlns="([^"]+)"')
+
+
+def _register_declared_namespaces(xml_bytes: bytes) -> None:
+    """Preserve the document's namespace prefixes across an ElementTree round trip.
+
+    Without registration the serializer renames every prefix to ns0/ns1/...,
+    which Word tolerates but mc:Ignorable does not — prefixed attributes
+    (w14:paraId & co) would reference undeclared prefixes.
+    """
+    import xml.etree.ElementTree as ET
+
+    head = xml_bytes[:16384].decode("utf-8", errors="replace")
+    seen: set[tuple[str, str]] = set()
+    for prefix, uri in _XMLNS_PREFIXED_RE.findall(head):
+        if (prefix, uri) not in seen:
+            ET.register_namespace(prefix, uri)
+            seen.add((prefix, uri))
+    for uri in _XMLNS_DEFAULT_RE.findall(head):
+        if ("", uri) not in seen:
+            ET.register_namespace("", uri)
+            seen.add(("", uri))
+
+
+def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
+    """Resolve tracked-change markup to its accepted state (stdlib ElementTree).
+
+    Unwrap w:ins/w:moveTo (keep children), drop w:del/w:moveFrom subtrees and
+    the *Change property wrappers, drop leftover w:delText, and optionally
+    remove comment range/reference markers. Returns (xml_bytes, stats) or
+    None when the part is not well-formed XML (caller keeps original bytes).
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        # stdlib etree per design spec (dependency-free); input is a
+        # budget-capped zip member already treated as hostile elsewhere.
+        root = ET.fromstring(xml_bytes)  # noqa: S314
+    except ET.ParseError:
+        return None
+
+    stats = {"unwrapped": 0, "dropped": 0, "markers": 0}
+
+    def walk(elem) -> None:
+        kept = []
+        for child in list(elem):
+            tag = child.tag
+            if tag in _DOCX_ACCEPT_DROP:
+                stats["dropped"] += 1
+                continue
+            if strip_comment_markers and tag in _DOCX_COMMENT_MARKER_TAGS:
+                stats["markers"] += 1
+                continue
+            walk(child)
+            if tag in _DOCX_ACCEPT_UNWRAP:
+                # Splice the (already transformed) children in place of the wrapper.
+                kept.extend(list(child))
+                stats["unwrapped"] += 1
+            else:
+                kept.append(child)
+        elem[:] = kept
+
+    walk(root)
+    _register_declared_namespaces(xml_bytes)
+    out = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    return out, stats
+
+
+_OVERRIDE_PARTNAME_RE = re.compile(r'<Override\b[^>]*PartName\s*=\s*(["\'])(/?[^"\']*?)\1[^>]*/>')
+
+
+def _prune_ooxml_overrides(text: str, dropped_names: set[str]) -> tuple[str, int]:
+    """Quote-tolerant removal of [Content_Types].xml Overrides for dropped parts.
+
+    Unlike the historical customXml-only regex this matches single- and
+    double-quoted PartName values. Default entries are left alone: Word
+    tolerates orphan Defaults, while a missing Override for a present part is
+    what breaks documents.
+    """
+    removed = 0
+
+    def _sub(m: re.Match[str]) -> str:
+        nonlocal removed
+        part = m.group(2)
+        norm = part.lstrip("/")
+        if norm in dropped_names:
+            removed += 1
+            return ""
+        return m.group(0)
+
+    return _OVERRIDE_PARTNAME_RE.sub(_sub, text), removed
+
+
+def _docx_legal_clean(
+    data: bytes, *, accept_all: bool = True, strip_embeddings: bool = False
+) -> tuple[bytes, list[str]]:
+    """Sharing-path DOCX legal pass; runs before ``_scrub_ooxml_zip``.
+
+    Drops the comment part family (strip per v1 matrix), resolves Accept All
+    on every content part carrying revision markup (including headers,
+    footers, footnotes, endnotes — parts are kept, only markup resolved),
+    optionally drops word/embeddings/, and prunes dangling relationships plus
+    Content_Types overrides for everything it dropped.
+    """
+    actions: list[str] = []
+    budget = [0]
+    dropped: set[str] = set()
+    kept: list[tuple[zipfile.ZipInfo, bytes]] = []
+    with zipfile.ZipFile(io.BytesIO(data)) as zin:
+        for info in zin.infolist():
+            _check_zip_budget(info, budget)
+            name = info.filename
+            if name in _DOCX_COMMENT_PARTS:
+                actions.append(f"drop part {name}")
+                dropped.add(name)
+                continue
+            if strip_embeddings and name.startswith("word/embeddings/"):
+                actions.append(f"drop part {name}")
+                dropped.add(name)
+                continue
+            raw = _read_zip_member(zin, info, budget)
+            if accept_all and _is_docx_content_part(name) and _DOCX_LEGAL_MARKUP_RE.search(raw):
+                result = _docx_accept_all(raw, strip_comment_markers=True)
+                if result is not None:
+                    new_raw, st = result
+                    if st["unwrapped"]:
+                        actions.append(f"accept-all {name}: unwrapped x{st['unwrapped']}")
+                    if st["dropped"]:
+                        actions.append(f"accept-all {name}: dropped x{st['dropped']}")
+                    if st["markers"]:
+                        actions.append(f"removed comment markers x{st['markers']} in {name}")
+                    raw = new_raw
+                else:
+                    actions.append(f"warning: {name} not well-formed XML; left unmodified")
+            kept.append((info, raw))
+
+        if dropped:
+            kept_names = {info.filename for info, _ in kept}
+            rebuilt: list[tuple[zipfile.ZipInfo, bytes]] = []
+            for info, raw in kept:
+                out_raw = raw
+                if info.filename.endswith(".rels"):
+                    out_raw, n = _prune_dangling_relationships(info.filename, raw, kept_names)
+                    if n:
+                        actions.append(f"prune dangling relationships x{n} in {info.filename}")
+                elif info.filename == "[Content_Types].xml":
+                    new, n = _prune_ooxml_overrides(
+                        raw.decode("utf-8", errors="replace"), dropped
+                    )
+                    if n:
+                        actions.append(f"prune Content_Types overrides x{n}")
+                        out_raw = new.encode("utf-8")
+                rebuilt.append((info, out_raw))
+            kept = rebuilt
+
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for info, raw in kept:
+            zout.writestr(info, raw)
+    if not actions:
+        actions.append("no DOCX legal artifacts found")
+    return out_buf.getvalue(), actions
+
+
+def clean_docx(
+    data: bytes,
+    *,
+    also_layer_a_text: bool = True,
+    accept_all: bool = True,
+    strip_embeddings: bool = False,
+) -> tuple[bytes, list[str]]:
+    data, legal_actions = _docx_legal_clean(
+        data, accept_all=accept_all, strip_embeddings=strip_embeddings
+    )
+    data, scrub_actions = _scrub_ooxml_zip(data, "docx", also_layer_a_text=also_layer_a_text)
+    return data, legal_actions + scrub_actions
 
 
 def clean_xlsx(data: bytes, *, also_layer_a_text: bool = True) -> tuple[bytes, list[str]]:

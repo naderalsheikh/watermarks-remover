@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""PR 6: DOCX legal content — comments, Accept All revisions, hidden text,
+embeddings, quote-tolerant Content_Types prune.
+
+Fixtures are minimal-but-valid DOCX zips built inline; the Accept All pass is
+the stdlib-ElementTree algorithm from the design spec (unwrap w:ins/w:moveTo,
+drop w:del/w:moveFrom/*Change subtrees and w:delText) applied to every
+word/*.xml part carrying markup — including kept headers.
+"""
+
+from __future__ import annotations
+
+import io
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "service" / "scripts"
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(SCRIPTS))
+
+import container_meta
+from container_meta import _DOCX_COMMENT_PARTS, clean_docx, inspect_container
+from findings import findings_for_report
+
+W_DECL = (
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+)
+
+
+def _document(inner: str) -> bytes:
+    return (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f'<w:document {W_DECL}><w:body>{inner}'
+        '<w:sectPr/></w:body></w:document>'
+    ).encode()
+
+
+def _header(inner: str) -> bytes:
+    return (
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f'<w:hdr {W_DECL}>{inner}</w:hdr>'
+    ).encode()
+
+
+def _run(text: str) -> str:
+    return f'<w:r><w:t>{text}</w:t></w:r>'
+
+
+def _docx(parts: dict[str, bytes]) -> bytes:
+    """Minimal valid DOCX zip; [Content_Types] uses single quotes on purpose."""
+    defaults = {
+        "xml": "application/xml",
+        "rels": "application/vnd.openxmlformats-package.relationships+xml",
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        overrides = [
+            ("/word/document.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"),
+            ("/word/comments.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"),
+            ("/word/people.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.people+xml"),
+            ("/word/header1.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"),
+        ]
+        ct = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+        ct += "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
+        for ext, mime in defaults.items():
+            ct += f"<Default Extension='{ext}' ContentType='{mime}'/>"
+        for pn, mime in overrides:
+            name = pn.lstrip("/")
+            if name in parts or name == "word/document.xml":
+                ct += f"<Override PartName='{pn}' ContentType='{mime}'/>"
+        ct += "</Types>"
+        zf.writestr("[Content_Types].xml", ct.encode())
+        zf.writestr(
+            "_rels/.rels",
+            b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            b'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            b"</Relationships>",
+        )
+        doc_rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>'
+            '<Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/people" Target="people.xml"/>'
+            '<Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>'
+            + (
+                '<Relationship Id="rId13" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="embeddings/oleObject1.bin"/>'
+                if "word/embeddings/oleObject1.bin" in parts
+                else ""
+            )
+            + "</Relationships>"
+        )
+        zf.writestr("word/_rels/document.xml.rels", doc_rels.encode())
+        for name, raw in parts.items():
+            zf.writestr(name, raw)
+    return buf.getvalue()
+
+
+def _full_docx() -> bytes:
+    body = (
+        # accepted-state insertion must survive as text
+        '<w:p><w:ins><w:r><w:t>inserted words</w:t></w:r></w:ins>'
+        # deleted subtree must vanish entirely (delText included)
+        '<w:del><w:r><w:delText>deleted words</w:delText></w:r></w:del>'
+        # property change wrapper must drop, run kept
+        '<w:r><w:rPr><w:rPrChange/></w:rPr><w:t>stable</w:t></w:r></w:p>'
+        # hidden-text flags (inspect-only in v1)
+        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>sneaky</w:t></w:r>'
+        '<w:r><w:rPr><w:color w:val="FFFFFF"/></w:rPr><w:t>white</w:t></w:r></w:p>'
+        # comment anchors to remove when comment parts are stripped
+        "<w:p><w:commentRangeStart/><w:r><w:t>anchored</w:t></w:r>"
+        "<w:commentRangeEnd/><w:r><w:commentReference/></w:r></w:p>"
+    )
+    comments = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:comments {W_DECL}><w:comment><w:p><w:r><w:t>look here</w:t></w:r></w:p></w:comment></w:comments>'
+    ).encode()
+    people = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:people {W_DECL}><w:person w:author="Attorney A"/></w:people>'
+    ).encode()
+    header = _header("<w:p><w:ins><w:r><w:t>H</w:t></w:r></w:ins></w:p>")
+    return _docx(
+        {
+            "word/document.xml": _document(body),
+            "word/comments.xml": comments,
+            "word/people.xml": people,
+            "word/header1.xml": header,
+            "word/embeddings/oleObject1.bin": b"\xd0\xcf\x11\xe0OLE",
+        }
+    )
+
+
+# --- inspect ------------------------------------------------------------------
+
+
+def test_inspect_enumerates_all_legal_artifacts():
+    rep = container_meta.inspect_docx(_full_docx())[3]
+    legal = rep["docx_legal"]
+    assert legal["comment_count"] == 1
+    assert set(legal["comment_parts"]) >= {"word/comments.xml", "word/people.xml"}
+    assert legal["insertions"] >= 2
+    assert legal["deletions"] >= 2  # w:del + w:delText
+    assert legal["format_changes"] >= 1
+    assert legal["hidden_vanish"] == 1
+    assert legal["hidden_white"] == 1
+    assert legal["comment_markers"] >= 3
+    assert legal["embeddings"] == 1
+
+
+def test_inspect_findings_use_stable_prefixes():
+    _, _, findings, _ = container_meta.inspect_docx(_full_docx())
+    joined = "\n".join(findings)
+    assert "docx-comments:" in joined
+    assert "docx-tracked-changes:" in joined
+    assert "docx-hidden-text:" in joined
+    assert "docx-embeddings:" in joined
+
+
+def test_clean_docx_has_no_legal_hits():
+    _, _, findings, details = container_meta.inspect_docx(clean_docx(_full_docx())[0])
+    legal = details["docx_legal"]
+    assert legal["comment_parts"] == []
+    assert legal["insertions"] == 0
+    assert legal["deletions"] == 0
+    assert legal["format_changes"] == 0
+    assert legal["comment_markers"] == 0
+    joined = "\n".join(findings)
+    assert "docx-tracked-changes:" not in joined
+    # hidden text is flag-only in v1: still present after clean
+    assert "docx-hidden-text:" in joined
+    # embeddings default-keep
+    assert "docx-embeddings:" in joined
+
+
+# --- clean: accept-all semantics ------------------------------------------------
+
+
+def _clean_body_xml(data: bytes) -> ET.Element:
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        return ET.fromstring(zf.read("word/document.xml"))  # noqa: S314 - test fixture
+
+
+def test_accept_all_keeps_insertions_and_drops_deletions():
+    out, actions = clean_docx(_full_docx())
+    root = _clean_body_xml(out)
+    texts = [t.text or "" for t in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")]
+    joined = "".join(texts)
+    assert "inserted words" in joined
+    assert "stable" in joined
+    assert "deleted words" not in joined
+    tags = {e.tag.rsplit('}', 1)[-1] for e in root.iter()}
+    assert {"ins", "del", "delText", "rPrChange"} & tags == set()
+    assert any("unwrapped" in a for a in actions)
+    assert any("dropped" in a for a in actions)
+
+
+def test_accept_all_resolves_markup_inside_kept_header():
+    out, _actions = clean_docx(_full_docx())
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        assert "word/header1.xml" in zf.namelist()  # part kept...
+        hdr = zf.read("word/header1.xml")
+    assert b"<w:ins>" not in hdr  # ...markup resolved
+    assert b"H" in hdr
+
+
+def test_comment_parts_and_markers_removed_with_prunes():
+    out, actions = clean_docx(_full_docx())
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        names = zf.namelist()
+        assert not ({_DOCX_COMMENT_PARTS} & {n for n in names})
+        assert "word/comments.xml" not in names
+        assert "word/people.xml" not in names
+        doc = zf.read("word/document.xml")
+        rels = zf.read("word/_rels/document.xml.rels")
+        ct = zf.read("[Content_Types].xml").decode()
+    assert b"commentRangeStart" not in doc
+    assert b"commentReference" not in doc
+    assert b'Id="rId10"' not in rels  # dangling comment relationship pruned
+    assert "PartName='/word/comments.xml'" not in ct  # single-quoted override pruned
+    assert "PartName='/word/people.xml'" not in ct
+    assert any("Content_Types overrides" in a for a in actions)
+
+
+def test_embeddings_default_keep_explicit_strip():
+    data = _full_docx()
+    out, _ = clean_docx(data)
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        assert "word/embeddings/oleObject1.bin" in zf.namelist()
+    out, actions = clean_docx(data, strip_embeddings=True)
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        names = zf.namelist()
+        assert "word/embeddings/oleObject1.bin" not in names
+        assert b'rId13' not in zf.read("word/_rels/document.xml.rels")
+        assert "/word/embeddings/" not in zf.read("[Content_Types].xml").decode()
+    assert any("drop part word/embeddings/oleObject1.bin" in a for a in actions)
+
+
+def test_output_is_valid_zip_with_namespaces_preserved(tmp_path):
+    out, _ = clean_docx(_full_docx())
+    p = tmp_path / "t.docx"
+    p.write_bytes(out)
+    rep = inspect_container(p).to_dict()
+    assert rep["format"] == "docx"
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        doc = zf.read("word/document.xml")
+    ET.fromstring(doc)  # noqa: S314 - test fixture; well-formed check
+    assert b'xmlns:w="' in doc  # prefix preserved, not ns0
+
+
+def test_layer_a_still_runs_after_legal_pass():
+    body = (
+        '<w:p><w:ins><w:r><w:t>zero​width</w:t></w:r></w:ins></w:p>'
+        '<w:p><w:del><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>'
+    )
+    out, actions = clean_docx(_docx({"word/document.xml": _document(body)}))
+    root = _clean_body_xml(out)
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    joined = "".join(t.text or "" for t in root.iter(W + "t"))
+    assert "gone" not in joined
+    # Layer A removed the zero-width space from the surviving insertion
+    assert "zerowidth" in joined.replace("\u200b", "")
+    assert any("layer A text" in a for a in actions)
+
+
+# --- canonical findings projection ----------------------------------------------
+
+
+def test_findings_project_docx_legal_signals():
+    has_c2pa, has_ai, findings, _details = container_meta.inspect_docx(_full_docx())
+    rep = {
+        "format": "docx",
+        "has_c2pa": has_c2pa,
+        "has_ai_metadata": has_ai,
+        "findings": findings,
+    }
+    found = findings_for_report("container", rep)
+    by_subtype = {f.subtype: f for f in found}
+    assert {"comments_and_notes", "office_tracked_changes", "hidden_text_formatting", "embeddings_ole"} <= set(by_subtype)
+    assert by_subtype["office_tracked_changes"].category == "revision_history"
+    assert by_subtype["office_tracked_changes"].action_recommended == "accept_all"
+    assert by_subtype["hidden_text_formatting"].category == "invisible_text"
+    assert by_subtype["hidden_text_formatting"].content_visible is False
+    assert by_subtype["comments_and_notes"].action_recommended == "strip"

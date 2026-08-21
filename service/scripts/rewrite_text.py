@@ -202,7 +202,7 @@ def meaning_lock_violations(original: str, candidate: str) -> list[str]:
         ratio = len(candidate) / len(original)
         if ratio < 0.85 or ratio > 1.20:
             violations.append(
-                f"length drift {ratio:.2f}x (preserve lock requires 0.85–1.20)"
+                f"length drift {ratio:.2f}x (preserve lock requires 0.85-1.20)"
             )
     for label, pattern, lower in (
         ("number", _NUMBER_RE, False),
