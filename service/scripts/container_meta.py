@@ -114,6 +114,109 @@ SVG_DROP_TAGS = frozenset(
     }
 )
 
+# --- PR 4 refuse list --------------------------------------------------------
+#
+# Formats and content that must never produce a "clean" derivative:
+# macro-enabled Office (code execution), encrypted packages (cannot verify
+# what would be written), CFBF legacy Office (unsupported binary), PDFs we
+# cannot see inside (encrypted), and anything carrying a digital signature
+# or VBA project (rebuilding breaks the signature; macros must not ride
+# along). Attestation-gated overrides arrive with the policy engine (PR 11).
+
+CFBF_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+ENCRYPTED_PACKAGE_MEMBERS = ("EncryptedPackage", "EncryptionInfo")
+VBA_MEMBERS = ("vbaProject.bin", "_vba_project.bin")
+VBA_MEMBER_PREFIXES = ("word/macros/",)
+OOXML_SIGNATURE_PREFIXES = ("_xmlsignatures/",)
+_PDF_BYTE_RANGE_RE = re.compile(rb"/ByteRange\s*\[")
+_PDF_SIG_FLAGS_RE = re.compile(rb"/SigFlags")
+
+#: Formats whose clean path is always refused (before any parsing).
+REFUSED_CLEAN_FORMATS: dict[str, str] = {
+    "docm": "macro-enabled Word file (vbaProject/macro storage may be present)",
+    "xlsm": "macro-enabled Excel file (vbaProject/macro storage may be present)",
+    "pptm": "macro-enabled PowerPoint file (vbaProject/macro storage may be present)",
+    "cfbf": "legacy binary Office file (.doc/.xls/.ppt compound file) is not supported in v1",
+    "encrypted_office": "encrypted OOXML package (EncryptedPackage/EncryptionInfo) cannot be verified",
+}
+
+#: docm/xlsm/pptm -> which OOXML family inspector still applies for reporting.
+MACRO_FAMILY = {"docm": "docx", "xlsm": "xlsx", "pptm": "pptx"}
+OOXML_ZIP_FORMATS = ("docx", "xlsx", "pptx", "docm", "xlsm", "pptm")
+
+
+class UnsupportedCleanError(ValueError):
+    """Raised when policy refuses to produce a clean derivative."""
+
+
+def _zip_names(data: bytes) -> set[str]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            return set(zf.namelist())
+    except _ZIP_PARSE_ERRORS:
+        return set()
+
+
+def _names_have_encrypted_package(names: set[str]) -> bool:
+    return all(m in names for m in ENCRYPTED_PACKAGE_MEMBERS)
+
+
+def _zip_has_encrypted_package(data: bytes) -> bool:
+    if data[:2] != b"PK":
+        return False
+    return _names_have_encrypted_package(_zip_names(data))
+
+
+def office_zip_risks(data: bytes) -> dict[str, Any]:
+    """Scan zip member names for macros / XML-DSig parts.
+
+    Name-only scan of the central directory; member contents are not parsed.
+    """
+    if data[:2] != b"PK":
+        return {}
+    names = _zip_names(data)
+
+    def is_macro(n: str) -> bool:
+        base = n.rsplit("/", 1)[-1]
+        return (
+            n.startswith(VBA_MEMBER_PREFIXES)
+            or base in ("vbaProject.bin", "_vba_project.bin")
+            or n == "vbaProject.bin"
+        )
+
+    def is_signature(n: str) -> bool:
+        return n.startswith(OOXML_SIGNATURE_PREFIXES)
+
+    macro_members = sorted(n for n in names if is_macro(n))
+    signature_members = sorted(n for n in names if is_signature(n))
+    return {
+        "macros": bool(macro_members),
+        "signatures": bool(signature_members),
+        "macro_members": macro_members[:8],
+        "signature_members": signature_members[:8],
+    }
+
+
+def container_clean_refusal(fmt: str, data: bytes) -> str | None:
+    """Reason this format+bytes must not produce a clean copy, or None."""
+    if fmt in REFUSED_CLEAN_FORMATS:
+        return REFUSED_CLEAN_FORMATS[fmt]
+    if fmt == "pdf":
+        if b"/Encrypt" in data:
+            return "encrypted PDF (/Encrypt present); output could not be verified"
+        if _PDF_BYTE_RANGE_RE.search(data) or _PDF_SIG_FLAGS_RE.search(data):
+            return "digitally signed PDF; a rebuilt copy would break the signature"
+        return None
+    if fmt in ("docx", "xlsx", "pptx"):
+        risks = office_zip_risks(data)
+        if risks.get("macros"):
+            first = risks["macro_members"][0]
+            return f"Office file contains VBA macros ({first}); macros must not ride along"
+        if risks.get("signatures"):
+            first = risks["signature_members"][0]
+            return f"Office file carries an XML-DSig signature ({first}); rebuild would break it"
+    return None
+
 
 @dataclass
 class ContainerInspectReport:
@@ -131,6 +234,7 @@ class ContainerInspectReport:
     # clean then went on to remove them.
     layer_a_total: int = 0
     layer_a_hits: list[dict] = field(default_factory=list)
+    refuse_reason: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -147,20 +251,38 @@ class ContainerInspectReport:
             # HTTP server's `suspicious` flag — reads both report kinds alike.
             "suspicious_total": self.layer_a_total,
             "layer_a_hits": self.layer_a_hits,
+            "refuse_reason": self.refuse_reason,
         }
 
 
 def detect_container_format(path: Path, data: bytes | None = None) -> str:
     ext = path.suffix.lower()
+    # Macro-enabled Office formats never coerce onto their OOXML siblings:
+    # a .docm must not flow into the docx clean pipeline (#PR4 refuse list).
+    if ext in (".docm", ".dotm"):
+        return "docm"
+    if ext in (".xlsm", ".xltm"):
+        return "xlsm"
+    if ext in (".pptm",):
+        return "pptm"
     if ext in (".svg",):
         return "svg"
     if ext in (".pdf",):
+        # An encrypted package must not be parsed just because of its name.
+        if data is not None and _zip_has_encrypted_package(data):
+            return "encrypted_office"
         return "pdf"
     if ext in (".docx",):
+        if data is not None and _zip_has_encrypted_package(data):
+            return "encrypted_office"
         return "docx"
     if ext in (".xlsx",):
+        if data is not None and _zip_has_encrypted_package(data):
+            return "encrypted_office"
         return "xlsx"
     if ext in (".pptx",):
+        if data is not None and _zip_has_encrypted_package(data):
+            return "encrypted_office"
         return "pptx"
     if ext in (".odt",):
         return "odt"
@@ -173,6 +295,8 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
     if data is not None:
         if data[:4] == b"%PDF":
             return "pdf"
+        if data[:8] == CFBF_MAGIC:
+            return "cfbf"
         if data[:100].lstrip().startswith(b"<") and b"svg" in data[:500].lower():
             return "svg"
         if data[:2] == b"PK":
@@ -180,6 +304,8 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
             try:
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     names = set(zf.namelist())
+                    if _names_have_encrypted_package(names):
+                        return "encrypted_office"
                     if "word/document.xml" in names:
                         return "docx"
                     if "xl/workbook.xml" in names:
@@ -2064,12 +2190,22 @@ def inspect_container(path: Path) -> ContainerInspectReport:
     elif fmt == "pdf":
         has_c2pa, has_ai, findings, details = inspect_pdf(path, data)
         tools = details.pop("tools", {})
+    elif fmt in ("docm", "xlsm", "pptm"):
+        family = MACRO_FAMILY[fmt]
+        inspector = {"docx": inspect_docx, "xlsx": inspect_xlsx, "pptx": inspect_pptx}[family]
+        has_c2pa, has_ai, findings, details = inspector(data)
+        details["unsupported"] = True
+        findings.append(f"macros-office: macro-enabled Office file ({fmt}); clean is refused")
     elif fmt == "docx":
         has_c2pa, has_ai, findings, details = inspect_docx(data)
     elif fmt == "xlsx":
         has_c2pa, has_ai, findings, details = inspect_xlsx(data)
     elif fmt == "pptx":
         has_c2pa, has_ai, findings, details = inspect_pptx(data)
+    elif fmt == "cfbf" or fmt == "encrypted_office":
+        has_c2pa, has_ai = False, False
+        findings = [f"unsupported container: {fmt}"]
+        details = {"unsupported": True}
     elif fmt == "odt":
         has_c2pa, has_ai, findings, details = inspect_odt(data)
     elif fmt == "epub":
@@ -2123,13 +2259,28 @@ def inspect_container(path: Path) -> ContainerInspectReport:
                             )
         except zipfile.BadZipFile:
             pass
-    elif fmt in ("docx", "xlsx", "pptx"):
-        layer_a_total, layer_a_hits, extra = _inspect_ooxml_layer_a(data, fmt)
+    elif fmt in OOXML_ZIP_FORMATS:
+        layer_a_total, layer_a_hits, extra = _inspect_ooxml_layer_a(
+            data, MACRO_FAMILY.get(fmt, fmt)
+        )
         findings.extend(extra)
     elif fmt == "odt":
         layer_a_total, layer_a_hits, extra = _inspect_odt_layer_a(data)
         findings.extend(extra)
 
+    refuse_reason = container_clean_refusal(fmt, data)
+    if (
+        refuse_reason
+        and fmt in ("docx", "xlsx", "pptx")
+        and not any(f.startswith(("macros-office:", "macros_vba:")) for f in findings)
+    ):
+        risks = office_zip_risks(data)
+        if risks.get("macros"):
+            findings.append(f"macros_vba: {risks['macro_members'][0]} present")
+        if risks.get("signatures"):
+            findings.append(
+                f"digital_signature: XML-DSig part {risks['signature_members'][0]} present"
+            )
     notes: list[str] = []
     if fmt == "pdf":
         notes.append(
@@ -2166,6 +2317,7 @@ def inspect_container(path: Path) -> ContainerInspectReport:
         notes=notes,
         layer_a_total=layer_a_total,
         layer_a_hits=layer_a_hits,
+        refuse_reason=refuse_reason,
     )
 
 
@@ -2187,6 +2339,9 @@ def clean_container(
 
     data = path.read_bytes()
     fmt = fmt or detect_container_format(path, data)
+    refusal = container_clean_refusal(fmt, data)
+    if refusal:
+        raise UnsupportedCleanError(f"refusing to produce a clean copy ({fmt}): {refusal}")
     actions: list[str] = []
     dest.parent.mkdir(parents=True, exist_ok=True)
     meta: dict[str, Any] = {"format": fmt}

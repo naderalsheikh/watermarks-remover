@@ -264,6 +264,37 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                 notes="aggregated across parts; per-part split lands with part-aware inspectors",
             )
         )
+    # PR 4 refuse-list signals surface as prefixed finding strings.
+    for text in report.get("findings") or []:
+        if text.startswith(("macros_vba: ", "macros-office:")):
+            out.append(
+                Finding(
+                    category="active_content",
+                    subtype="macros_vba",
+                    format=fmt,
+                    risk_level="critical",
+                    confidence="confirmed",
+                    action_recommended="refuse",
+                    action_allowed_by_policy=("keep",),
+                    value_redacted=text,
+                    notes="clean is refused without written attestation (PR 11)",
+                )
+            )
+        elif text.startswith("digital_signature: "):
+            out.append(
+                Finding(
+                    category="digital_signature",
+                    subtype="cms_or_xml_dsig",
+                    format=fmt,
+                    risk_level="critical",
+                    confidence="confirmed",
+                    action_recommended="refuse",
+                    action_allowed_by_policy=("keep",),
+                    value_redacted=text.removeprefix("digital_signature: "),
+                    requires_attestation=True,
+                    notes="a rebuilt copy would break the signature",
+                )
+            )
     return out
 
 
