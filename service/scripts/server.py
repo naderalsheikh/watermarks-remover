@@ -59,7 +59,7 @@ from common import (
     subprocess_preexec_fn,
     which,
 )
-from container_meta import clean_container, inspect_container
+from container_meta import clean_container, extract_ooxml_plaintext, inspect_container
 from format_dispatch import classify_bytes
 from image_meta import clean_image, inspect_image, run_synthid_score
 from score_stylometry import score_text_stylometry
@@ -630,6 +630,31 @@ def _batch_items(
     return items
 
 
+def _body_text(data: bytes, name: str, kind: str) -> str | None:
+    """Plain wording for sampling-watermark detectors (not a full renderer)."""
+    if kind == "text":
+        if looks_binary(data):
+            return None
+        return data.decode("utf-8", errors="surrogateescape")
+    if kind == "container":
+        from container_meta import detect_container_format
+
+        fmt = detect_container_format(Path(name or "input"), data)
+        if fmt in ("docx", "xlsx", "pptx"):
+            text = extract_ooxml_plaintext(data, fmt)
+            return text or None
+        if fmt in ("markdown", "html"):
+            return data.decode("utf-8", errors="surrogateescape")
+    return None
+
+
+def _wording_detections(text: str) -> list[dict[str, Any]]:
+    detections = run_all_text_detectors(text)
+    s_rep = score_text_stylometry(text, path="<wording>")
+    detections.append({"detector": "stylometry", "available": True, **s_rep.to_dict()})
+    return detections
+
+
 def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]:
     kind = classify_bytes(data, Path(name).suffix)
     if kind == "unknown":
@@ -659,6 +684,28 @@ def _inspect_payload(data: bytes, name: str, run_detect: bool) -> dict[str, Any]
             report = inspect_av(path).to_dict()
         else:
             report = inspect_container(path).to_dict()
+            fmt = report.get("format")
+            if fmt in ("docx", "xlsx", "pptx"):
+                body_text = extract_ooxml_plaintext(data, fmt)
+                if body_text.strip():
+                    report["stylometry"] = score_text_stylometry(
+                        body_text, path=name or "<container>"
+                    ).to_dict()
+                    report["body_chars"] = len(body_text)
+                    report["body_words"] = report["stylometry"].get("word_count")
+                    if run_detect:
+                        report["text_detectors"] = run_all_text_detectors(body_text)
+    body = _body_text(data, name, kind)
+    if body:
+        report.setdefault("body_chars", len(body))
+        report.setdefault("body_words", len(body.split()))
+        report["body_preview"] = body[:600]
+        if "stylometry" not in report:
+            report["stylometry"] = score_text_stylometry(
+                body, path=name or "<text>"
+            ).to_dict()
+        if run_detect and "text_detectors" not in report:
+            report["text_detectors"] = run_all_text_detectors(body)
     detected_wm = any(
         entry.get("available") and entry.get("is_watermarked")
         for entry in report.get("text_detectors") or []
@@ -710,8 +757,17 @@ def _detect_payload(data: bytes, name: str) -> dict[str, Any]:
                 "report": inspect_av(path).to_dict(),
             }
         else:
-            detections = []
             report = inspect_container(path).to_dict()
+            body = _body_text(data, name, kind)
+            detections = _wording_detections(body) if body else []
+            if not detections:
+                detections = [
+                    {
+                        "detector": "wording",
+                        "available": False,
+                        "error": "no extractable body text for sampling-watermark detectors",
+                    }
+                ]
             return {
                 "ok": True,
                 "kind": kind,
@@ -863,8 +919,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _respond_bytes(self, status: int, data: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path in ("/", "/ui", "/ui.html"):
+            ui = Path(__file__).with_name("ui.html")
+            try:
+                html = ui.read_bytes()
+            except OSError:
+                self._respond(HTTPStatus.NOT_FOUND, {"ok": False, "error": "ui.html missing"})
+                return
+            self._respond_bytes(HTTPStatus.OK, html, "text/html; charset=utf-8")
+            return
         if not self._authorized():
             self._respond(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "unauthorized"})
             return
@@ -1008,6 +1081,7 @@ def main() -> int:
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     eprint(f"watermarks-remover service {VERSION} on http://{args.host}:{args.port}")
+    eprint(f"browser UI: http://{args.host}:{args.port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

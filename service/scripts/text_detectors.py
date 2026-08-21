@@ -45,6 +45,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from detect_gumbel import DEFAULT_THRESHOLD, DEFAULT_WINDOW, detect_text
+from detect_kgw import DEFAULT_THRESHOLD as KGW_THRESHOLD
+from detect_kgw import detect_kgw_text
 
 DEFAULT_MARKLLM_SCHEME = "kgw"
 DEFAULT_MARKLLM_TIMEOUT = 600.0
@@ -331,6 +333,54 @@ class GumbelTextDetector:
 # ---------------------------------------------------------------------------
 
 
+class KGWTextDetector:
+    """Same-key Kirchenbauer green-list z-score (open-LLM sampling marks).
+
+    Activated by WATERMARKS_KGW_KEY. Stdlib-only. Not a vendor oracle.
+    """
+
+    name = "kgw"
+    vendor = "self-hosted"
+
+    def __init__(self, *, key: str | None = None, threshold: float | None = None) -> None:
+        self._key = key
+        self._threshold = threshold
+
+    def _key_env(self) -> str | None:
+        if self._key:
+            return self._key
+        return os.environ.get("WATERMARKS_KGW_KEY", "").strip() or None
+
+    def available(self) -> bool:
+        return self._key_env() is not None
+
+    def detect(self, text: str) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "detector": self.name,
+            "scheme": "kgw",
+            "vendor": self.vendor,
+            "available": False,
+        }
+        key = self._key_env()
+        if key is None:
+            report["error"] = (
+                "WATERMARKS_KGW_KEY not set. Sampling-watermark identification "
+                "needs the generator's key (and tokenizer). Claude/Gemini/Grok "
+                "production keys are not public."
+            )
+            return report
+        try:
+            payload = detect_kgw_text(
+                text, key, threshold=self._threshold or KGW_THRESHOLD
+            )
+        except Exception as e:
+            report["error"] = f"KGW detection failed: {e}"
+            return report
+        payload["detector"] = self.name
+        payload["vendor"] = self.vendor
+        return payload
+
+
 class ClaudeTextDetector:
     """Placeholder for Anthropic's announced text-watermark detection API.
 
@@ -376,6 +426,7 @@ def all_detectors(
         detectors.append(markllm or MarkLLMTextDetector())
     if include_gumbel:
         detectors.append(gumbel or GumbelTextDetector())
+    detectors.append(KGWTextDetector())
     detectors.append(ClaudeTextDetector())
     return detectors
 

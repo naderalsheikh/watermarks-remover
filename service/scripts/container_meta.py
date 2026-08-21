@@ -986,6 +986,125 @@ def _scrub_text_runs(
     return "".join(out), removed, replaced
 
 
+def _inspect_text_runs(
+    xml_text: str, open_re: re.Pattern[str], close_re: re.Pattern[str]
+) -> tuple[int, list[dict]]:
+    """Count Layer A hits in text runs (inspect twin of ``_scrub_text_runs``)."""
+    from text_unicode import inspect_text  # local import to avoid cycles
+
+    total = 0
+    hits: list[dict] = []
+    for _os, oe, cs, _ce in _iter_tag_blocks(xml_text, open_re, close_re):
+        inner = _decode_xml_entities(xml_text[oe:cs])
+        if not inner:
+            continue
+        ta = inspect_text(inner).to_dict()
+        total += int(ta.get("suspicious_total") or 0)
+        hits.extend(ta.get("hits") or [])
+    return total, hits
+
+
+def _inspect_ooxml_layer_a(data: bytes, fmt: str) -> tuple[int, list[dict], list[str]]:
+    """Scan OOXML body parts for invisible Unicode the way clean() scrubs them."""
+    prefix = {"docx": "word/", "xlsx": "xl/", "pptx": "ppt/"}.get(fmt, "")
+    total = 0
+    hits: list[dict] = []
+    findings: list[str] = []
+    budget: list[int] = [0]
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if not name.endswith(".xml") or (prefix and not name.startswith(prefix)):
+                    continue
+                xml = _read_zip_member(zf, info, budget).decode("utf-8", errors="surrogateescape")
+                if fmt == "docx":
+                    n, h = _inspect_text_runs(
+                        xml, re.compile(r"<w:t\b[^>]*>"), re.compile(r"</w:t>")
+                    )
+                elif fmt == "xlsx":
+                    n, h = _inspect_text_runs(xml, re.compile(r"<t\b[^>]*>"), re.compile(r"</t>"))
+                else:
+                    n, h = _inspect_text_runs(
+                        xml, re.compile(r"<a:t\b[^>]*>"), re.compile(r"</a:t>")
+                    )
+                if not n:
+                    continue
+                total += n
+                hits.extend(h)
+                for item in h:
+                    findings.append(
+                        f"layer-a ({name}): {item['codepoint']} {item['label']} "
+                        f"x{item['count']} ({item['kind']})"
+                    )
+    except zipfile.BadZipFile:
+        pass
+    return total, hits, findings
+
+
+def extract_ooxml_plaintext(data: bytes, fmt: str) -> str:
+    """Plain text of OOXML runs — for stylometry, not a full Word renderer."""
+    chunks: list[str] = []
+    prefix = {"docx": "word/", "xlsx": "xl/", "pptx": "ppt/"}.get(fmt, "")
+    budget: list[int] = [0]
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if not name.endswith(".xml") or (prefix and not name.startswith(prefix)):
+                    continue
+                xml = _read_zip_member(zf, info, budget).decode("utf-8", errors="surrogateescape")
+                if fmt == "docx":
+                    open_re, close_re = re.compile(r"<w:t\b[^>]*>"), re.compile(r"</w:t>")
+                elif fmt == "xlsx":
+                    open_re, close_re = re.compile(r"<t\b[^>]*>"), re.compile(r"</t>")
+                else:
+                    open_re, close_re = re.compile(r"<a:t\b[^>]*>"), re.compile(r"</a:t>")
+                for _os, oe, cs, _ce in _iter_tag_blocks(xml, open_re, close_re):
+                    piece = _decode_xml_entities(xml[oe:cs]).strip()
+                    if piece:
+                        chunks.append(piece)
+    except zipfile.BadZipFile:
+        return ""
+    return "\n".join(chunks)
+
+
+def _inspect_odt_layer_a(data: bytes) -> tuple[int, list[dict], list[str]]:
+    from text_unicode import inspect_text  # local import to avoid cycles
+
+    total = 0
+    hits: list[dict] = []
+    findings: list[str] = []
+    budget: list[int] = [0]
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            if "content.xml" not in zf.namelist():
+                return 0, [], []
+            info = zf.getinfo("content.xml")
+            xml = _read_zip_member(zf, info, budget).decode("utf-8", errors="surrogateescape")
+        for _os, oe, cs, _ce in _iter_tag_blocks(
+            xml, re.compile(r"<text:p\b[^>]*>"), re.compile(r"</text:p>")
+        ):
+            inner = xml[oe:cs]
+            for segment in re.split(r"(<[^>]+>)", inner):
+                if not segment or segment.startswith("<"):
+                    continue
+                ta = inspect_text(_decode_xml_entities(segment)).to_dict()
+                n = int(ta.get("suspicious_total") or 0)
+                if not n:
+                    continue
+                total += n
+                hits.extend(ta.get("hits") or [])
+                for item in ta.get("hits") or []:
+                    findings.append(
+                        f"layer-a (content.xml): {item['codepoint']} {item['label']} "
+                        f"x{item['count']} ({item['kind']})"
+                    )
+    except zipfile.BadZipFile:
+        pass
+    return total, hits, findings
+
+
 def _scrub_docx_text(xml_text: str) -> tuple[str, int, int]:
     """Run Layer A over the ``<w:t>`` text runs of a DOCX part.
 
@@ -2004,6 +2123,12 @@ def inspect_container(path: Path) -> ContainerInspectReport:
                             )
         except zipfile.BadZipFile:
             pass
+    elif fmt in ("docx", "xlsx", "pptx"):
+        layer_a_total, layer_a_hits, extra = _inspect_ooxml_layer_a(data, fmt)
+        findings.extend(extra)
+    elif fmt == "odt":
+        layer_a_total, layer_a_hits, extra = _inspect_odt_layer_a(data)
+        findings.extend(extra)
 
     notes: list[str] = []
     if fmt == "pdf":
@@ -2011,7 +2136,10 @@ def inspect_container(path: Path) -> ContainerInspectReport:
             "PDF inspection is best-effort; exiftool/c2patool give more reliable metadata detection"
         )
     elif fmt in ("docx", "xlsx", "pptx"):
-        notes.append(f"{fmt.upper()}: metadata/provenance and embedded media are scanned")
+        notes.append(
+            f"{fmt.upper()}: metadata/provenance, embedded media, and body text "
+            "runs (invisible Unicode) are scanned"
+        )
     elif fmt == "epub":
         notes.append(
             "EPUB: package-document metadata, XHTML meta/JSON-LD, and embedded media are scanned"

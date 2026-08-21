@@ -107,7 +107,7 @@ def _clean_env(monkeypatch):
 def test_capabilities_exposes_detectors(conn):
     status, body = _get(conn, "/capabilities")
     assert status == 200
-    assert set(body["text_detectors"]) == {"markllm", "gumbel", "claude-text"}
+    assert set(body["text_detectors"]) == {"markllm", "gumbel", "kgw", "claude-text"}
     assert "synthid_http" in body["scorers"]
 
 

@@ -248,8 +248,7 @@ def test_run_all_text_detectors_can_exclude_markllm(monkeypatch):
         lambda: pytest.fail("must not construct MarkLLM when excluded"),
     )
     reports = text_detectors.run_all_text_detectors("hello", include_markllm=False)
-    assert len(reports) == 2  # gumbel + claude placeholder
-    assert {r["detector"] for r in reports} == {"gumbel", "claude-text"}
+    assert {r["detector"] for r in reports} == {"gumbel", "kgw", "claude-text"}
 
 
 def test_run_all_text_detectors_injects_markllm_instance(monkeypatch, tmp_path):
@@ -284,13 +283,33 @@ def test_claude_placeholder():
 
 def test_detector_status_keys():
     status = text_detectors.detector_status()
-    assert set(status) == {"markllm", "gumbel", "claude-text"}
+    assert set(status) == {"markllm", "gumbel", "kgw", "claude-text"}
 
 
 def test_run_all_text_detectors_length():
     reports = text_detectors.run_all_text_detectors("hello")
-    assert len(reports) == 3  # markllm + gumbel + claude placeholder
+    assert len(reports) == 4  # markllm + gumbel + kgw + claude placeholder
     assert all("detector" in r for r in reports)
+
+
+def test_kgw_unconfigured(monkeypatch):
+    monkeypatch.delenv("WATERMARKS_KGW_KEY", raising=False)
+    det = text_detectors.KGWTextDetector()
+    assert det.available() is False
+    report = det.detect("hello world " * 20)
+    assert report["available"] is False
+    assert "WATERMARKS_KGW_KEY" in report["error"]
+
+
+def test_kgw_with_key_returns_score(monkeypatch):
+    monkeypatch.setenv("WATERMARKS_KGW_KEY", "test-key")
+    det = text_detectors.KGWTextDetector()
+    assert det.available() is True
+    report = det.detect("The parties shall negotiate in good faith " * 8)
+    assert report["available"] is True
+    assert report["scheme"] == "kgw"
+    assert "score" in report
+    assert report["is_watermarked"] in (True, False)
 
 
 def test_run_text_detectors_filters_unavailable():

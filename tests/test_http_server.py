@@ -84,6 +84,19 @@ def test_health(conn):
     assert "version" in body
 
 
+def test_browser_ui(conn):
+    conn.request("GET", "/")
+    resp = conn.getresponse()
+    data = resp.read()
+    assert resp.status == 200
+    assert resp.getheader("Content-Type", "").startswith("text/html")
+    html = data.decode("utf-8")
+    assert "Watermarks remover" in html
+    assert "/inspect" in html
+    assert "/clean" in html
+    assert "Try a sample" in html
+
+
 def test_capabilities(conn):
     status, body = _get(conn, "/capabilities")
     assert status == 200
