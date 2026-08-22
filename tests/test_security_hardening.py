@@ -447,52 +447,37 @@ def test_upload_path_refuses_flagged_file(tmp_path, monkeypatch, _flagging_scann
     malware._scanner = malware.DepthAndClamScanner()
 
 
-def test_worker_scans_before_parse_defense_in_depth(tmp_path, monkeypatch):
-    """Even if a flagged file reached the store, the worker refuses pre-parse."""
-    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw")
-    from app.config import Config
-    from app.db import make_engine, make_session_factory
-    from app.main import create_app
-    from app.models import Document, Job
+def test_worker_scans_before_parse_defense_in_depth(tmp_path):
+    """Even if a flagged file reached the store, the worker refuses pre-parse.
 
-    root = tmp_path / "data"
-    create_app(root)
-    cfg = Config(root)
-    s = make_session_factory(make_engine(cfg))()
+    The worker is a pure function now (PR: scoped per-job mount, no DB
+    access — see app/runner.py's module docstring) so this exercises it
+    directly against a staged input/output pair, the same shape the runner
+    stages for a real job."""
+    import json
 
-    store = root / "stash"
-    store.mkdir(parents=True)
-    original = store / "crafty.docx"
+    from app.worker import _run_job
+
+    original = tmp_path / "input" / "crafty.docx"
+    original.parent.mkdir(parents=True)
     original.write_bytes(b"PK\x03\x04 crafted-bytes")
-
-    doc = Document(
-        id="doc18",
-        matter_id="mat18",
-        filename="crafty.docx",
-        sha256="0" * 64,
-        bytes=len(b"PK\x03\x04 crafted-bytes"),
-        storage_path=str(original),
-    )
-    job = Job(id="job18", matter_id="mat18", document_id="doc18", kind="inspect")
-    s.add(doc)
-    s.add(job)
-    s.commit()
+    output_dir = tmp_path / "output"
 
     set_scanner(_FlaggingScanner())
     try:
-        from app.worker import _run_job
-
-        rc = _run_job(str(root), "job18")
+        rc = _run_job(
+            kind="inspect", input_path=original, output_dir=output_dir,
+            policy_id="external_sharing", attest=False,
+        )
     finally:
         from app import malware
 
         malware._scanner = malware.DepthAndClamScanner()
 
     assert rc == 0  # refusal is an outcome, not a crash
-    s.expire_all()
-    j = s.get(Job, "job18")
-    assert j.status == "refused"
-    assert "malware scan" in j.error and "stub-eicar" in j.error
+    payload = json.loads((output_dir / "result.json").read_text())
+    assert payload["status"] == "refused"
+    assert "malware scan" in payload["error"] and "stub-eicar" in payload["error"]
     # original untouched by construction
     assert original.read_bytes().startswith(b"PK\x03\x04")
 
@@ -514,6 +499,9 @@ def test_run_job_uses_caps_budget_as_timeout(monkeypatch, tmp_path):
     """The subprocess timeout passed down is min(env ceiling, caps budget)."""
     from app import runner
     from app.config import Config
+    from app.db import make_engine, make_session_factory
+    from app.migrate import upgrade_head
+    from app.models import Document, Job
 
     captured = {}
 
@@ -527,7 +515,16 @@ def test_run_job_uses_caps_budget_as_timeout(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     cfg = Config(tmp_path)
-    runner.run_job(cfg, "j1", kind="inspect")
+    upgrade_head(f"sqlite:///{cfg.db_path}")
+    s = make_session_factory(make_engine(cfg))()
+    original = tmp_path / "orig.txt"
+    original.write_bytes(b"hello")
+    s.add(Document(id="doc1", matter_id="m1", filename="orig.txt", sha256="0" * 64,
+                    bytes=5, storage_path=str(original)))
+    s.add(Job(id="j1", matter_id="m1", document_id="doc1", kind="inspect"))
+    s.commit()
+
+    runner.run_job(cfg, s, "j1", kind="inspect")
     expect = min(cfg.worker_timeout_s, job_budget_s("inspect"))
     assert captured["timeout"] == expect
 

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import io
 import json
+import logging
+import os
+import shutil
 import zipfile
 from pathlib import Path
 
 import custody as custody_mod  # WORM storage only — never parses documents
+from common import MAX_INPUT_BYTES  # a size constant, not a parser
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -46,6 +50,61 @@ class AclBody(BaseModel):
     perm: str
 
 
+log = logging.getLogger("counselclear")
+
+
+def _log_startup_posture(cfg: Config) -> None:
+    """One-time, non-secret operational summary at boot — this app shipped
+    with zero logging until now, which meant an operator running it
+    unisolated or with a no-op malware scanner had no way to notice short
+    of reading the source. Never logs the password, hash, or cookie secret."""
+    log.info(
+        "counselclear starting: data_root=%s worker_mode=%s",
+        cfg.data_root, cfg.worker_mode,
+    )
+    if cfg.worker_mode != "docker":
+        log.warning(
+            "worker_mode=%s: sanitize/inspect jobs run as a plain child "
+            "process of this API, sharing its filesystem access — not "
+            "isolated from a hostile file. Set COUNSELCLEAR_WORKER_MODE="
+            "docker (see compose.yaml's legal profile) for real isolation.",
+            cfg.worker_mode,
+        )
+    if shutil.which("clamscan") is None:
+        log.warning(
+            "clamscan not found on PATH: uploads are only checked for "
+            "nested-archive depth, not scanned for malware. "
+            "Dockerfile.counselclear installs clamav; a bare non-container "
+            "run of this app does not."
+        )
+
+
+async def _read_capped(file: UploadFile, cap: int | None = None) -> bytes:
+    """Read an upload in bounded chunks, never buffering past ``cap`` bytes.
+
+    ``await file.read()`` has no size limit of its own — a client that
+    omits Content-Length (or lies about it) could otherwise make this
+    process buffer an arbitrarily large body before the engine's own
+    MAX_INPUT_BYTES check ever runs (which only happens later, inside the
+    isolated worker). This is the same cap, enforced at the door instead.
+    ``cap`` defaults to the module-level constant, looked up at call time
+    (not bound as a default value) so tests can override it.
+    """
+    if cap is None:
+        cap = MAX_INPUT_BYTES
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1 << 20)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(413, f"upload exceeds {cap} byte limit")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def create_app(data_root: str | Path | None = None) -> FastAPI:
     cfg = Config(data_root)
     cfg.data_root.mkdir(parents=True, exist_ok=True)
@@ -53,8 +112,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     engine = make_engine(cfg)
     upgrade_head(f"sqlite:///{cfg.db_path}")
     session_factory = make_session_factory(engine)
+    _log_startup_posture(cfg)
 
-    app = FastAPI(title="CounselClear", version="product-mvp")
+    # Set COUNSELCLEAR_DISABLE_DOCS=1 for any deployment reachable beyond
+    # loopback: /docs and /openapi.json carry no auth check today.
+    docs_disabled = os.environ.get("COUNSELCLEAR_DISABLE_DOCS", "").strip() == "1"
+    app = FastAPI(
+        title="CounselClear",
+        version="product-mvp",
+        docs_url=None if docs_disabled else "/docs",
+        redoc_url=None if docs_disabled else "/redoc",
+        openapi_url=None if docs_disabled else "/openapi.json",
+    )
+
+    @app.get("/health")
+    def health():
+        return {"ok": True}
 
     def db_session():
         s = session_factory()
@@ -75,10 +148,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     # --- auth ---------------------------------------------------------------
 
     @app.post("/v1/auth/login")
-    def login(body: LoginBody, response: Response):
+    def login(body: LoginBody, request: Request, response: Response):
         if not verify_password(cfg, body.password):
             raise HTTPException(403, "invalid credentials")
-        response.set_cookie("cc_session", issue_session(cfg), httponly=True, samesite="strict")
+        # secure=True whenever the request actually arrived over TLS; not
+        # hardcoded True because this app has no TLS termination of its own
+        # today (loopback-bound plain HTTP is the documented v1 deployment)
+        # and a hardcoded secure flag would just make the cookie never get
+        # sent at all rather than add any real protection.
+        response.set_cookie(
+            "cc_session", issue_session(cfg),
+            httponly=True, samesite="strict", secure=request.url.scheme == "https",
+        )
         return {"ok": True}
 
     # --- matters ------------------------------------------------------------
@@ -115,7 +196,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     ):
         _require(matter_id, "upload", s)
         _matter(matter_id, s)
-        data = await file.read()
+        data = await _read_capped(file)
         name = Path(file.filename or "upload").name
         verdict = get_scanner().scan(data, name)
         if not verdict.clean:
@@ -168,9 +249,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         crash/timeout backstop that guarantees a terminal status.
         Timeout budget derives from engine Caps per kind (PR 18).
         """
-        res = run_job(cfg, job_id, kind=kind)
         s = session_factory()
         try:
+            res = run_job(cfg, s, job_id, kind=kind)
             sync_job(s, job_id, res)
         finally:
             s.close()

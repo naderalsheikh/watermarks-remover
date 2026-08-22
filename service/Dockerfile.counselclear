@@ -19,10 +19,21 @@ ARG VERSION
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        clamav \
+        clamav-freshclam \
         libarchive-zip-perl \
         libimage-exiftool-perl \
         qpdf \
     && rm -rf /var/lib/apt/lists/*
+
+# Seed a virus-definition database at build time so app.malware's real
+# clamscan path (not just its always-on archive-depth check) actually has
+# something to scan against out of the box. This snapshot goes stale the
+# moment the image is built: run `freshclam` on a schedule against the
+# running container's /var/lib/clamav (or rebuild the image regularly) —
+# this build-time seed is a floor, not a substitute for real updates.
+RUN freshclam --stdout || echo "freshclam failed at build time (no network?); clamav db will be empty until it is updated at runtime" \
+    && chmod -R a+rX /var/lib/clamav
 
 COPY requirements-app.txt /app/requirements-app.txt
 RUN python3 -m pip install --no-cache-dir "pip==26.2.1" \

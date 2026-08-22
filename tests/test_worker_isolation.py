@@ -97,48 +97,63 @@ def test_inspect_job_runs_in_worker_subprocess(client):
     assert r["status"] == "done", r.get("error")
 
 
-def test_worker_cli_rejects_nonqueued_job(tmp_path, monkeypatch):
-    """run-job refuses to re-execute a job that already has an outcome."""
-    import os
+def test_worker_cli_is_pure_no_db_access(tmp_path):
+    """run-job takes explicit --input/--output-dir, never a --data-root or
+    --job to look up in a database — the whole point of PR 17 hardening
+    (see runner.py's module docstring). Confirmed by running it against a
+    bare filesystem with no app database anywhere near it."""
     import subprocess as sp
 
-    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw17")
-    from app.main import create_app
+    src = tmp_path / "in" / "spa.txt"
+    src.parent.mkdir(parents=True)
+    src.write_bytes((FIXTURES / "spa.txt").read_bytes())
+    out = tmp_path / "out"
 
-    root = tmp_path / "d"
-    app = create_app(root)
-    c = TestClient(app)
-    assert c.post("/v1/auth/login", json={"password": "pw17"}).status_code == 200
-    matter = c.post("/v1/matters", json={"name": "m"}).json()["id"]
-    doc = c.post(
-        f"/v1/matters/{matter}/documents",
-        files={
-            "file": ("spa.txt", (FIXTURES / "spa.txt").read_bytes(), "application/octet-stream")
-        },
-    ).json()
-    job = c.post(f"/v1/matters/{matter}/documents/{doc['id']}/inspect-jobs").json()
-    assert job["status"] == "done"
-
-    env = dict(os.environ, PYTHONPATH=str(REPO / "service"))
+    env = dict(__import__("os").environ, PYTHONPATH=str(REPO / "service"))
     proc = sp.run(
         [
-            sys.executable,
-            "-m",
-            "app.worker",
-            "run-job",
-            "--data-root",
-            str(root),
-            "--job",
-            job["id"],
+            sys.executable, "-m", "app.worker", "run-job",
+            "--kind", "inspect", "--input", str(src), "--output-dir", str(out),
         ],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=str(REPO / "service"),
-        check=False,
+        capture_output=True, text=True, env=env, cwd=str(REPO / "service"), check=False,
     )
-    assert proc.returncode == 3
-    assert "not queued" in (proc.stderr or "")
+    assert proc.returncode == 0, proc.stderr
+    result = (out / "result.json").read_text()
+    assert '"status": "done"' in result
+
+
+def test_run_job_real_subprocess_timeout_is_recorded_as_failed(tmp_path, monkeypatch):
+    """A genuine subprocess.TimeoutExpired (not a mocked subprocess.run) —
+    the runner's own except-branch, exercised for real. Forces a fast, real
+    timeout by swapping in a command that sleeps past a 1s worker budget."""
+    from app import runner
+    from app.db import make_engine, make_session_factory
+    from app.migrate import upgrade_head
+    from app.models import Document, Job
+
+    monkeypatch.setenv("COUNSELCLEAR_WORKER_TIMEOUT_S", "1")
+    cfg = Config(tmp_path)
+    upgrade_head(f"sqlite:///{cfg.db_path}")
+    s = make_session_factory(make_engine(cfg))()
+    original = tmp_path / "orig.txt"
+    original.write_bytes(b"hello")
+    s.add(Document(id="doc1", matter_id="m1", filename="orig.txt", sha256="0" * 64,
+                    bytes=5, storage_path=str(original)))
+    s.add(Job(id="j1", matter_id="m1", document_id="doc1", kind="inspect"))
+    s.commit()
+
+    monkeypatch.setattr(
+        runner, "build_subprocess_cmd",
+        lambda **kw: [sys.executable, "-c", "import time; time.sleep(30)"],
+    )
+    res = runner.run_job(cfg, s, "j1", kind="inspect")
+    assert res.timed_out is True
+
+    runner.sync_job(s, "j1", res)
+    s.expire_all()
+    job = s.get(Job, "j1")
+    assert job.status == "failed"
+    assert "timed out" in job.error
 
 
 def test_sync_backstop_marks_failed_on_crash(tmp_path, monkeypatch):
@@ -172,11 +187,24 @@ def test_sync_backstop_marks_failed_on_crash(tmp_path, monkeypatch):
 # --- docker hardening ------------------------------------------------------------
 
 
-def test_docker_cmd_is_hardened_and_digest_pinned():
+def _docker_kwargs(mount_root: Path):
+    return dict(
+        mount_root=mount_root,
+        input_path=mount_root / "input" / "x.docx",
+        output_dir=mount_root / "output",
+        kind="sanitize",
+        policy_id="external_sharing",
+        attest=False,
+        matter_id="m1",
+    )
+
+
+def test_docker_cmd_is_hardened_and_digest_pinned(tmp_path):
     cfg = Config.__new__(Config)
-    cfg.data_root = Path("/srv/cc")
+    cfg.data_root = tmp_path / "srv" / "cc"
     cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
-    cmd = build_docker_cmd(cfg, "job123")
+    mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
+    cmd = build_docker_cmd(cfg, **_docker_kwargs(mount_root))
     joined = " ".join(cmd)
     for flag in (
         "--network none",
@@ -191,12 +219,30 @@ def test_docker_cmd_is_hardened_and_digest_pinned():
     assert "/data" in joined and cfg.worker_image in cmd
 
 
-def test_docker_mode_refuses_unpinned_image():
+def test_docker_mount_is_scoped_to_one_job_not_the_whole_data_root(tmp_path):
+    """The security property this whole refactor exists for: a compromised
+    worker must not be able to reach the database or other matters' files."""
     cfg = Config.__new__(Config)
-    cfg.data_root = Path("/srv/cc")
+    cfg.data_root = tmp_path / "srv" / "cc"
+    cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
+    mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
+    cmd = build_docker_cmd(cfg, **_docker_kwargs(mount_root))
+    mount_flag = cmd[cmd.index("-v") + 1]
+    host_mount = mount_flag.split(":")[0]
+    assert host_mount == str(mount_root)
+    assert host_mount != str(cfg.data_root)
+    # The database lives at a sibling of matters/, never inside a job dir.
+    assert "counselclear.sqlite3" not in mount_flag
+    assert str(cfg.data_root / "matters" / "m2") not in mount_flag
+
+
+def test_docker_mode_refuses_unpinned_image(tmp_path):
+    cfg = Config.__new__(Config)
+    cfg.data_root = tmp_path / "srv" / "cc"
     cfg.worker_image = "counselclear:latest"
+    mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
     with pytest.raises(ValueError, match="digest-pinned"):
-        build_docker_cmd(cfg, "job123")
+        build_docker_cmd(cfg, **_docker_kwargs(mount_root))
 
 
 def test_config_rejects_unknown_worker_mode(monkeypatch, tmp_path):
@@ -206,7 +252,10 @@ def test_config_rejects_unknown_worker_mode(monkeypatch, tmp_path):
 
 
 def test_build_subprocess_cmd_shape(tmp_path):
-    cfg = Config(tmp_path)
-    cmd = build_subprocess_cmd(cfg, "job42")
+    cmd = build_subprocess_cmd(
+        input_path=tmp_path / "in" / "x.docx", output_dir=tmp_path / "out",
+        kind="inspect", policy_id="external_sharing", attest=False, matter_id="m1",
+    )
     assert cmd[:4] == [sys.executable, "-m", "app.worker", "run-job"]
-    assert "--job" in cmd and "job42" in cmd
+    assert "--input" in cmd and str(tmp_path / "in" / "x.docx") in cmd
+    assert "--output-dir" in cmd and str(tmp_path / "out") in cmd

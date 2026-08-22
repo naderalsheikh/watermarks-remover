@@ -31,6 +31,31 @@ def client(tmp_path, monkeypatch):
     c.close()
 
 
+def test_health_is_unauthenticated(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    c = TestClient(create_app(tmp_path / "d"))
+    r = c.get("/health")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+
+
+def test_login_cookie_not_secure_over_plain_http_but_docs_default_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    c = TestClient(create_app(tmp_path / "d"))
+    r = c.post("/v1/auth/login", json={"password": "pw12345"})
+    # TestClient's default base_url is http://testserver — secure=False is
+    # correct here (a hardcoded secure=True would just drop the cookie).
+    assert "secure" not in r.headers["set-cookie"].lower()
+    assert c.get("/docs").status_code == 200
+
+
+def test_docs_disabled_via_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    monkeypatch.setenv("COUNSELCLEAR_DISABLE_DOCS", "1")
+    c = TestClient(create_app(tmp_path / "d"))
+    assert c.get("/docs").status_code == 404
+    assert c.get("/openapi.json").status_code == 404
+
+
 def test_auth_required_and_login_flow(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
     app = create_app(tmp_path / "d1")
@@ -64,6 +89,39 @@ def _upload(client, name: str, matter: str | None = None) -> dict:
     )
     assert r.status_code == 200, r.text
     return {**r.json(), "_matter": matter}
+
+
+def test_read_capped_rejects_oversized_upload_without_buffering_it_all():
+    """_read_capped must not be `await file.read()` with no limit — a client
+    that omits or lies about Content-Length shouldn't be able to make this
+    process buffer an unbounded body before the engine ever sees it."""
+    import asyncio
+
+    from app.main import _read_capped
+    from fastapi import HTTPException, UploadFile
+
+    async def _run():
+        upload = UploadFile(file=io.BytesIO(b"x" * 100), filename="big.bin")
+        with pytest.raises(HTTPException) as exc:
+            await _read_capped(upload, cap=10)
+        assert exc.value.status_code == 413
+
+        upload_ok = UploadFile(file=io.BytesIO(b"x" * 10), filename="ok.bin")
+        assert await _read_capped(upload_ok, cap=10) == b"x" * 10
+
+    asyncio.run(_run())
+
+
+def test_upload_endpoint_rejects_oversized_file(client, monkeypatch):
+    import app.main as app_main
+
+    monkeypatch.setattr(app_main, "MAX_INPUT_BYTES", 16)
+    matter = client.post("/v1/matters", json={"name": "m"}).json()["id"]
+    r = client.post(
+        f"/v1/matters/{matter}/documents",
+        files={"file": ("big.txt", b"x" * 1000, "text/plain")},
+    )
+    assert r.status_code == 413
 
 
 def test_document_upload_is_write_once_and_hashed(client):

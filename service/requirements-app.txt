@@ -4,3 +4,4 @@ uvicorn==0.52.4
 SQLAlchemy==2.0.52
 argon2-cffi==25.1.0
 python-multipart==0.0.32
+alembic==1.16.5

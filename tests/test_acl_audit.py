@@ -134,6 +134,31 @@ def test_audit_records_acl_changes(env):
     assert "acl.grant" in actions and "acl.revoke" in actions
 
 
+def test_cross_matter_document_and_job_access_is_404_not_leaked(env):
+    """A document/job id from one matter must not be reachable through a
+    different matter's URL, even for the (today, only) operator account —
+    matter-scoped URLs are the isolation boundary multi-user ACL will sit
+    on top of later, and id confusion here would silently defeat it."""
+    c, matter_a, doc_a, job_a, _ = env
+    matter_b = c.post("/v1/matters", json={"name": "Unrelated Matter"}).json()
+
+    r = c.get(f"/v1/matters/{matter_b['id']}/documents/{doc_a['id']}")
+    assert r.status_code == 404
+
+    r = c.get(f"/v1/matters/{matter_b['id']}/jobs/{job_a['id']}")
+    assert r.status_code == 404
+
+    r = c.get(f"/v1/matters/{matter_b['id']}/jobs/{job_a['id']}/manifest")
+    assert r.status_code == 404
+
+    r = c.get(f"/v1/matters/{matter_b['id']}/jobs/{job_a['id']}/bundle")
+    assert r.status_code == 404
+
+    # and the reverse: matter_b's (nonexistent) doc id looked up under matter_a
+    r = c.get(f"/v1/matters/{matter_a['id']}/documents/{matter_b['id']}")
+    assert r.status_code == 404
+
+
 def test_manifest_carries_no_matter_name(env):
     c, matter, _, job, _ = env
     manifest = c.get(f"/v1/matters/{matter['id']}/jobs/{job['id']}/manifest").json()

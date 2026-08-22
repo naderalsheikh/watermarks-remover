@@ -1,22 +1,26 @@
-"""Schema bring-up for the single-tenant profile.
+"""Schema bring-up: drives real Alembic migrations, not create_all().
 
-Honest deviation from the design doc: alembic is deferred until the
-production profile; this profile creates the current schema directly and
-assumes a fresh data root. upgrade_head() exists so the call site reads
-the same when alembic lands.
+create_all() can only add tables that don't exist yet — it silently cannot
+apply an ALTER to a table that's already there, so a schema change shipped
+as a new migration would never actually reach an existing data root. This
+runs the real migration chain (service/app/alembic/) every time the app
+starts, same as any other deployment profile; on a fresh data root that
+just means running from revision None to head.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from pathlib import Path
 
-from . import models  # noqa: F401  (registers tables on Base.metadata)
-from .db import Base
+from alembic import command
+from alembic.config import Config as AlembicConfig
+
+_ALEMBIC_DIR = Path(__file__).resolve().parent / "alembic"
+_ALEMBIC_INI = _ALEMBIC_DIR.parent / "alembic.ini"
 
 
 def upgrade_head(db_url: str) -> None:
-    engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    try:
-        Base.metadata.create_all(engine)
-    finally:
-        engine.dispose()
+    cfg = AlembicConfig(str(_ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(_ALEMBIC_DIR))
+    cfg.set_main_option("sqlalchemy.url", db_url)
+    command.upgrade(cfg, "head")

@@ -9,99 +9,100 @@ Two entry modes:
 
 2. Job mode for the API's runner (PR 17)::
 
-       python -m app.worker run-job --data-root /data --job <id>
+       python -m app.worker run-job --kind inspect|sanitize --input /data/input/x.docx
+           --output-dir /data/output [--policy external_sharing] [--attest]
 
-   Performs every status transition on the jobs row: queued -> running ->
-   done | refused | failed. Refusals (policy) and failures (parse errors)
-   are recorded outcomes, not crashes; exit code 0 means "terminal status
-   was recorded". The API process never parses untrusted bytes itself.
+   This process has **no database access whatsoever** — it never imports
+   `.db`/`.models`, and its only filesystem access is the two paths given on
+   the command line. That's deliberate: the runner (app.runner, run in the
+   trusted parent process, never inside the isolated worker) mounts *only* a
+   fresh per-job directory containing a copy of the one document being
+   processed, so a compromised parser can reach neither the shared database
+   nor any other matter's files. The worker reports its outcome by writing
+   ``{output_dir}/result.json`` — the parent reads that file back and is the
+   sole writer of the Job row (see runner.sync_job). A worker that crashes
+   or times out before writing that file leaves the parent's crash backstop
+   to record "failed"; a worker that writes it always exits 0, because
+   "terminal status was recorded" is success from this process's point of
+   view even when the recorded status is refused/failed.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 from engine_api import clean_to_bundle, inspect_bytes
 
 
-def _run_job(data_root: str, job_id: str) -> int:
-    from .config import Config
-    from .db import make_engine, make_session_factory
-    from .models import Document, Job, _now
+def _write_result(output_dir: Path, payload: dict) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tmp = output_dir / "result.json.tmp"
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    tmp.replace(output_dir / "result.json")
 
-    cfg = Config(data_root)
-    s = make_session_factory(make_engine(cfg))()
-    job = s.get(Job, job_id)
-    if job is None:
-        print(f"job {job_id} not found", file=sys.stderr)
-        return 3
-    if job.status != "queued":
-        print(f"job {job_id} is {job.status}, not queued", file=sys.stderr)
-        return 3
 
-    job.status = "running"
-    # Provenance: which isolated image executed this (docker sets the env;
-    # empty string means a plain subprocess of the same tree).
-    job.worker_image = os.environ.get("COUNSELCLEAR_WORKER_IMAGE", "")
-    s.commit()
+def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, attest: bool,
+             matter_id: str | None = None) -> int:
+    """Pure: no DB, no network, no filesystem access outside the two given
+    paths. Always exits 0 once result.json is written — the *content* of
+    that file (status: done|refused|failed) is the real outcome."""
+    from .malware import get_scanner  # defense-in-depth (PR 18): re-scan here too
 
-    doc = s.get(Document, job.document_id)
+    name = input_path.name
 
-    def finish(status: str, error: str = "") -> int:
-        job.status = status
-        job.error = error[:1000]
-        job.finished_utc = _now()
-        s.commit()
-        s.close()
+    def finish(status: str, error: str = "", result: dict | None = None,
+               bundle_dir: str = "") -> int:
+        _write_result(output_dir, {
+            "status": status,
+            "error": error[:1000],
+            "result": result,
+            "bundle_dir": bundle_dir,
+        })
         return 0
 
-    # Defense-in-depth (PR 18): scan again inside the isolated worker,
-    # immediately before any parse. The upload path already scanned; a
-    # crafted file that dodged that gate still never reaches the parsers.
-    from .malware import get_scanner
-
     try:
-        data = Path(doc.storage_path).read_bytes()
-        verdict = get_scanner().scan(data, doc.filename)
+        data = input_path.read_bytes()
     except OSError as e:
-        return finish("failed", f"original unreadable: {e}")
+        return finish("failed", f"input unreadable: {e}")
+
+    verdict = get_scanner().scan(data, name)
     if not verdict.clean:
         return finish("refused", f"malware scan ({verdict.scanner}): {verdict.detail}")
 
     try:
-        if job.kind == "inspect":
-            res = inspect_bytes(data, doc.filename)
-            job.result_json = {
+        if kind == "inspect":
+            res = inspect_bytes(data, name)
+            return finish("done", result={
                 "kind": res.kind,
                 "format": res.format,
                 "findings": [f.to_dict() if hasattr(f, "to_dict") else f for f in res.findings],
                 "unsupported_reason": res.unsupported_reason,
-            }
-            return finish("done")
+            })
 
-        if job.kind == "sanitize":
-            bundle_dir = cfg.data_root / "matters" / job.matter_id / "jobs" / job.id / "bundle"
+        if kind == "sanitize":
+            bundle_dir = output_dir / "bundle"
             result = clean_to_bundle(
-                Path(doc.storage_path),
+                input_path,
                 bundle_dir,
-                policy_id=job.policy_id,
+                policy_id=policy_id,
                 operator_id="operator",
-                matter_id=job.matter_id,
-                signature_break_attestation=bool(job.attestation),
+                matter_id=matter_id,
+                signature_break_attestation=attest,
             )
-            job.bundle_dir = str(bundle_dir)
-            job.result_json = {
-                "derivative": Path(result["derivative"]).name,
-                "manifest": result["manifest_data"],
-                "verification_pass": result["verification"]["pass"],
-            }
-            return finish("done")
+            return finish(
+                "done",
+                bundle_dir=str(bundle_dir),
+                result={
+                    "derivative": Path(result["derivative"]).name,
+                    "manifest": result["manifest_data"],
+                    "verification_pass": result["verification"]["pass"],
+                },
+            )
 
-        return finish("failed", f"unknown job kind: {job.kind}")
+        return finish("failed", f"unknown job kind: {kind}")
     except Exception as e:
         import custody as custody_mod
 
@@ -119,9 +120,17 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="mode")
 
-    jp = sub.add_parser("run-job", help="execute one queued job from the store")
-    jp.add_argument("--data-root", required=True)
-    jp.add_argument("--job", required=True)
+    jp = sub.add_parser(
+        "run-job",
+        help="execute one job against an already-staged input/output directory pair "
+             "(no database access — see module docstring)",
+    )
+    jp.add_argument("--kind", required=True, choices=("inspect", "sanitize"))
+    jp.add_argument("--input", required=True, type=Path)
+    jp.add_argument("--output-dir", required=True, type=Path)
+    jp.add_argument("--policy", default="external_sharing")
+    jp.add_argument("--attest", action="store_true")
+    jp.add_argument("--matter-id", default=None)
 
     p.add_argument("verb", choices=("inspect", "sanitize"), nargs="?")
     p.add_argument("path", type=Path, nargs="?")
@@ -132,7 +141,14 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     if args.mode == "run-job":
-        return _run_job(args.data_root, args.job)
+        return _run_job(
+            kind=args.kind,
+            input_path=args.input,
+            output_dir=args.output_dir,
+            policy_id=args.policy,
+            attest=args.attest,
+            matter_id=args.matter_id,
+        )
 
     if not args.verb or not args.path:
         p.error("either run-job or verb+path is required")
