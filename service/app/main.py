@@ -1,0 +1,327 @@
+"""FastAPI application factory and /v1 routes (single-tenant profile)."""
+
+from __future__ import annotations
+
+import io
+import json
+import zipfile
+from pathlib import Path
+
+import custody as custody_mod
+from engine_api import clean_to_bundle, inspect_bytes
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from .config import Config
+from .db import Base, make_engine, make_session_factory
+from .malware import get_scanner
+from .models import Document, Job, Matter, _now, _uuid
+from .scripts_path import SCRIPTS  # noqa: F401  (must run before engine imports)
+from .security import ensure_local_password, issue_session, valid_session, verify_password
+
+
+class LoginBody(BaseModel):
+    password: str
+
+
+class MatterBody(BaseModel):
+    name: str
+
+
+class SanitizeBody(BaseModel):
+    policy_id: str = "external_sharing"
+    reason: str = ""
+    signature_break_attestation: bool = False
+
+
+def create_app(data_root: str | Path | None = None) -> FastAPI:
+    cfg = Config(data_root)
+    cfg.data_root.mkdir(parents=True, exist_ok=True)
+    ensure_local_password(cfg)
+    engine = make_engine(cfg)
+    Base.metadata.create_all(engine)  # alembic migrations arrive with prod profile
+    session_factory = make_session_factory(engine)
+
+    app = FastAPI(title="CounselClear", version="product-mvp")
+
+    def db_session():
+        s = session_factory()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    def authed(request: Request) -> None:
+        token = request.cookies.get("cc_session")
+        if not valid_session(cfg, token):
+            raise HTTPException(401, "authentication required")
+
+    # --- auth ---------------------------------------------------------------
+
+    @app.post("/v1/auth/login")
+    def login(body: LoginBody, response: Response):
+        if not verify_password(cfg, body.password):
+            raise HTTPException(403, "invalid credentials")
+        response.set_cookie(
+            "cc_session", issue_session(cfg), httponly=True, samesite="strict"
+        )
+        return {"ok": True}
+
+    # --- matters ------------------------------------------------------------
+
+    @app.post("/v1/matters", dependencies=[Depends(authed)])
+    def create_matter(body: MatterBody, s: Session = Depends(db_session)):
+        matter = Matter(name=body.name)
+        s.add(matter)
+        s.commit()
+        return _matter_dict(matter)
+
+    @app.get("/v1/matters/{matter_id}", dependencies=[Depends(authed)])
+    def get_matter(matter_id: str, s: Session = Depends(db_session)):
+        return _matter_dict(_matter(matter_id, s))
+
+    # --- documents ----------------------------------------------------------
+
+    @app.post("/v1/matters/{matter_id}/documents", dependencies=[Depends(authed)])
+    async def upload_document(
+        matter_id: str,
+        file: UploadFile = File(...),
+        s: Session = Depends(db_session),
+    ):
+        _matter(matter_id, s)
+        data = await file.read()
+        name = Path(file.filename or "upload").name
+        verdict = get_scanner().scan(data, name)
+        if not verdict.clean:
+            raise HTTPException(422, f"malware scanner flagged upload ({verdict.scanner})")
+        doc = Document(
+            id=_uuid(),
+            matter_id=matter_id,
+            filename=name,
+            sha256=custody_mod.sha256_bytes(data),
+            bytes=len(data),
+            storage_path="",
+        )
+        dest = cfg.data_root / "matters" / matter_id / "docs" / doc.id / "original" / name
+        try:
+            stored, _created = custody_mod.write_once(dest, data)
+        except custody_mod.CustodyError as e:
+            raise HTTPException(409, str(e)) from e
+        doc.storage_path = str(stored)
+        s.add(doc)
+        s.commit()
+        return _doc_dict(doc)
+
+    @app.get(
+        "/v1/matters/{matter_id}/documents/{doc_id}",
+        dependencies=[Depends(authed)],
+    )
+    def get_document(matter_id: str, doc_id: str, s: Session = Depends(db_session)):
+        return _doc_dict(_document(matter_id, doc_id, s))
+
+    # --- jobs ---------------------------------------------------------------
+
+    def _create_job(matter_id: str, doc_id: str, kind: str, s: Session, **kw) -> Job:
+        job = Job(matter_id=matter_id, document_id=doc_id, kind=kind, **kw)
+        s.add(job)
+        s.commit()
+        return job
+
+    def _run_inspect(job: Job, doc: Document) -> None:
+        data = Path(doc.storage_path).read_bytes()
+        res = inspect_bytes(data, doc.filename)
+        job.result_json = {
+            "kind": res.kind,
+            "format": res.format,
+            "findings": res.findings,
+            "unsupported_reason": res.unsupported_reason,
+        }
+        job.status = "done"
+
+    def _run_sanitize(job: Job, doc: Document) -> None:
+        bundle_dir = (
+            cfg.data_root / "matters" / job.matter_id / "jobs" / job.id / "bundle"
+        )
+        result = clean_to_bundle(
+            Path(doc.storage_path),
+            bundle_dir,
+            policy_id=job.policy_id,
+            operator_id="operator",
+            matter_id=job.matter_id,
+            signature_break_attestation=job.attestation,
+        )
+        job.bundle_dir = str(bundle_dir)
+        job.result_json = {
+            "derivative": Path(result["derivative"]).name,
+            "manifest": result["manifest_data"],
+            "verification_pass": result["verification"]["pass"],
+        }
+        job.status = "done"
+
+    @app.post(
+        "/v1/matters/{matter_id}/documents/{doc_id}/inspect-jobs",
+        dependencies=[Depends(authed)],
+    )
+    def inspect_job(matter_id: str, doc_id: str, s: Session = Depends(db_session)):
+        doc = _document(matter_id, doc_id, s)
+        job = _create_job(matter_id, doc.id, "inspect", s)
+        _run_safely(job, s, lambda: _run_inspect(job, doc))
+        return _job_dict(job)
+
+    @app.post(
+        "/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs",
+        dependencies=[Depends(authed)],
+    )
+    def sanitize_job(
+        matter_id: str,
+        doc_id: str,
+        body: SanitizeBody | None = None,
+        s: Session = Depends(db_session),
+    ):
+        doc = _document(matter_id, doc_id, s)
+        body = body or SanitizeBody()
+        job = _create_job(
+            matter_id,
+            doc.id,
+            "sanitize",
+            s,
+            policy_id=body.policy_id,
+            reason=body.reason[:500],
+            attestation=bool(body.signature_break_attestation),
+        )
+        _run_safely(job, s, lambda: _run_sanitize(job, doc))
+        return _job_dict(job)
+
+    def _run_safely(job: Job, s: Session, fn) -> None:
+        """In-process worker. Refusals are first-class outcomes, not errors."""
+        job.status = "running"
+        s.commit()
+        try:
+            fn()
+        except custody_mod.CustodyError as e:
+            msg = str(e)
+            job.status = "refused" if msg.startswith("plan refused") else "failed"
+            job.error = msg[:1000]
+        except Exception as e:  # honest failure; original untouched by design
+            job.status = "failed"
+            job.error = f"{type(e).__name__}: {e}"[:1000]
+        job.finished_utc = _now()
+        s.commit()
+
+    @app.get("/v1/matters/{matter_id}/jobs/{job_id}", dependencies=[Depends(authed)])
+    def get_job(matter_id: str, job_id: str, s: Session = Depends(db_session)):
+        return _job_dict(_job(matter_id, job_id, s))
+
+    @app.get(
+        "/v1/matters/{matter_id}/jobs/{job_id}/manifest",
+        dependencies=[Depends(authed)],
+    )
+    def job_manifest(matter_id: str, job_id: str, s: Session = Depends(db_session)):
+        job = _job(matter_id, job_id, s)
+        if job.kind != "sanitize" or not job.result_json:
+            raise HTTPException(404, "no manifest for this job")
+        return JSONResponse(job.result_json.get("manifest", {}))
+
+    @app.get(
+        "/v1/matters/{matter_id}/jobs/{job_id}/bundle",
+        dependencies=[Depends(authed)],
+    )
+    def job_bundle(
+        matter_id: str,
+        job_id: str,
+        include_original: bool = False,
+        s: Session = Depends(db_session),
+    ):
+        job = _job(matter_id, job_id, s)
+        if job.status != "done" or not job.bundle_dir:
+            raise HTTPException(409, f"job is {job.status}; no bundle")
+        audit_entry = {"action": "download_bundle", "include_original": include_original}
+        original_path = None
+        if include_original:
+            if not cfg.allow_original_download:
+                raise HTTPException(403, "original download disabled on this deployment")
+            doc = s.get(Document, job.document_id)
+            original_path = Path(doc.storage_path)
+            audit_entry["note"] = "original included (flag enabled on deployment)"
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            bundle = Path(job.bundle_dir)
+            for rel in ("manifest.json",):
+                p = bundle / rel
+                if p.exists():
+                    zf.write(p, arcname=rel)
+            deriv_dir = bundle / "derivative"
+            for p in sorted(deriv_dir.iterdir()):
+                zf.write(p, arcname=f"derivative/{p.name}")
+            report = {
+                "verification": (job.result_json or {}).get("manifest", {}).get(
+                    "verification"
+                ),
+                "findings_before": (job.result_json or {}).get("manifest", {}).get(
+                    "findings_before"
+                ),
+            }
+            zf.writestr("report.json", json.dumps(report, indent=2, sort_keys=True))
+            if original_path and original_path.exists():
+                zf.write(original_path, arcname=f"original/{original_path.name}")
+        job.audit_log = [*list(job.audit_log or []), audit_entry]
+        s.commit()
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{job.id}-bundle.zip"'},
+        )
+
+    # --- helpers ------------------------------------------------------------
+
+    def _matter(matter_id: str, s: Session) -> Matter:
+        m = s.get(Matter, matter_id)
+        if not m:
+            raise HTTPException(404, "matter not found")
+        return m
+
+    def _document(matter_id: str, doc_id: str, s: Session) -> Document:
+        d = s.get(Document, doc_id)
+        if not d or d.matter_id != matter_id:
+            raise HTTPException(404, "document not found")
+        return d
+
+    def _job(matter_id: str, job_id: str, s: Session) -> Job:
+        j = s.get(Job, job_id)
+        if not j or j.matter_id != matter_id:
+            raise HTTPException(404, "job not found")
+        return j
+
+    def _matter_dict(m: Matter) -> dict:
+        return {"id": m.id, "name": m.name, "created_utc": m.created_utc}
+
+    def _doc_dict(d: Document) -> dict:
+        return {
+            "id": d.id,
+            "matter_id": d.matter_id,
+            "filename": d.filename,
+            "sha256": d.sha256,
+            "bytes": d.bytes,
+            "created_utc": d.created_utc,
+        }
+
+    def _job_dict(j: Job) -> dict:
+        out = {
+            "id": j.id,
+            "matter_id": j.matter_id,
+            "document_id": j.document_id,
+            "kind": j.kind,
+            "policy_id": j.policy_id,
+            "status": j.status,
+            "error": j.error,
+            "attestation": j.attestation,
+            "created_utc": j.created_utc,
+            "finished_utc": j.finished_utc,
+        }
+        if j.result_json:
+            out["result"] = j.result_json
+        return out
+
+    return app

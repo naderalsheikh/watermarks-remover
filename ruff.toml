@@ -29,3 +29,7 @@ ignore = [
   "RUF001",
   "RUF003",
 ]
+
+# FastAPI's documented DI idiom is `param: T = Depends(...)` in defaults;
+# B008 would flag every route signature in the control plane.
+"service/app/main.py" = ["B008"]
