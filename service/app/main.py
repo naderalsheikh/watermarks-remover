@@ -7,21 +7,23 @@ import json
 import zipfile
 from pathlib import Path
 
-import custody as custody_mod
-from engine_api import clean_to_bundle, inspect_bytes
+import custody as custody_mod  # WORM storage only — never parses documents
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+# PR 17 doctrine: this module must NOT import engine_api / custody or call
+# inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
+# isolated worker processes (see app.runner). A test enforces the ban.
 from .acl import OPERATOR, bootstrap_operator, grant, has_perm, revoke
 from .audit import append_event, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
 from .malware import get_scanner
 from .migrate import upgrade_head
-from .models import AuditEvent, Document, Job, Matter, _now, _uuid
-from .scripts_path import SCRIPTS  # noqa: F401  (must run before engine imports)
+from .models import AuditEvent, Document, Job, Matter, _uuid
+from .runner import run_job, sync_job
 from .security import ensure_local_password, issue_session, valid_session, verify_password
 
 
@@ -159,34 +161,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s.commit()
         return job
 
-    def _run_inspect(job: Job, doc: Document) -> None:
-        data = Path(doc.storage_path).read_bytes()
-        res = inspect_bytes(data, doc.filename)
-        job.result_json = {
-            "kind": res.kind,
-            "format": res.format,
-            "findings": [f.to_dict() if hasattr(f, "to_dict") else f for f in res.findings],
-            "unsupported_reason": res.unsupported_reason,
-        }
-        job.status = "done"
+    def _execute_job(job_id: str) -> None:
+        """Run the queued job in an isolated worker process (PR 17).
 
-    def _run_sanitize(job: Job, doc: Document) -> None:
-        bundle_dir = cfg.data_root / "matters" / job.matter_id / "jobs" / job.id / "bundle"
-        result = clean_to_bundle(
-            Path(doc.storage_path),
-            bundle_dir,
-            policy_id=job.policy_id,
-            operator_id="operator",
-            matter_id=job.matter_id,
-            signature_break_attestation=job.attestation,
-        )
-        job.bundle_dir = str(bundle_dir)
-        job.result_json = {
-            "derivative": Path(result["derivative"]).name,
-            "manifest": result["manifest_data"],
-            "verification_pass": result["verification"]["pass"],
-        }
-        job.status = "done"
+        The worker performs all status transitions; sync_job() is the
+        crash/timeout backstop that guarantees a terminal status.
+        """
+        res = run_job(cfg, job_id)
+        s = session_factory()
+        try:
+            sync_job(s, job_id, res)
+        finally:
+            s.close()
 
     @app.post(
         "/v1/matters/{matter_id}/documents/{doc_id}/inspect-jobs",
@@ -196,8 +182,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         _require(matter_id, "inspect", s)
         doc = _document(matter_id, doc_id, s)
         job = _create_job(matter_id, doc.id, "inspect", s)
-        _run_safely(job, s, lambda: _run_inspect(job, doc))
-        return _job_dict(job)
+        _execute_job(job.id)
+        s.expire_all()
+        return _job_dict(_job(matter_id, job.id, s))
 
     @app.post(
         "/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs",
@@ -221,24 +208,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             reason=body.reason[:500],
             attestation=bool(body.signature_break_attestation),
         )
-        _run_safely(job, s, lambda: _run_sanitize(job, doc))
-        return _job_dict(job)
-
-    def _run_safely(job: Job, s: Session, fn) -> None:
-        """In-process worker. Refusals are first-class outcomes, not errors."""
-        job.status = "running"
-        s.commit()
-        try:
-            fn()
-        except custody_mod.CustodyError as e:
-            msg = str(e)
-            job.status = "refused" if msg.startswith("plan refused") else "failed"
-            job.error = msg[:1000]
-        except Exception as e:  # honest failure; original untouched by design
-            job.status = "failed"
-            job.error = f"{type(e).__name__}: {e}"[:1000]
-        job.finished_utc = _now()
-        s.commit()
+        _execute_job(job.id)
+        s.expire_all()
+        return _job_dict(_job(matter_id, job.id, s))
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}", dependencies=[Depends(authed)])
     def get_job(matter_id: str, job_id: str, s: Session = Depends(db_session)):
@@ -412,6 +384,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "status": j.status,
             "error": j.error,
             "attestation": j.attestation,
+            "worker_image": j.worker_image,
             "created_utc": j.created_utc,
             "finished_utc": j.finished_utc,
         }

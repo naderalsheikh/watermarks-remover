@@ -50,7 +50,7 @@ def upgrade() -> None:
         sa.Column("error", sa.String(1000), nullable=False),
         sa.Column("result_json", sa.JSON(), nullable=True),
         sa.Column("bundle_dir", sa.String(1024), nullable=False),
-        sa.Column("audit_log", sa.JSON(), nullable=True),
+        sa.Column("worker_image", sa.String(200), nullable=False),
         sa.Column("created_utc", sa.String(32), nullable=False),
         sa.Column("finished_utc", sa.String(32), nullable=True),
     )
@@ -67,6 +67,7 @@ def upgrade() -> None:
         "audit_events",
         sa.Column("id", sa.String(16), primary_key=True),
         sa.Column("matter_id", sa.String(16), sa.ForeignKey("matters.id"), nullable=False),
+        sa.Column("seq", sa.Integer(), nullable=False),
         sa.Column("actor_id", sa.String(64), nullable=False),
         sa.Column("action", sa.String(64), nullable=False),
         sa.Column("payload", sa.JSON(), nullable=False),

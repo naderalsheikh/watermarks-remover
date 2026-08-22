@@ -1,0 +1,46 @@
+# CounselClear control-plane + per-job worker image (single-tenant profile).
+#
+# Both compose ``legal`` services (cc-api, cc-worker) build from this file so
+# a single digest-pinned image reference covers the API and every job worker
+# (COUNSELCLEAR_WORKER_IMAGE=repo@sha256:...; the runner refuses unpinned
+# images). Build:
+#   docker build -f service/Dockerfile.counselclear -t counselclear service/
+#
+# Hardening matches service/Dockerfile: digest-pinned base, unprivileged
+# user, read-only-rootfs-compatible layout (state lives under /data).
+
+ARG VERSION=dev
+
+# python:3.14-slim linux/amd64 digest (same pin as service/Dockerfile).
+FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
+
+ARG VERSION
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libarchive-zip-perl \
+        libimage-exiftool-perl \
+        qpdf \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-app.txt /app/requirements-app.txt
+RUN python3 -m pip install --no-cache-dir "pip==26.2.1" \
+    && python3 -m pip install --no-cache-dir -r /app/requirements-app.txt \
+    && rm /app/requirements-app.txt
+
+COPY scripts /app/scripts
+COPY app /app/app
+RUN chmod -R a+rX /app/scripts /app/app
+
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin remover
+USER remover
+
+ENV WATERMARKS_SERVER_VERSION=${VERSION} \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+EXPOSE 8443
+ENTRYPOINT ["python3"]
+CMD ["-m", "uvicorn", "app.asgi:app", "--host", "0.0.0.0", "--port", "8443"]

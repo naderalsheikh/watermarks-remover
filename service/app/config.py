@@ -15,6 +15,22 @@ class Config:
         self.auth_dir = self.data_root / "auth"
         self.hash_file = self.auth_dir / "local.hash"
         self.secret_file = self.auth_dir / "cookie.secret"
+
+        # --- PR 17: out-of-process workers ------------------------------------
+        # subprocess: run app.worker in a child process (dev/test default).
+        # docker: hardened per-job container (--network none etc.), image
+        # must be digest-pinned.
+        mode = os.environ.get("COUNSELCLEAR_WORKER_MODE", "subprocess").strip().lower()
+        if mode not in ("subprocess", "docker"):
+            raise ValueError(f"unsupported COUNSELCLEAR_WORKER_MODE: {mode}")
+        self.worker_mode = mode
+        self.worker_image = os.environ.get("COUNSELCLEAR_WORKER_IMAGE", "").strip()
+        raw_timeout = os.environ.get("COUNSELCLEAR_WORKER_TIMEOUT_S", "600")
+        try:
+            self.worker_timeout_s = max(1, int(raw_timeout))
+        except ValueError:
+            self.worker_timeout_s = 600
+
         # Note: original downloads are gated solely by the per-matter
         # download_original permission (PR 16) — no deployment flag.
 

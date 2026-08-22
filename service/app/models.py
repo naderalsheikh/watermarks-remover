@@ -98,5 +98,7 @@ class Job(Base):
     error: Mapped[str] = mapped_column(String(1000), default="")
     result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     bundle_dir: Mapped[str] = mapped_column(String(1024), default="")
+    # digest-pinned image that executed this job (PR 17), "" for subprocess
+    worker_image: Mapped[str] = mapped_column(String(200), default="")
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)

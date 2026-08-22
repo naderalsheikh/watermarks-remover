@@ -16,12 +16,56 @@
 
 name: watermarks-remover
 
-# CounselClear legal profile (engine + out-of-process worker):
-#   docker compose --profile legal run --rm --network none cc-worker \
+# CounselClear legal profile (core only — no harness/heavy services):
+#   docker compose --profile legal up --build cc-api
+#   docker compose --profile legal run --rm cc-worker \
 #     inspect /data/matter.docx
-# The API still binds loopback; the worker has no network.
-
+# The API never parses untrusted bytes: jobs execute via per-job workers.
+# Production pins both images by digest (repo@sha256:...); the worker
+# refuses to start otherwise (app.runner enforces the pin at run time).
 services:
+  cc-api:
+    profiles: [legal]
+    build:
+      context: service
+      dockerfile: Dockerfile.counselclear
+    environment:
+      COUNSELCLEAR_DATA_ROOT: /data
+      COUNSELCLEAR_LOCAL_PASSWORD: ${COUNSELCLEAR_LOCAL_PASSWORD:?required}
+      COUNSELCLEAR_WORKER_MODE: ${COUNSELCLEAR_WORKER_MODE:-docker}
+      COUNSELCLEAR_WORKER_IMAGE: ${COUNSELCLEAR_WORKER_IMAGE:-}
+    ports:
+      - "127.0.0.1:8443:8443"
+    volumes:
+      - cc-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    init: true
+    user: "10001:10001"
+    restart: unless-stopped
+
+  # One-shot job worker; normally spawned per job by the API's runner with
+  # --network none. This service exists for hand-runs against /data.
+  cc-worker:
+    profiles: [legal]
+    build:
+      context: service
+      dockerfile: Dockerfile.counselclear
+    entrypoint: ["python3", "-m", "app.worker"]
+    command: ["--help"]
+    environment:
+      COUNSELCLEAR_DATA_ROOT: /data
+      COUNSELCLEAR_LOCAL_PASSWORD: ${COUNSELCLEAR_LOCAL_PASSWORD:?required}
+    volumes:
+      - cc-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    init: true
+    user: "10001:10001"
+    network_mode: none
+
   wr-core:
     build:
       context: service
@@ -155,6 +199,7 @@ services:
       - synthid-cache:/home/scorer/.cache/huggingface
 
 volumes:
+  cc-data:
   markllm-cache:
   bench-out:
   markdiffusion-cache:
