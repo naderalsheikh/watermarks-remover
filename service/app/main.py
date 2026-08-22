@@ -161,13 +161,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s.commit()
         return job
 
-    def _execute_job(job_id: str) -> None:
+    def _execute_job(job_id: str, kind: str) -> None:
         """Run the queued job in an isolated worker process (PR 17).
 
         The worker performs all status transitions; sync_job() is the
         crash/timeout backstop that guarantees a terminal status.
+        Timeout budget derives from engine Caps per kind (PR 18).
         """
-        res = run_job(cfg, job_id)
+        res = run_job(cfg, job_id, kind=kind)
         s = session_factory()
         try:
             sync_job(s, job_id, res)
@@ -182,7 +183,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         _require(matter_id, "inspect", s)
         doc = _document(matter_id, doc_id, s)
         job = _create_job(matter_id, doc.id, "inspect", s)
-        _execute_job(job.id)
+        _execute_job(job.id, kind="inspect")
         s.expire_all()
         return _job_dict(_job(matter_id, job.id, s))
 
@@ -208,7 +209,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             reason=body.reason[:500],
             attestation=bool(body.signature_break_attestation),
         )
-        _execute_job(job.id)
+        _execute_job(job.id, kind="sanitize")
         s.expire_all()
         return _job_dict(_job(matter_id, job.id, s))
 

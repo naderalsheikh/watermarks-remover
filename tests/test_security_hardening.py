@@ -372,3 +372,184 @@ def test_reconfigure_stream_writes_utf8():
     stream.write("\u200b")
     stream.flush()
     assert buf.getvalue() == "\u200b".encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# PR 18 — product path: scan-before-parse, nested-archive cap, Caps budgets
+# ---------------------------------------------------------------------------
+
+import sys as _sys
+
+_APP = ROOT / "service"
+for _p in (str(SCRIPTS), str(_APP)):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+
+from app.malware import Verdict, archive_depth, set_scanner
+from app.runner import job_budget_s
+
+
+def _nested_zip(depth: int) -> bytes:
+    """zip containing zip ... depth levels of PK nesting."""
+    blob = b"PK\x03\x04-leaf-payload"
+    for _ in range(depth - 1):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("inner.zip", blob)
+        blob = buf.getvalue()
+    return blob
+
+
+def test_archive_depth_measures_and_caps():
+    assert archive_depth(b"plain text") == 0
+    one = _nested_zip(1)
+    assert archive_depth(one, max_depth=4) == 1
+    three = _nested_zip(3)
+    assert archive_depth(three, max_depth=8) == 3
+    # depth beyond the cap short-circuits; result still reports the breach
+    assert archive_depth(three, max_depth=2) == 3
+
+
+class _FlaggingScanner:
+    def __init__(self, detail="EICAR test signature"):
+        self.detail = detail
+
+    def scan(self, data: bytes, name: str) -> Verdict:
+        return Verdict(False, "stub-eicar", self.detail)
+
+
+@pytest.fixture()
+def _flagging_scanner():
+    set_scanner(_FlaggingScanner())
+    yield
+    from app import malware
+
+    malware._scanner = malware.DepthAndClamScanner()
+
+
+def test_upload_path_refuses_flagged_file(tmp_path, monkeypatch, _flagging_scanner):
+    """Upload-side gate: flagged content never becomes a document."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw")
+    from app.main import create_app
+    from fastapi.testclient import TestClient
+
+    c = TestClient(create_app(tmp_path / "d"))
+    c.post("/v1/auth/login", json={"password": "pw"})
+    m = c.post("/v1/matters", json={"name": "m"}).json()
+    r = c.post(
+        f"/v1/matters/{m['id']}/documents",
+        files={"file": ("x.txt", b"harmless bytes really", "application/octet-stream")},
+    )
+    assert r.status_code == 422
+    assert "stub-eicar" in r.json()["detail"]
+    from app import malware
+
+    malware._scanner = malware.DepthAndClamScanner()
+
+
+def test_worker_scans_before_parse_defense_in_depth(tmp_path, monkeypatch):
+    """Even if a flagged file reached the store, the worker refuses pre-parse."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw")
+    from app.config import Config
+    from app.db import make_engine, make_session_factory
+    from app.main import create_app
+    from app.models import Document, Job
+
+    root = tmp_path / "data"
+    create_app(root)
+    cfg = Config(root)
+    s = make_session_factory(make_engine(cfg))()
+
+    store = root / "stash"
+    store.mkdir(parents=True)
+    original = store / "crafty.docx"
+    original.write_bytes(b"PK\x03\x04 crafted-bytes")
+
+    doc = Document(
+        id="doc18",
+        matter_id="mat18",
+        filename="crafty.docx",
+        sha256="0" * 64,
+        bytes=len(b"PK\x03\x04 crafted-bytes"),
+        storage_path=str(original),
+    )
+    job = Job(id="job18", matter_id="mat18", document_id="doc18", kind="inspect")
+    s.add(doc)
+    s.add(job)
+    s.commit()
+
+    set_scanner(_FlaggingScanner())
+    try:
+        from app.worker import _run_job
+
+        rc = _run_job(str(root), "job18")
+    finally:
+        from app import malware
+
+        malware._scanner = malware.DepthAndClamScanner()
+
+    assert rc == 0  # refusal is an outcome, not a crash
+    s.expire_all()
+    j = s.get(Job, "job18")
+    assert j.status == "refused"
+    assert "malware scan" in j.error and "stub-eicar" in j.error
+    # original untouched by construction
+    assert original.read_bytes().startswith(b"PK\x03\x04")
+
+
+def test_runner_time_budgets_derive_from_caps():
+    from engine_api import Caps
+
+    inspect_budget = job_budget_s("inspect", Caps())
+    sanitize_budget = job_budget_s("sanitize", Caps())
+    assert inspect_budget == Caps().inspect_timeout_s * 2 + 30
+    assert sanitize_budget > inspect_budget  # apply+verify add real headroom
+
+    tight = Caps(inspect_timeout_s=10, apply_timeout_s=20, verify_timeout_s=30)
+    assert job_budget_s("inspect", tight) == 50
+    assert job_budget_s("sanitize", tight) == 120
+
+
+def test_run_job_uses_caps_budget_as_timeout(monkeypatch, tmp_path):
+    """The subprocess timeout passed down is min(env ceiling, caps budget)."""
+    from app import runner
+    from app.config import Config
+
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        captured["timeout"] = kw.get("timeout")
+        return _Proc()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    cfg = Config(tmp_path)
+    runner.run_job(cfg, "j1", kind="inspect")
+    expect = min(cfg.worker_timeout_s, job_budget_s("inspect"))
+    assert captured["timeout"] == expect
+
+
+def test_deeply_nested_archive_upload_is_refused(tmp_path, monkeypatch):
+    """End-to-end: a depth-4 nest trips the scanner's cap (default depth 2)."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw")
+    from app.main import create_app
+    from fastapi.testclient import TestClient
+
+    c = TestClient(create_app(tmp_path / "d"))
+    c.post("/v1/auth/login", json={"password": "pw"})
+    m = c.post("/v1/matters", json={"name": "m"}).json()
+    r = c.post(
+        f"/v1/matters/{m['id']}/documents",
+        files={
+            "file": (
+                "nested.zip",
+                _nested_zip(4),
+                "application/zip",
+            )
+        },
+    )
+    assert r.status_code == 422
+    assert "archive-depth" in r.json()["detail"]

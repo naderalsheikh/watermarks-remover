@@ -102,7 +102,22 @@ def build_docker_cmd(cfg: Config, job_id: str) -> list[str]:
     ]
 
 
-def run_job(cfg: Config, job_id: str) -> RunnerResult:
+def job_budget_s(kind: str, caps=None) -> int:
+    """Per-kind wall-clock budget derived from the engine Caps (PR 18).
+
+    This reads the engine's limit constants only — no parsing happens on
+    the API side. The budget covers worker startup, the pre-parse malware
+    scan and (for sanitize) inspect + apply + verify inside one process.
+    """
+    from engine_api import Caps
+
+    c = caps or Caps()
+    if kind == "inspect":
+        return c.inspect_timeout_s * 2 + 30
+    return c.inspect_timeout_s + c.apply_timeout_s + c.verify_timeout_s + 60
+
+
+def run_job(cfg: Config, job_id: str, kind: str = "sanitize") -> RunnerResult:
     """Blocking execution of one queued job in an isolated worker."""
     cmd = build_subprocess_cmd(cfg, job_id)
     env_args: list[str] = []
@@ -120,6 +135,7 @@ def run_job(cfg: Config, job_id: str) -> RunnerResult:
     for kv in env_args:
         k, _, v = kv.partition("=")
         env[k] = v + os.pathsep + env.get(k, "")
+    timeout = min(cfg.worker_timeout_s, job_budget_s(kind))
     try:
         proc = subprocess.run(
             cmd,
@@ -127,7 +143,7 @@ def run_job(cfg: Config, job_id: str) -> RunnerResult:
             env=env,
             capture_output=True,
             text=True,
-            timeout=cfg.worker_timeout_s,
+            timeout=timeout,
             check=False,
         )
         return RunnerResult(

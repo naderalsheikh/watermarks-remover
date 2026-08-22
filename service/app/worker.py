@@ -59,9 +59,21 @@ def _run_job(data_root: str, job_id: str) -> int:
         s.close()
         return 0
 
+    # Defense-in-depth (PR 18): scan again inside the isolated worker,
+    # immediately before any parse. The upload path already scanned; a
+    # crafted file that dodged that gate still never reaches the parsers.
+    from .malware import get_scanner
+
+    try:
+        data = Path(doc.storage_path).read_bytes()
+        verdict = get_scanner().scan(data, doc.filename)
+    except OSError as e:
+        return finish("failed", f"original unreadable: {e}")
+    if not verdict.clean:
+        return finish("refused", f"malware scan ({verdict.scanner}): {verdict.detail}")
+
     try:
         if job.kind == "inspect":
-            data = Path(doc.storage_path).read_bytes()
             res = inspect_bytes(data, doc.filename)
             job.result_json = {
                 "kind": res.kind,
