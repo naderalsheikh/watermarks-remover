@@ -68,13 +68,10 @@ def _upload(client, name: str, matter: str | None = None) -> dict:
 
 def test_document_upload_is_write_once_and_hashed(client):
     doc = _upload(client, "spa.docx")
-    stored = None
-    # storage path is derived from ids; verify via re-upload idempotence + hash
     assert len(doc["sha256"]) == 64
     assert doc["filename"] == "spa.docx"
     r = client.get(f"/v1/matters/{doc['_matter']}/documents/{doc['id']}")
     assert r.json()["sha256"] == doc["sha256"]
-    assert stored is None
 
 
 def test_inspect_job_reports_findings(client):
