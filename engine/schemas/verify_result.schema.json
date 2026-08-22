@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CounselClear verify result",
+  "type": "object",
+  "required": ["verify_version", "policy_id", "kind", "pass", "checks"],
+  "properties": {
+    "verify_version": { "const": 1 },
+    "policy_id": { "type": "string" },
+    "kind": { "type": "string" },
+    "pass": { "type": "boolean" },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "pass", "detail"],
+        "properties": {
+          "name": { "type": "string" },
+          "pass": { "type": "boolean" },
+          "detail": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "counts": { "type": "object" },
+    "page_count_delta_expected": { "type": "boolean" },
+    "visual_compare": {
+      "type": "object",
+      "properties": {
+        "visual_compare_version": { "const": 1 },
+        "available": { "type": "boolean" },
+        "warn": { "type": "boolean" },
+        "note": { "type": "string" },
+        "pages": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+    "hashes": {
+      "type": "object",
+      "properties": {
+        "original_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "derivative_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  },
+  "additionalProperties": false
+}

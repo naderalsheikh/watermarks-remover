@@ -1,6 +1,35 @@
 {
   "findings": [
-    "U+200B ZERO WIDTH SPACE (Cf)"
+    {
+      "action_allowed_by_policy": [
+        "strip",
+        "keep"
+      ],
+      "action_recommended": "strip",
+      "category": "invisible_text",
+      "confidence": "probable",
+      "content_visible": false,
+      "field": "U+200B",
+      "finding_id": "f_b9e0",
+      "format": "txt",
+      "location": {
+        "bbox": null,
+        "offset": 231,
+        "page": null,
+        "pane": "body",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": "U+200B ZERO WIDTH SPACE (Cf)",
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "high",
+      "subtype": "layer_a_body",
+      "value_redacted": "present (1x)"
+    }
   ],
   "format": "txt",
   "kind": "text",

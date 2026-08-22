@@ -8,6 +8,10 @@
 !/benchmarks/**
 !/docs/
 !/docs/**
+!/engine/
+!/engine/__init__.py
+!/engine/schemas/
+!/engine/schemas/**
 !/service/
 !/service/**
 !/skills/remove-ai-marks/

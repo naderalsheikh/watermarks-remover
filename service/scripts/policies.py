@@ -57,7 +57,17 @@ SUBTYPES = (
 )
 
 ACTIONS = frozenset(
-    {"strip", "sanitize", "accept_all", "rebuild", "approve", "flag", "keep", "refuse", "inspect_only"}
+    {
+        "strip",
+        "sanitize",
+        "accept_all",
+        "rebuild",
+        "approve",
+        "flag",
+        "keep",
+        "refuse",
+        "inspect_only",
+    }
 )
 
 # privacy_only blanks only these authoring fields (plus GPS via jpeg_gps);
@@ -239,24 +249,36 @@ def _collect_subtypes(result: Any) -> tuple[list[str], list[str]]:
     unmapped: list[str] = []
     kind = getattr(result, "kind", None)
     report = getattr(result, "report", None)
+    raw_findings = getattr(result, "findings", None)
     if isinstance(result, dict):
         kind = result.get("kind")
         report = result.get("report")
-    if kind and isinstance(report, dict):
+        raw_findings = result.get("findings")
+    found: list[Finding] = []
+    if raw_findings and hasattr(raw_findings[0], "subtype"):
+        found = [f for f in raw_findings if isinstance(f, Finding)]
+    elif kind and isinstance(report, dict):
         try:
-            found: list[Finding] = findings_for_report(str(kind), report)
+            found = findings_for_report(str(kind), report)
         except Exception:
             found = []
-        for f in found:
-            st = _FINDING_SUBTYPE_ALIASES.get(f.subtype, f.subtype)
+    for f in found:
+        st = _FINDING_SUBTYPE_ALIASES.get(f.subtype, f.subtype)
+        if st in SUBTYPES:
+            subtypes.append(st)
+        else:
+            unmapped.append(f"{f.category}/{f.subtype}")
+    strings = raw_findings
+    for s in strings or []:
+        if isinstance(s, Finding):
+            continue
+        if isinstance(s, dict):
+            st = s.get("subtype")
             if st in SUBTYPES:
                 subtypes.append(st)
-            else:
-                unmapped.append(f"{f.category}/{f.subtype}")
-    strings = getattr(result, "findings", None)
-    if isinstance(result, dict):
-        strings = result.get("findings")
-    for s in strings or []:
+                continue
+            unmapped.append(str(s.get("notes") or st or s)[:120])
+            continue
         matched = False
         low = str(s).lower()
         for prefix, st in _PREFIX_SUBTYPES.items():
@@ -286,7 +308,9 @@ def plan_actions(
         policy_id = policy
         doc = dict(DEFAULT_POLICIES[policy])
     else:
-        base = policy.get("base", "external_sharing") if isinstance(policy.get("base"), str) else None
+        base = (
+            policy.get("base", "external_sharing") if isinstance(policy.get("base"), str) else None
+        )
         policy_id = str(policy.get("id", base or "custom"))
         doc = validate_policy(
             {k: v for k, v in policy.items() if k in SUBTYPES}, base_id=base or "external_sharing"
@@ -413,12 +437,12 @@ _PDF_CONTENT_STRIP_SUBTYPES = (
 )
 
 
-def _apply_pdf(data: bytes, plan: ActionPlan, a: dict[str, str]) -> tuple[bytes, list[ActionRecord]]:
+def _apply_pdf(
+    data: bytes, plan: ActionPlan, a: dict[str, str]
+) -> tuple[bytes, list[ActionRecord]]:
     # only refuse for content the document actually carries
     needed = [
-        st
-        for st in _PDF_CONTENT_STRIP_SUBTYPES
-        if a[st] == "strip" and st in plan.present_subtypes
+        st for st in _PDF_CONTENT_STRIP_SUBTYPES if a[st] == "strip" and st in plan.present_subtypes
     ]
     if needed:
         raise PolicyError(
@@ -467,7 +491,11 @@ def apply_actions(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionReco
         if a["layer_a_body"] == "sanitize":
             cleaned, stats = clean_text(data.decode("utf-8", errors="surrogateescape"))
             records.append(
-                ActionRecord("layer_a_body", "sanitize", f"removed={stats['removed_count']} replaced={stats['replaced_count']}")
+                ActionRecord(
+                    "layer_a_body",
+                    "sanitize",
+                    f"removed={stats['removed_count']} replaced={stats['replaced_count']}",
+                )
             )
             return cleaned.encode("utf-8", errors="surrogateescape"), records
         return data, [ActionRecord("layer_a_body", "keep", "text unchanged")]
@@ -484,9 +512,7 @@ def apply_actions(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionReco
                     dest = tmpdir / "out.jpeg"
                     src.write_bytes(data)
                     msgs = _exiftool_privacy_jpeg(src, dest)
-                    return dest.read_bytes(), [
-                        ActionRecord("jpeg_gps", "strip", m) for m in msgs
-                    ]
+                    return dest.read_bytes(), [ActionRecord("jpeg_gps", "strip", m) for m in msgs]
             return data, [ActionRecord("file_metadata", "keep", "privacy: image unchanged")]
         # sharing/production: full metadata strip via existing byte-level strippers
         stripper = {

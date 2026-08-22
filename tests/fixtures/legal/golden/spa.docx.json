@@ -1,7 +1,66 @@
 {
   "findings": [
-    "docx-comments: 1 comment(s) across 1 part(s)",
-    "docx-tracked-changes: insertions=1 deletions=2 format-changes=0"
+    {
+      "action_allowed_by_policy": [
+        "strip",
+        "replace",
+        "keep"
+      ],
+      "action_recommended": "strip",
+      "category": "embedded_content",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_b8fd",
+      "format": "docx",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "comment",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": null,
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "high",
+      "subtype": "comments_and_notes",
+      "value_redacted": "docx-comments: 1 comment(s) across 1 part(s)"
+    },
+    {
+      "action_allowed_by_policy": [
+        "accept_all",
+        "keep"
+      ],
+      "action_recommended": "accept_all",
+      "category": "revision_history",
+      "confidence": "confirmed",
+      "content_visible": true,
+      "field": null,
+      "finding_id": "f_f1f8",
+      "format": "docx",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "markup",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": null,
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "medium",
+      "subtype": "office_tracked_changes",
+      "value_redacted": "docx-tracked-changes: insertions=1 deletions=2 format-changes=0"
+    }
   ],
   "format": "docx",
   "kind": "container",

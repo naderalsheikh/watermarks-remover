@@ -3,191 +3,299 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CounselClear — document sanitization</title>
+  <title>CounselClear</title>
   <style>
     :root {
-      --bg: #f4f1ea;
-      --ink: #1c1917;
-      --muted: #57534e;
-      --card: #fffcf7;
-      --line: #e7e0d6;
-      --accent: #1d4ed8;
-      --ok: #166534;
-      --warn: #9a3412;
+      --paper: #f6f5f1;
+      --ink: #121212;
+      --mute: #5c5a56;
+      --rule: #121212;
+      --found: #8b1e1e;
+      --clear: #1f4d38;
+      --skip: #6b675f;
+      --fill: #fffdf8;
     }
     * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--paper); color: var(--ink); }
     body {
-      margin: 0;
-      font: 16px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif;
-      color: var(--ink);
-      background: var(--bg);
+      font: 15px/1.45 "Iowan Old Style", Palatino, "Palatino Linotype", "Times New Roman", serif;
+      min-height: 100vh;
     }
-    main {
-      max-width: 44rem;
-      margin: 0 auto;
-      padding: 2.5rem 1.25rem 4rem;
+    .wrap { max-width: 68rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 1rem;
+      border-bottom: 1px solid var(--rule);
+      padding-bottom: 0.7rem;
+      margin-bottom: 1.4rem;
     }
-    h1 { font-size: 1.5rem; font-weight: 650; margin: 0 0 0.35rem; }
-    .lede { color: var(--muted); margin: 0 0 1.5rem; }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 1.25rem;
-      margin-bottom: 1rem;
+    .brand {
+      font-size: 0.78rem;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+    .where {
+      font: 12px/1.3 ui-sans-serif, system-ui, sans-serif;
+      color: var(--mute);
+      letter-spacing: 0.02em;
+    }
+    h1 {
+      font-size: 1.65rem;
+      font-weight: 500;
+      letter-spacing: -0.02em;
+      margin: 0 0 0.35rem;
+    }
+    .lede {
+      margin: 0 0 1.5rem;
+      max-width: 38rem;
+      color: var(--mute);
+    }
+    .desk {
+      display: grid;
+      grid-template-columns: minmax(16rem, 22rem) 1fr;
+      gap: 0;
+      border: 1px solid var(--rule);
+      background: var(--fill);
+    }
+    @media (max-width: 840px) {
+      .desk { grid-template-columns: 1fr; }
+    }
+    .rail {
+      padding: 1.1rem 1.1rem 1.25rem;
+      border-right: 1px solid var(--rule);
+    }
+    @media (max-width: 840px) {
+      .rail { border-right: 0; border-bottom: 1px solid var(--rule); }
     }
     #drop {
-      border: 1.5px dashed #c4b8a8;
-      border-radius: 10px;
-      padding: 1.75rem 1rem;
-      text-align: center;
+      display: block;
+      border: 1px dashed var(--rule);
+      padding: 1.1rem 0.9rem;
       cursor: pointer;
-      background: #faf7f2;
+      background: var(--paper);
     }
-    #drop.drag { background: #eef4ff; border-color: var(--accent); }
-    #drop strong { display: block; margin-bottom: 0.25rem; }
-    #drop span { color: var(--muted); font-size: 0.9rem; }
-    input[type=file] { display: none; }
-    .row { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 1rem; }
-    button {
-      font: inherit;
+    #drop.drag { background: #eceae3; }
+    #drop strong {
+      display: block;
       font-weight: 600;
-      border: 0;
-      border-radius: 8px;
-      padding: 0.55rem 1rem;
+      font-size: 0.95rem;
+    }
+    #drop span {
+      display: block;
+      margin-top: 0.25rem;
+      font: 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--mute);
+    }
+    input[type=file] { display: none; }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-top: 0.9rem;
+    }
+    button {
+      font: 12px/1 ui-sans-serif, system-ui, sans-serif;
+      font-weight: 650;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid var(--rule);
+      background: var(--ink);
+      color: var(--paper);
+      padding: 0.55rem 0.8rem;
       cursor: pointer;
-      background: var(--accent);
-      color: #fff;
     }
-    button.secondary { background: #44403c; }
-    button:disabled { opacity: 0.45; cursor: not-allowed; }
-    .note {
-      font-size: 0.88rem;
-      color: var(--muted);
-      margin: 0.85rem 0 0;
+    button.ghost {
+      background: transparent;
+      color: var(--ink);
     }
-    #status { font-size: 0.9rem; margin: 0.75rem 0 0; min-height: 1.2em; }
-    #status.err { color: var(--warn); }
-    #status.ok { color: var(--ok); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    .opt {
+      margin-top: 0.85rem;
+      font: 12.5px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--mute);
+    }
+    .opt label { cursor: pointer; }
+    #status {
+      min-height: 1.3em;
+      margin: 0.8rem 0 0;
+      font: 12.5px/1.4 ui-sans-serif, system-ui, sans-serif;
+    }
+    #status.err { color: var(--found); }
+    #status.ok { color: var(--clear); }
+    .pane { padding: 1.1rem 1.15rem 1.35rem; min-height: 22rem; }
+    .file {
+      font: 12px/1.3 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin: 0 0 0.35rem;
+    }
+    .meta { margin: 0 0 1rem; color: var(--mute); font-size: 0.92rem; }
+    .verdict {
+      border-top: 1px solid var(--rule);
+      border-bottom: 1px solid var(--rule);
+      padding: 0.7rem 0;
+      margin: 0 0 1rem;
+    }
+    .verdict strong { display: block; font-size: 1.05rem; font-weight: 600; }
+    .verdict p { margin: 0.25rem 0 0; color: var(--mute); font-size: 0.92rem; }
+    .verdict.found strong { color: var(--found); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font: 13px/1.35 ui-sans-serif, system-ui, sans-serif;
+    }
+    th {
+      text-align: left;
+      font-size: 10.5px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 650;
+      color: var(--mute);
+      border-bottom: 1px solid var(--rule);
+      padding: 0 0.4rem 0.35rem 0;
+    }
+    td {
+      vertical-align: top;
+      padding: 0.5rem 0.5rem 0.5rem 0;
+      border-bottom: 1px solid #ddd8ce;
+    }
+    td.risk { font-weight: 650; white-space: nowrap; width: 4.5rem; }
+    td.risk.critical, td.risk.high { color: var(--found); }
+    td.risk.medium { color: #7a4a12; }
+    td.risk.low, td.risk.info { color: var(--mute); }
+    .empty {
+      color: var(--mute);
+      font-size: 0.95rem;
+      margin: 1.5rem 0;
+    }
+    .group { margin: 1rem 0 0; }
+    .group h3 {
+      font: 10.5px/1 ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin: 0 0 0.4rem;
+      color: var(--mute);
+    }
+    .item { padding: 0.35rem 0; border-bottom: 1px solid #ddd8ce; }
+    .item .t { font-weight: 600; font-size: 0.95rem; }
+    .item .d { color: var(--mute); font-size: 0.85rem; margin-top: 0.1rem; }
+    .chip {
+      display: inline-block;
+      font: 11px/1.2 ui-monospace, Menlo, monospace;
+      border: 1px solid #ddd8ce;
+      padding: 0.1rem 0.35rem;
+      margin: 0.25rem 0.25rem 0 0;
+    }
+    details {
+      margin-top: 1.1rem;
+      font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--mute);
+    }
     pre {
       white-space: pre-wrap;
       word-break: break-word;
-      font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-      background: #1c1917;
-      color: #f5f5f4;
-      border-radius: 8px;
-      padding: 0.9rem 1rem;
-      max-height: 22rem;
+      font: 11.5px/1.4 ui-monospace, Menlo, monospace;
+      background: var(--ink);
+      color: #f3f2ee;
+      padding: 0.8rem;
+      max-height: 18rem;
       overflow: auto;
-      margin: 0;
+      margin: 0.4rem 0 0;
     }
-    .file { font-weight: 600; margin: 0 0 0.5rem; }
     a.download {
       display: inline-block;
-      margin-top: 0.75rem;
-      color: var(--accent);
-      font-weight: 600;
-    }
-    .meta { color: var(--muted); font-size: 0.9rem; margin: 0 0 0.9rem; }
-    .group { margin: 0 0 0.9rem; }
-    .group h3 {
-      font-size: 0.78rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.07em;
-      color: var(--muted);
-      margin: 0 0 0.45rem;
-      display: flex;
-      align-items: center;
-      gap: 0.45rem;
-    }
-    .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-    .dot.hit { background: #c2410c; }
-    .dot.miss { background: #166534; }
-    .dot.na { background: #a8a29e; }
-    .count { font-weight: 600; color: var(--ink); }
-    .item {
-      padding: 0.55rem 0.8rem;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fff;
-      margin-bottom: 0.4rem;
-    }
-    .item .t { font-weight: 600; }
-    .item .d { color: var(--muted); font-size: 0.88rem; margin-top: 0.15rem; }
-    .chip {
-      display: inline-block;
-      background: #f5f5f4;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 0 0.55rem;
-      font-size: 0.76rem;
-      font-weight: 500;
+      margin-top: 0.9rem;
       color: var(--ink);
-      margin: 0.35rem 0.3rem 0 0;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font: 12px/1 ui-sans-serif, system-ui, sans-serif;
+      font-weight: 650;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
     }
-    .tools { font-size: 0.85rem; color: var(--muted); margin-top: 1.25rem; }
-    .verdict {
-      margin-top: 1rem;
-      padding: 0.9rem 1rem;
-      border-radius: 8px;
-      border: 1px solid var(--line);
-      background: #fff;
+    .foot {
+      margin-top: 1.1rem;
+      font: 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--mute);
     }
-    .verdict strong { display: block; font-size: 1.05rem; margin-bottom: 0.45rem; }
-    .verdict.empty { border-color: #a8a29e; }
-    .verdict.found { border-color: #c2410c; background: #fff7ed; }
-    details { margin-top: 0.75rem; color: var(--muted); font-size: 0.9rem; }
+    .quiet {
+      margin-top: 0.7rem;
+      background: none;
+      border: 0;
+      padding: 0;
+      text-transform: none;
+      letter-spacing: 0;
+      font: 12.5px/1.4 ui-sans-serif, system-ui, sans-serif;
+      color: var(--mute);
+      text-decoration: underline;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
-  <main>
-    <h1>CounselClear</h1>
-    <p class="lede">Document sanitization and safe sharing, locally on this Mac. Identify hidden information in a file, keep the original untouched, and produce a clean copy — nothing is rewritten and nothing leaves your machine.</p>
+  <div class="wrap">
+    <header>
+      <div class="brand">CounselClear</div>
+      <div class="where" id="caps">Checking service…</div>
+    </header>
+    <h1>Inspect a copy. Keep the original.</h1>
+    <p class="lede">Hidden metadata, comments, and invisible characters — identified locally. Nothing is rewritten. Nothing leaves this machine.</p>
 
-    <div class="card">
-      <label id="drop">
-        <strong>Drop a file here, or click to choose</strong>
-        <span>DOCX, PDF, PNG, JPEG, MD, TXT, HTML, PPTX, XLSX — the original is never modified</span>
-        <input id="file" type="file">
-      </label>
-      <div class="row">
-        <button id="inspect" type="button" disabled>Analyze</button>
-        <button id="clean" type="button" disabled>Clean (lossless)</button>
-        <button id="sample" type="button" class="secondary">Try a sample with a hidden mark</button>
-      </div>
-      <p class="note">Nothing runs until you click Analyze or Clean. Sampling watermarks in wording need the generator’s key. Without it, Analyze still reports Unicode, C2PA, metadata, extracted word count, and stylometry.</p>
-      <p id="status"></p>
-      <div id="verdict" class="verdict" hidden></div>
+    <div class="desk">
+      <aside class="rail">
+        <label id="drop">
+          <strong>Choose a file</strong>
+          <span>PDF, DOCX, XLSX, PPTX, PNG, JPEG, TXT, Markdown, HTML. The original is never overwritten.</span>
+          <input id="file" type="file">
+        </label>
+        <div class="actions">
+          <button id="inspect" type="button" disabled>Analyze</button>
+          <button id="clean" type="button" class="ghost" disabled>Clean (lossless)</button>
+        </div>
+        <p class="opt">
+          <label><input id="sampling" type="checkbox"> Same-key sampling checks (needs a generator key)</label>
+        </p>
+        <button id="sample" type="button" class="quiet">Load a sample with a hidden mark</button>
+        <p id="status"></p>
+      </aside>
+      <section class="pane" id="out">
+        <p class="empty" id="idle">No file examined yet.</p>
+        <p class="file" id="fname" hidden></p>
+        <p class="meta" id="meta" hidden></p>
+        <div id="verdict" class="verdict" hidden></div>
+        <div id="findings-wrap" hidden>
+          <table>
+            <thead>
+              <tr><th>Risk</th><th>Finding</th><th>Where</th><th>Action</th></tr>
+            </thead>
+            <tbody id="findings-body"></tbody>
+          </table>
+        </div>
+        <div id="report-body"></div>
+        <details id="diff-block" hidden>
+          <summary>Character-level Unicode changes</summary>
+          <div id="diff-list"></div>
+        </details>
+        <p class="meta" id="preview" hidden></p>
+        <details>
+          <summary>Raw report</summary>
+          <pre id="report"></pre>
+        </details>
+        <a class="download" id="dl" hidden></a>
+      </section>
     </div>
-
-    <div class="card" id="out" hidden>
-      <p class="file" id="fname"></p>
-      <p class="meta" id="meta"></p>
-      <div id="report-body"></div>
-      <details id="diff-block" hidden>
-        <summary>What changed, character by character</summary>
-        <div id="diff-list" class="note"></div>
-      </details>
-      <p class="note" id="preview" hidden></p>
-      <details>
-        <summary>Raw report</summary>
-        <pre id="report"></pre>
-      </details>
-      <a class="download" id="dl" hidden></a>
-    </div>
-
-    <p class="tools" id="caps">Checking service…</p>
-  </main>
+    <p class="foot">This screen is lossless inspect/clean only. Named policies (sharing, privacy, production, evidence) live on the CounselClear CLI and /v1 API.</p>
+  </div>
   <script>
     const fileInput = document.getElementById("file");
     const drop = document.getElementById("drop");
     const inspectBtn = document.getElementById("inspect");
     const cleanBtn = document.getElementById("clean");
     const sampleBtn = document.getElementById("sample");
+    const sampling = document.getElementById("sampling");
     const statusEl = document.getElementById("status");
-    const out = document.getElementById("out");
+    const idle = document.getElementById("idle");
     const fname = document.getElementById("fname");
     const report = document.getElementById("report");
     const dl = document.getElementById("dl");
@@ -202,8 +310,13 @@
       chosen = file;
       inspectBtn.disabled = !file;
       cleanBtn.disabled = !file;
-      setStatus(file ? "Ready: " + file.name + " — click Analyze or Clean" : "", file ? "ok" : "");
-      out.hidden = true;
+      setStatus(file ? file.name : "", file ? "ok" : "");
+      idle.hidden = false;
+      fname.hidden = true;
+      document.getElementById("meta").hidden = true;
+      document.getElementById("verdict").hidden = true;
+      document.getElementById("findings-wrap").hidden = true;
+      document.getElementById("report-body").replaceChildren();
       dl.hidden = true;
     }
 
@@ -227,20 +340,17 @@
       }
       return btoa(bin);
     }
-
     function fromB64(b64) {
       const bin = atob(b64);
       const out = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
       return out;
     }
-
     function cleanedName(name) {
       const i = name.lastIndexOf(".");
       if (i <= 0) return name + ".cleaned";
       return name.slice(0, i) + ".cleaned" + name.slice(i);
     }
-
     function el(tag, cls, text) {
       const n = document.createElement(tag);
       if (cls) n.className = cls;
@@ -249,22 +359,10 @@
     }
 
     const DETECTOR_INFO = {
-      markllm: {
-        label: "MarkLLM research harness",
-        skip: "Optional research toolkit, not installed on this machine. Everything else was still checked.",
-      },
-      gumbel: {
-        label: "Gumbel sampling watermark",
-        skip: "No key configured. This check only works on text that was stamped with your own Gumbel key.",
-      },
-      kgw: {
-        label: "Green-list sampling watermark (KGW)",
-        skip: "No key configured. Checking wording for a sampling watermark needs the exact key used when the text was generated.",
-      },
-      "claude-text": {
-        label: "Claude text watermark",
-        skip: "Anthropic has not released a public detection endpoint yet.",
-      },
+      markllm: { label: "MarkLLM research harness", skip: "Optional research toolkit, not installed." },
+      gumbel: { label: "Gumbel sampling watermark", skip: "No key configured." },
+      kgw: { label: "Green-list sampling watermark (KGW)", skip: "No key configured." },
+      "claude-text": { label: "Claude text watermark", skip: "No public detection endpoint." },
     };
 
     function detectorInfo(d) {
@@ -274,21 +372,44 @@
       if (d.threshold != null && d.available) stats.push("threshold " + d.threshold);
       if (d.green_fraction != null) stats.push("green tokens " + Math.round(d.green_fraction * 100) + "%");
       if (d.tokens_scored != null) stats.push(d.tokens_scored + " tokens scored");
-      return {
-        label: known.label || d.detector || "detector",
-        skip: known.skip || d.error || "Not configured.",
-        stats: stats,
-      };
+      return { label: known.label || d.detector || "detector", skip: known.skip || d.error || "Not configured.", stats };
     }
 
-    function renderGroup(title, cls, items) {
+    function locText(loc) {
+      if (!loc || typeof loc !== "object") return "—";
+      const bits = [loc.pane, loc.part, loc.xpath_or_field].filter(Boolean);
+      if (loc.page != null) bits.push("p." + loc.page);
+      if (loc.sheet != null) bits.push("sheet " + loc.sheet);
+      if (loc.slide != null) bits.push("slide " + loc.slide);
+      if (loc.offset != null) bits.push("@" + loc.offset);
+      return bits.join(" · ") || "—";
+    }
+
+    function renderStructured(findings) {
+      const wrap = document.getElementById("findings-wrap");
+      const body = document.getElementById("findings-body");
+      body.replaceChildren();
+      if (!findings.length) { wrap.hidden = true; return; }
+      findings.forEach((f) => {
+        const tr = document.createElement("tr");
+        const risk = el("td", "risk " + (f.risk_level || ""), f.risk_level || "");
+        const what = document.createElement("td");
+        what.appendChild(el("div", "t", (f.category || "") + " / " + (f.subtype || "")));
+        if (f.notes || f.value_redacted) {
+          what.appendChild(el("div", "d", f.notes || f.value_redacted));
+        }
+        const where = el("td", null, locText(f.location));
+        const act = el("td", null, f.action_recommended || "");
+        tr.append(risk, what, where, act);
+        body.appendChild(tr);
+      });
+      wrap.hidden = false;
+    }
+
+    function renderGroup(title, items) {
       if (!items.length) return null;
       const g = el("div", "group");
-      const h = el("h3");
-      h.appendChild(el("span", "dot " + cls));
-      h.appendChild(document.createTextNode(title + " "));
-      h.appendChild(el("span", "count", "(" + items.length + ")"));
-      g.appendChild(h);
+      g.appendChild(el("h3", null, title + " (" + items.length + ")"));
       items.forEach((it) => {
         const box = el("div", "item");
         box.appendChild(el("p", "t", it.t));
@@ -317,10 +438,8 @@
             (e.replaced_with ? " → " + e.replaced_with : "")
           );
         }
-        if (p.truncated) lines.push("… more changes in " + (p.part || "this part") + " not listed");
       }
       if (!lines.length) {
-        // plain-text shape: entries at top level
         for (const e of diff.entries || []) {
           lines.push(
             (e.action === "replace" ? "Replaced" : "Removed") + " " + e.codepoint +
@@ -329,9 +448,17 @@
           );
         }
       }
-      if (diff.truncated && !(diff.parts || []).length) lines.push("… more changes not listed");
       list.textContent = lines.join("\n");
       block.hidden = false;
+    }
+
+    function structuredList(data) {
+      if (Array.isArray(data.findings) && data.findings.length && typeof data.findings[0] === "object") {
+        return data.findings;
+      }
+      const r = data.report || {};
+      if (Array.isArray(r.structured_findings)) return r.structured_findings;
+      return [];
     }
 
     function fillSummary(data) {
@@ -342,61 +469,57 @@
       const hits = [];
       const clears = [];
       const nas = [];
+      const structured = structuredList(data);
+
+      idle.hidden = true;
+      fname.hidden = false;
+      meta.hidden = false;
 
       const words = r.body_words || (r.stylometry && r.stylometry.word_count);
       meta.textContent = words
-        ? "Read " + words.toLocaleString() + " words from the file body (" + (r.body_chars || "?").toLocaleString() + " characters)."
-        : "No extractable body text (image-only PDF or scan, or unsupported container).";
+        ? words.toLocaleString() + " words in the body (" + (r.body_chars || "?").toLocaleString() + " characters)."
+        : "No extractable body text.";
+
+      renderStructured(structured);
 
       const layerA = Number(r.suspicious_total || r.layer_a_total || 0);
-      if (layerA) {
+      if (layerA && !structured.length) {
         hits.push({
-          t: "Invisible Unicode characters \u00d7" + layerA,
-          d: "Zero-width or control characters hidden in the body \u2014 a classic watermark carrier. Clean removes them without changing any visible wording.",
+          t: "Invisible Unicode ×" + layerA,
+          d: "Zero-width or control characters in the body. Clean removes them without changing visible wording.",
         });
-      } else {
-        clears.push({ t: "No invisible Unicode", d: "Body text scanned for zero-width and control characters." });
+      } else if (!layerA) {
+        clears.push({ t: "No invisible Unicode", d: "Body scanned for zero-width and control characters." });
       }
 
       if (r.has_c2pa === true) {
-        hits.push({ t: "Content Credentials (C2PA) present", d: "The file carries signed provenance metadata identifying its origin and edits." });
+        hits.push({ t: "Content Credentials (C2PA)", d: "Signed provenance metadata is present." });
       } else if (r.has_c2pa === false) {
-        clears.push({ t: "No Content Credentials (C2PA)", d: "No signed provenance manifest found." });
+        clears.push({ t: "No Content Credentials (C2PA)" });
       }
-
       if (r.has_ai_metadata === true) {
-        hits.push({ t: "Generator / AI metadata present", d: "File properties name an AI generator or carry generation tooling tags." });
+        hits.push({ t: "Generator / AI metadata", d: "File properties name a generator or tooling tag." });
       } else if (r.has_ai_metadata === false) {
-        clears.push({ t: "No generator / AI metadata", d: "File properties are clean of AI tooling tags." });
+        clears.push({ t: "No generator / AI metadata" });
       }
 
       const sty = r.stylometry && typeof r.stylometry.score === "number" ? r.stylometry.score : null;
       if (sty !== null) {
         const styWords = r.stylometry.word_count;
         if (r.stylometry.status === "insufficient_length" || (styWords != null && styWords < 30)) {
-          nas.push({
-            t: "Prose cadence check skipped",
-            d: "Statistical stylometry needs at least 30 words; this file has " + (styWords != null ? styWords : "too few") + ".",
+          nas.push({ t: "Prose cadence skipped", d: "Needs at least 30 words." });
+        } else if (sty >= 0.65) {
+          hits.push({
+            t: "Cadence reads as machine-generated",
+            d: "Stylometric score " + sty.toFixed(2) + " — a style signal, not a hidden mark.",
+            chips: ["stylometry " + sty.toFixed(2)],
           });
         } else {
-          const markers = (r.stylometry.matched_markers || []).slice(0, 5)
-            .map((m) => (m.phrase || m) + (m.count ? " \u00d7" + m.count : ""));
-          const base = { chips: ["stylometry " + sty.toFixed(2)] };
-          if (sty >= 0.65) {
-            hits.push({
-              ...base,
-              t: "Cadence reads as machine-generated",
-              d: "Stylometric score " + sty.toFixed(2) + " from " + styWords + " words"
-                + (markers.length ? " \u2014 matched phrases: " + markers.join(", ") : "")
-                + ". This measures writing style, not a hidden mark \u2014 treat as a signal, not proof.",
-            });
-          } else {
-            clears.push({
-              ...base,
-              t: "Cadence reads human",
-              d: "Stylometric score " + sty.toFixed(2) + " from " + styWords + " words. Style analysis only \u2014 not a provenance check.",
-            });
-          }
+          clears.push({
+            t: "Cadence reads human",
+            d: "Stylometric score " + sty.toFixed(2) + ".",
+            chips: ["stylometry " + sty.toFixed(2)],
+          });
         }
       }
 
@@ -406,55 +529,37 @@
           if (d.detector === "stylometry") return;
           const info = detectorInfo(d);
           if (d.available && d.is_watermarked) {
-            hits.push({
-              t: info.label + ": DETECTED",
-              d: "Same-key match \u2014 the wording carries this key's sampling pattern. Valid only against this exact key; not a vendor oracle.",
-              chips: info.stats,
-            });
+            hits.push({ t: info.label + ": detected", d: "Same-key match only — not a vendor oracle.", chips: info.stats });
           } else if (d.available && d.is_watermarked === false && !d.error) {
-            clears.push({
-              t: info.label + ": no match",
-              d: "Under the configured key the wording looks unmarked. A negative result does not prove the text is unmarked.",
-              chips: info.stats,
-            });
+            clears.push({ t: info.label + ": no match", chips: info.stats });
           } else if (d.available && d.error) {
-            nas.push({ t: info.label + ": not enough text", d: d.error });
+            nas.push({ t: info.label, d: d.error });
           } else {
             nas.push({ t: info.label, d: info.skip });
           }
         });
-      } else {
-        nas.push({
-          t: "Sampling-watermark checks unavailable",
-          d: "Wording-level watermarks can only be identified with the generator's key. Vendor keys (Claude/Gemini/Grok) are not public.",
-        });
-      }
-
-      if (Array.isArray(r.findings) && r.findings.length) {
-        r.findings.slice(0, 8).forEach((f) => nas.push({ t: "Note", d: f }));
       }
 
       body.replaceChildren();
-      [renderGroup("Found", "hit", hits),
-       renderGroup("Checked \u2014 clean", "miss", clears),
-       renderGroup("Couldn\u2019t check", "na", nas)].forEach((g) => { if (g) body.appendChild(g); });
+      if (!structured.length) {
+        [renderGroup("Found", hits), renderGroup("Checked — clean", clears), renderGroup("Couldn’t check", nas)]
+          .forEach((g) => { if (g) body.appendChild(g); });
+      } else if (nas.length) {
+        const g = renderGroup("Couldn’t check", nas);
+        if (g) body.appendChild(g);
+      }
 
+      const nFound = structured.length || hits.length;
       verdict.hidden = false;
-      verdict.className = "verdict " + (hits.length ? "found" : "empty");
-      const head = el("strong", null, hits.length
-        ? "Found " + hits.length + " verifiable mark" + (hits.length > 1 ? "s" : "")
-        : "Nothing verifiable found");
-      const p = el("p", null, hits.length
-        ? "See \u201cFound\u201d below. Clean (lossless) strips invisible Unicode and metadata only \u2014 it never rewrites wording."
-        : "A real negative on metadata, C2PA, and hidden-character channels. Wording-level sampling watermarks stay invisible without the generator's key.");
+      verdict.className = "verdict " + (nFound ? "found" : "");
+      const head = el("strong", null, nFound
+        ? nFound + " finding" + (nFound > 1 ? "s" : "")
+        : "Nothing structured found");
+      const p = el("p", null, nFound
+        ? "Clean (lossless) strips invisible Unicode and metadata only — it never rewrites legal language."
+        : "Metadata, C2PA, and hidden-character channels are clear. Sampling watermarks stay invisible without a generator key.");
       verdict.replaceChildren(head, p);
-
-      const counts = [
-        hits.length + " found",
-        clears.length + " clean",
-        nas.length + " skipped",
-      ].join(" \u00b7 ");
-      setStatus("Report ready \u2014 " + counts, hits.length ? "err" : "ok");
+      setStatus(nFound ? nFound + " finding" + (nFound > 1 ? "s" : "") : "Clear on inspectable channels", nFound ? "err" : "ok");
     }
 
     async function post(path, extra) {
@@ -487,9 +592,7 @@
         preview.textContent = "Extracted text starts: “" + excerpt.replace(/\s+/g, " ").slice(0, 280) + "”";
       } else {
         preview.hidden = true;
-        preview.textContent = "";
       }
-      out.hidden = false;
       if (data.cleaned) {
         const blob = new Blob([fromB64(data.cleaned)]);
         const name = cleanedName(chosen.name);
@@ -497,16 +600,16 @@
         dl.download = name;
         dl.textContent = "Download " + name;
         dl.hidden = false;
-        setStatus("Cleaned. Download the copy — original is untouched.", "ok");
+        setStatus("Cleaned. Original untouched.", "ok");
       } else {
         dl.hidden = true;
-        if (!document.getElementById("verdict").textContent) {
-          setStatus(data.suspicious ? "Verifiable marks found — see the report." : "No verifiable marks.", data.suspicious ? "err" : "ok");
-        }
       }
     }
 
-    inspectBtn.addEventListener("click", () => post("/inspect", { detect: true }).catch((e) => setStatus(String(e), "err")));
+    inspectBtn.addEventListener("click", () => {
+      const extra = sampling.checked ? { detect: true } : {};
+      post("/inspect", extra).catch((e) => setStatus(String(e), "err"));
+    });
     cleanBtn.addEventListener("click", () => post("/clean").catch((e) => setStatus(String(e), "err")));
     sampleBtn.addEventListener("click", () => {
       const blob = new Blob(["Hello\u200bWorld — Vendor shall pay 20% under Section 8.3.\n"], { type: "text/plain" });
@@ -518,10 +621,10 @@
       .then((c) => {
         const t = c.tools || {};
         const bits = ["c2patool", "exiftool", "qpdf"].map((k) => k + (t[k] ? " on" : " off"));
-        document.getElementById("caps").textContent = "Service " + (c.version || "") + " · " + bits.join(" · ") + " · loopback only";
+        document.getElementById("caps").textContent = "127.0.0.1 · " + (c.version || "local") + " · " + bits.join(" · ");
       })
       .catch(() => {
-        document.getElementById("caps").textContent = "Service not reachable. Start: python3 ~/watermarks-remover/service/scripts/server.py";
+        document.getElementById("caps").textContent = "Service not reachable";
       });
   </script>
 </body>

@@ -1,6 +1,34 @@
 {
   "findings": [
-    "macros-office: macro-enabled Office file (docm); clean is refused"
+    {
+      "action_allowed_by_policy": [
+        "keep"
+      ],
+      "action_recommended": "refuse",
+      "category": "active_content",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_85f8",
+      "format": "docm",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "metadata",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": "clean is refused without written attestation (PR 11)",
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "critical",
+      "subtype": "macros_vba",
+      "value_redacted": "macros-office: macro-enabled Office file (docm); clean is refused"
+    }
   ],
   "format": "docm",
   "kind": "container",

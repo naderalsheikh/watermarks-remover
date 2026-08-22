@@ -13,8 +13,13 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
+import shutil
+import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -33,6 +38,7 @@ from container_meta import (
     extract_ooxml_plaintext,
     inspect_container,
 )
+from findings import Finding, findings_for_report
 from format_dispatch import classify, classify_bytes
 from image_meta import clean_image, detect_format, inspect_image, run_synthid_score
 from score_stylometry import score_text_stylometry
@@ -79,31 +85,96 @@ class Caps:
     max_verify_pages: int = 30
 
 
+@cache
+def _git_sha() -> str:
+    pinned = os.environ.get("COUNSELCLEAR_GIT_SHA") or os.environ.get("WATERMARKS_GIT_SHA")
+    if pinned:
+        return pinned.strip()
+    root = Path(__file__).resolve().parents[2]
+    git = shutil.which("git")
+    if not git or not (root / ".git").exists():
+        return "unknown"
+    try:
+        r = subprocess.run(
+            [git, "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    sha = (r.stdout or "").strip()
+    return sha if r.returncode == 0 and sha else "unknown"
+
+
+@cache
+def _tool_versions() -> dict[str, str]:
+    versions: dict[str, str] = {}
+    flags = {"qpdf": "--version", "exiftool": "-ver", "c2patool": "--version"}
+    for cmd, flag in flags.items():
+        path = shutil.which(cmd)
+        if not path:
+            continue
+        try:
+            r = subprocess.run([path, flag], capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            versions[cmd] = "present"
+            continue
+        line = ((r.stdout or r.stderr) or "").strip().splitlines()
+        versions[cmd] = line[0][:80] if line else "present"
+    return versions
+
+
 @dataclass(frozen=True)
 class ProcessorInfo:
-    """Build pin. Stub until the product shell records git SHA / image digest."""
+    """Build pin: git SHA, optional image digest, probed tool versions."""
 
-    git_sha: str = "unknown"
-    image_digest: str | None = None
-    tools: dict[str, str] = field(default_factory=dict)
+    git_sha: str = field(default_factory=_git_sha)
+    image_digest: str | None = field(
+        default_factory=lambda: os.environ.get("COUNSELCLEAR_IMAGE_DIGEST") or None
+    )
+    tools: dict[str, str] = field(default_factory=_tool_versions)
 
 
 @dataclass(frozen=True)
 class InspectResult:
-    """Inspect outcome. ``findings`` stay strings until PR 3's Finding schema."""
+    """Inspect outcome. ``findings`` are canonical Finding objects (PR 3).
+
+    Prototype reports still carry ``findings: list[str]`` as a derived view.
+    """
 
     kind: Kind
     format: str
-    findings: list[str]
+    findings: list[Finding]
     processor: ProcessorInfo
     source_sha256: str
     unsupported_reason: str | None = None
     report: dict[str, Any] = field(default_factory=dict)
     raw: object | None = None
 
+    @property
+    def finding_strings(self) -> list[str]:
+        out: list[str] = []
+        for f in self.findings:
+            if isinstance(f, str):
+                out.append(f)
+            else:
+                out.append(f.notes or f.value_redacted or f"{f.category}/{f.subtype}")
+        return out
+
 
 def _processor() -> ProcessorInfo:
     return ProcessorInfo()
+
+
+def _run_capped(fn, timeout_s: int):
+    """Run *fn* in a worker thread; raise TimeoutError when Caps budget is hit."""
+    if timeout_s <= 0:
+        return fn()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(fn)
+        return fut.result(timeout=timeout_s)
 
 
 def _sha256(data: bytes) -> str:
@@ -118,10 +189,11 @@ def _tmp_path(tmpdir: Path, *parts: str) -> Path:
     return path
 
 
-def _findings_of(kind: Kind, report: dict[str, Any]) -> list[str]:
-    if kind == "text":
-        return [str(h.get("label", "")) for h in report.get("hits") or [] if h.get("label")]
-    return [str(f) for f in report.get("findings") or []]
+def _findings_of(kind: Kind, report: dict[str, Any]) -> list[Finding]:
+    try:
+        return findings_for_report(kind, report)
+    except Exception:
+        return []
 
 
 def _format_of(kind: Kind, report: dict[str, Any], name: str) -> str:
@@ -181,9 +253,21 @@ def inspect_bytes(data: bytes, name: str, caps: Caps | None = None) -> InspectRe
     """Classify and inspect in-memory bytes (library contract).
 
     Stylometry, sampling detectors, and body preview stay on ``inspect_http``.
-    ``caps`` is accepted for the stable contract; PR 1 does not enforce timeouts.
     """
-    _ = caps or Caps()
+    caps = caps or Caps()
+    if len(data) > caps.max_input_bytes:
+        raise ValueError(f"input exceeds max_input_bytes ({caps.max_input_bytes})")
+
+    def _run() -> InspectResult:
+        return _inspect_bytes_uncapped(data, name)
+
+    try:
+        return _run_capped(_run, caps.inspect_timeout_s)
+    except TimeoutError as e:
+        raise TimeoutError(f"inspect exceeded {caps.inspect_timeout_s}s") from e
+
+
+def _inspect_bytes_uncapped(data: bytes, name: str) -> InspectResult:
     label = name or "input"
     kind = classify_bytes(data, Path(label).suffix)
     if kind == "unknown":
@@ -335,7 +419,20 @@ def inspect_http(data: bytes, name: str, run_detect: bool = False) -> dict[str, 
         or bool(report.get("stylometry", {}).get("score", 0.0) >= 0.65)
         or detected_wm
     )
-    return {"ok": True, "kind": kind, "report": report, "suspicious": suspicious}
+    findings = []
+    try:
+        findings = [f.to_dict() for f in findings_for_report(kind, report)]
+    except Exception:
+        findings = []
+    if findings:
+        report["structured_findings"] = findings
+    return {
+        "ok": True,
+        "kind": kind,
+        "report": report,
+        "suspicious": suspicious,
+        "findings": findings,
+    }
 
 
 def detect_bytes(data: bytes, name: str) -> dict[str, Any]:
@@ -586,7 +683,7 @@ def clean_to_bundle(
             policy_id,
             signature_break_attestation=signature_break_attestation,
         )
-        cleaned, records = apply_actions(data, plan)
+        cleaned, records = _run_capped(lambda: apply_actions(data, plan), Caps().apply_timeout_s)
     except PolicyError as e:
         raise custody_mod.CustodyError(f"plan refused: {e}") from e
 
@@ -608,9 +705,7 @@ def clean_to_bundle(
             data, cleaned, original_report=result.report
         )
 
-    original_path, _orig_created = custody_mod.write_once(
-        out_dir / "original" / src.name, data
-    )
+    original_path, _orig_created = custody_mod.write_once(out_dir / "original" / src.name, data)
     deriv_rel = custody_mod.derivative_name(src.name, policy_id)
     derivative_path, _deriv_created = custody_mod.write_once(
         out_dir / "derivative" / deriv_rel, cleaned
@@ -619,21 +714,19 @@ def clean_to_bundle(
     for p in (original_path, derivative_path):
         try:
             if p.resolve() == src.resolve():
-                raise custody_mod.CustodyError(
-                    f"bundle path collides with the original input: {p}"
-                )
+                raise custody_mod.CustodyError(f"bundle path collides with the original input: {p}")
         except OSError:
             continue
 
-    actions = [
-        f"{r.subtype}:{r.action}: {r.detail}" for r in records
-    ] or list(result.findings)  # keep-all plans still show what was seen
+    actions = [f"{r.subtype}:{r.action}: {r.detail}" for r in records] or list(
+        result.finding_strings
+    )
 
     proc = _processor()
     processor_dict: dict[str, Any] = {
         "git_sha": proc.git_sha,
         "image_digest": proc.image_digest,
-        "tools": {**proc.tools, **custody_mod.tool_presence()},
+        "tools": dict(proc.tools),
     }
     orig_sha = custody_mod.sha256_bytes(data)
     deriv_sha = custody_mod.sha256_bytes(cleaned)
@@ -672,7 +765,7 @@ def clean_to_bundle(
         policy_id=policy_id,
         actions=actions,
         processor=processor_dict,
-        findings_before=result.findings,
+        findings_before=result.finding_strings,
         verification=verification,
         operator_id=operator_id,
         matter_id=matter_id,

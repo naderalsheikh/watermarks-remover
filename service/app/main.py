@@ -14,10 +14,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from .acl import OPERATOR, bootstrap_operator, grant, has_perm, revoke
+from .audit import append_event, verify_chain
 from .config import Config
-from .db import Base, make_engine, make_session_factory
+from .db import make_engine, make_session_factory
 from .malware import get_scanner
-from .models import Document, Job, Matter, _now, _uuid
+from .migrate import upgrade_head
+from .models import AuditEvent, Document, Job, Matter, _now, _uuid
 from .scripts_path import SCRIPTS  # noqa: F401  (must run before engine imports)
 from .security import ensure_local_password, issue_session, valid_session, verify_password
 
@@ -36,12 +39,17 @@ class SanitizeBody(BaseModel):
     signature_break_attestation: bool = False
 
 
+class AclBody(BaseModel):
+    user_id: str = OPERATOR
+    perm: str
+
+
 def create_app(data_root: str | Path | None = None) -> FastAPI:
     cfg = Config(data_root)
     cfg.data_root.mkdir(parents=True, exist_ok=True)
     ensure_local_password(cfg)
     engine = make_engine(cfg)
-    Base.metadata.create_all(engine)  # alembic migrations arrive with prod profile
+    upgrade_head(f"sqlite:///{cfg.db_path}")
     session_factory = make_session_factory(engine)
 
     app = FastAPI(title="CounselClear", version="product-mvp")
@@ -58,15 +66,17 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if not valid_session(cfg, token):
             raise HTTPException(401, "authentication required")
 
+    def _require(matter_id: str, perm: str, s: Session) -> None:
+        if not has_perm(s, matter_id, OPERATOR, perm):
+            raise HTTPException(403, f"missing permission: {perm}")
+
     # --- auth ---------------------------------------------------------------
 
     @app.post("/v1/auth/login")
     def login(body: LoginBody, response: Response):
         if not verify_password(cfg, body.password):
             raise HTTPException(403, "invalid credentials")
-        response.set_cookie(
-            "cc_session", issue_session(cfg), httponly=True, samesite="strict"
-        )
+        response.set_cookie("cc_session", issue_session(cfg), httponly=True, samesite="strict")
         return {"ok": True}
 
     # --- matters ------------------------------------------------------------
@@ -75,12 +85,23 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     def create_matter(body: MatterBody, s: Session = Depends(db_session)):
         matter = Matter(name=body.name)
         s.add(matter)
+        s.flush()
+        bootstrap_operator(s, matter.id)
+        append_event(
+            s,
+            matter_id=matter.id,
+            actor_id=OPERATOR,
+            action="matter.create",
+            payload={"name": body.name},
+        )
         s.commit()
         return _matter_dict(matter)
 
     @app.get("/v1/matters/{matter_id}", dependencies=[Depends(authed)])
     def get_matter(matter_id: str, s: Session = Depends(db_session)):
-        return _matter_dict(_matter(matter_id, s))
+        matter = _matter(matter_id, s)
+        _require(matter_id, "read", s)
+        return _matter_dict(matter)
 
     # --- documents ----------------------------------------------------------
 
@@ -90,6 +111,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         file: UploadFile = File(...),
         s: Session = Depends(db_session),
     ):
+        _require(matter_id, "upload", s)
         _matter(matter_id, s)
         data = await file.read()
         name = Path(file.filename or "upload").name
@@ -111,6 +133,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             raise HTTPException(409, str(e)) from e
         doc.storage_path = str(stored)
         s.add(doc)
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=OPERATOR,
+            action="document.upload",
+            payload={"filename_ext": Path(name).suffix, "sha256": doc.sha256, "bytes": doc.bytes},
+        )
         s.commit()
         return _doc_dict(doc)
 
@@ -119,6 +148,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         dependencies=[Depends(authed)],
     )
     def get_document(matter_id: str, doc_id: str, s: Session = Depends(db_session)):
+        _require(matter_id, "read", s)
         return _doc_dict(_document(matter_id, doc_id, s))
 
     # --- jobs ---------------------------------------------------------------
@@ -135,15 +165,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         job.result_json = {
             "kind": res.kind,
             "format": res.format,
-            "findings": res.findings,
+            "findings": [f.to_dict() if hasattr(f, "to_dict") else f for f in res.findings],
             "unsupported_reason": res.unsupported_reason,
         }
         job.status = "done"
 
     def _run_sanitize(job: Job, doc: Document) -> None:
-        bundle_dir = (
-            cfg.data_root / "matters" / job.matter_id / "jobs" / job.id / "bundle"
-        )
+        bundle_dir = cfg.data_root / "matters" / job.matter_id / "jobs" / job.id / "bundle"
         result = clean_to_bundle(
             Path(doc.storage_path),
             bundle_dir,
@@ -165,6 +193,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         dependencies=[Depends(authed)],
     )
     def inspect_job(matter_id: str, doc_id: str, s: Session = Depends(db_session)):
+        _require(matter_id, "inspect", s)
         doc = _document(matter_id, doc_id, s)
         job = _create_job(matter_id, doc.id, "inspect", s)
         _run_safely(job, s, lambda: _run_inspect(job, doc))
@@ -180,6 +209,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: SanitizeBody | None = None,
         s: Session = Depends(db_session),
     ):
+        _require(matter_id, "sanitize", s)
         doc = _document(matter_id, doc_id, s)
         body = body or SanitizeBody()
         job = _create_job(
@@ -212,6 +242,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}", dependencies=[Depends(authed)])
     def get_job(matter_id: str, job_id: str, s: Session = Depends(db_session)):
+        _require(matter_id, "read", s)
         return _job_dict(_job(matter_id, job_id, s))
 
     @app.get(
@@ -219,6 +250,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         dependencies=[Depends(authed)],
     )
     def job_manifest(matter_id: str, job_id: str, s: Session = Depends(db_session)):
+        _require(matter_id, "read", s)
         job = _job(matter_id, job_id, s)
         if job.kind != "sanitize" or not job.result_json:
             raise HTTPException(404, "no manifest for this job")
@@ -234,17 +266,15 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         include_original: bool = False,
         s: Session = Depends(db_session),
     ):
+        _require(matter_id, "read", s)
         job = _job(matter_id, job_id, s)
         if job.status != "done" or not job.bundle_dir:
             raise HTTPException(409, f"job is {job.status}; no bundle")
-        audit_entry = {"action": "download_bundle", "include_original": include_original}
         original_path = None
         if include_original:
-            if not cfg.allow_original_download:
-                raise HTTPException(403, "original download disabled on this deployment")
+            _require(matter_id, "download_original", s)
             doc = s.get(Document, job.document_id)
             original_path = Path(doc.storage_path)
-            audit_entry["note"] = "original included (flag enabled on deployment)"
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             bundle = Path(job.bundle_dir)
@@ -256,23 +286,88 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             for p in sorted(deriv_dir.iterdir()):
                 zf.write(p, arcname=f"derivative/{p.name}")
             report = {
-                "verification": (job.result_json or {}).get("manifest", {}).get(
-                    "verification"
-                ),
-                "findings_before": (job.result_json or {}).get("manifest", {}).get(
-                    "findings_before"
-                ),
+                "verification": (job.result_json or {}).get("manifest", {}).get("verification"),
+                "findings_before": (job.result_json or {})
+                .get("manifest", {})
+                .get("findings_before"),
             }
             zf.writestr("report.json", json.dumps(report, indent=2, sort_keys=True))
             if original_path and original_path.exists():
                 zf.write(original_path, arcname=f"original/{original_path.name}")
-        job.audit_log = [*list(job.audit_log or []), audit_entry]
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=OPERATOR,
+            action="bundle.download",
+            payload={"job_id": job.id, "include_original": include_original},
+        )
         s.commit()
         return Response(
             content=buf.getvalue(),
             media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{job.id}-bundle.zip"'},
         )
+
+    @app.put("/v1/matters/{matter_id}/acl", dependencies=[Depends(authed)])
+    def put_acl(matter_id: str, body: AclBody, s: Session = Depends(db_session)):
+        _require(matter_id, "admin", s)
+        _matter(matter_id, s)
+        try:
+            grant(s, matter_id, body.user_id, body.perm)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=OPERATOR,
+            action="acl.grant",
+            payload={"user_id": body.user_id, "perm": body.perm},
+        )
+        s.commit()
+        return {"ok": True, "user_id": body.user_id, "perm": body.perm}
+
+    @app.delete("/v1/matters/{matter_id}/acl", dependencies=[Depends(authed)])
+    def delete_acl(matter_id: str, body: AclBody, s: Session = Depends(db_session)):
+        _require(matter_id, "admin", s)
+        _matter(matter_id, s)
+        revoke(s, matter_id, body.user_id, body.perm)
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=OPERATOR,
+            action="acl.revoke",
+            payload={"user_id": body.user_id, "perm": body.perm},
+        )
+        s.commit()
+        return {"ok": True, "revoked": {"user_id": body.user_id, "perm": body.perm}}
+
+    @app.get("/v1/matters/{matter_id}/audit", dependencies=[Depends(authed)])
+    def list_audit(matter_id: str, s: Session = Depends(db_session)):
+        _require(matter_id, "admin", s)
+        rows = (
+            s.query(AuditEvent)
+            .filter(AuditEvent.matter_id == matter_id)
+            .order_by(AuditEvent.seq)
+            .all()
+        )
+        ok, detail = verify_chain(rows)
+        return {
+            "chain_ok": ok,
+            "chain_detail": detail,
+            "events": [
+                {
+                    "id": e.id,
+                    "seq": e.seq,
+                    "action": e.action,
+                    "actor_id": e.actor_id,
+                    "payload": e.payload,
+                    "prev_hash": e.prev_hash,
+                    "row_hash": e.row_hash,
+                    "at": e.at,
+                }
+                for e in rows
+            ],
+        }
 
     # --- helpers ------------------------------------------------------------
 

@@ -15,10 +15,8 @@ class Config:
         self.auth_dir = self.data_root / "auth"
         self.hash_file = self.auth_dir / "local.hash"
         self.secret_file = self.auth_dir / "cookie.secret"
-        # download_original permission (audited); off by default
-        self.allow_original_download = os.environ.get(
-            "COUNSELCLEAR_ALLOW_ORIGINAL_DOWNLOAD", ""
-        ).lower() in ("1", "true", "yes")
+        # Note: original downloads are gated solely by the per-matter
+        # download_original permission (PR 16) — no deployment flag.
 
     def ensure_dirs(self) -> None:
         self.auth_dir.mkdir(parents=True, exist_ok=True)

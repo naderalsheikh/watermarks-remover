@@ -1,8 +1,97 @@
 {
   "findings": [
-    "xlsx-hidden-sheets: 1 hidden (0 veryHidden)",
-    "xlsx-comments: 1 comment(s)",
-    "xlsx-external-links: 1 part(s)"
+    {
+      "action_allowed_by_policy": [
+        "flag",
+        "keep"
+      ],
+      "action_recommended": "flag",
+      "category": "hidden_structure",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_545d",
+      "format": "xlsx",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "hidden",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": null,
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "medium",
+      "subtype": "hidden_structure",
+      "value_redacted": "xlsx-hidden-sheets: 1 hidden (0 veryHidden)"
+    },
+    {
+      "action_allowed_by_policy": [
+        "strip",
+        "replace",
+        "keep"
+      ],
+      "action_recommended": "strip",
+      "category": "embedded_content",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_93c2",
+      "format": "xlsx",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "comment",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": null,
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "high",
+      "subtype": "comments_and_notes",
+      "value_redacted": "xlsx-comments: 1 comment(s)"
+    },
+    {
+      "action_allowed_by_policy": [
+        "strip",
+        "replace",
+        "keep"
+      ],
+      "action_recommended": "strip",
+      "category": "embedded_content",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_f939",
+      "format": "xlsx",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "metadata",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": "external workbook references disclose other file locations",
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "high",
+      "subtype": "external_links",
+      "value_redacted": "xlsx-external-links: 1 part(s)"
+    }
   ],
   "format": "xlsx",
   "kind": "container",

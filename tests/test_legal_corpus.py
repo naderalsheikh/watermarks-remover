@@ -56,10 +56,11 @@ def _redact(payload: dict) -> dict:
 def _inspect(name: str) -> dict:
     data = _load(name)
     res = inspect_bytes(data, name)
+    findings = [f.to_dict() if hasattr(f, "to_dict") else f for f in res.findings]
     return {
         "kind": res.kind,
         "format": res.format,
-        "findings": res.findings,
+        "findings": findings,
         "unsupported_reason": res.unsupported_reason,
         "report": res.report,
     }
@@ -81,7 +82,15 @@ def _assert_golden(name: str):
 
 @pytest.mark.parametrize(
     "name",
-    ["spa.txt", "spa.docx", "signed.pdf", "macro.docm", "hidden.xlsx", "incremental.pdf", "gps.jpg"],
+    [
+        "spa.txt",
+        "spa.docx",
+        "signed.pdf",
+        "macro.docm",
+        "hidden.xlsx",
+        "incremental.pdf",
+        "gps.jpg",
+    ],
 )
 def test_golden_inspect_snapshot(name):
     _assert_golden(name)

@@ -1,7 +1,36 @@
 {
   "findings": [
-    "pdf-structured:ai:Claude",
-    "pdf-incremental-updates: 1 update section(s)"
+    {
+      "action_allowed_by_policy": [
+        "strip",
+        "replace",
+        "keep"
+      ],
+      "action_recommended": "strip",
+      "category": "file_metadata",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_9fba",
+      "format": "pdf",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "metadata",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": "AI generator metadata markers present",
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "high",
+      "subtype": "ai_generator_metadata",
+      "value_redacted": null
+    }
   ],
   "format": "pdf",
   "kind": "container",

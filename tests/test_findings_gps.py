@@ -27,7 +27,11 @@ from findings import (
 )
 from image_meta import _jpeg_has_gps, detect_format, inspect_image
 
-SCHEMA = json.loads((SCRIPTS / "schemas" / "finding.schema.json").read_text())
+_SCHEMA_CANDIDATES = (
+    ROOT / "engine" / "schemas" / "finding.schema.json",
+    SCRIPTS / "schemas" / "finding.schema.json",
+)
+SCHEMA = json.loads(next(p for p in _SCHEMA_CANDIDATES if p.is_file()).read_text())
 
 
 def _tiff_block(with_gps: bool) -> bytes:
@@ -178,7 +182,7 @@ def test_end_to_end_inspect_bytes_projects_findings(tmp_path):
     data = _jpeg(_tiff_block(with_gps=True))
     res = inspect_bytes(data, "photo.jpg")
     assert res.kind == "image"
-    found = findings_for_report(res.kind, res.report)
+    found = list(res.findings) or findings_for_report(res.kind, res.report)
     assert any(f.subtype == "jpeg_gps" for f in found)
     for f in found:
         _check_schema(f.to_dict())

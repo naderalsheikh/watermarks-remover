@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CounselClear policy overlay",
+  "type": "object",
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "base": {
+      "enum": [
+        "external_sharing",
+        "privacy_only",
+        "production",
+        "evidence_preservation"
+      ]
+    }
+  },
+  "patternProperties": {
+    "^(authoring_props|jpeg_gps|comments_and_notes|headers_footers|hidden_structure|hidden_text|embeddings_ole|custom_xml|external_links|pdf_js_actions|pdf_acroform|pdf_attachments|pdf_annots|tracked_changes|pdf_incremental|c2pa|layer_a_body|layer_a_non_body|cms_or_xml_dsig|macros_vba)$": {
+      "enum": [
+        "strip", "strip_listed", "sanitize", "accept_all", "rebuild",
+        "approve", "flag", "keep", "refuse", "refuse_unless_attest",
+        "inspect_only", "strip_if_authorized"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

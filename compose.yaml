@@ -16,6 +16,11 @@
 
 name: watermarks-remover
 
+# CounselClear legal profile (engine + out-of-process worker):
+#   docker compose --profile legal run --rm --network none cc-worker \
+#     inspect /data/matter.docx
+# The API still binds loopback; the worker has no network.
+
 services:
   wr-core:
     build:

@@ -79,14 +79,18 @@ def test_document_upload_is_write_once_and_hashed(client):
 
 def test_inspect_job_reports_findings(client):
     doc = _upload(client, "spa.txt")
-    r = client.post(
-        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/inspect-jobs"
-    )
+    r = client.post(f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/inspect-jobs")
     body = r.json()
     assert body["status"] == "done"
-    assert any("layer" in f.lower() for f in body["result"]["findings"]) or body[
-        "result"
-    ]["findings"]
+    found = body["result"]["findings"]
+    assert found
+
+    def _blob(item) -> str:
+        if isinstance(item, dict):
+            return " ".join(str(item.get(k) or "") for k in ("subtype", "category", "notes"))
+        return str(item)
+
+    assert any("layer" in _blob(f).lower() for f in found) or found
 
 
 def test_sanitize_job_privacy_bundle_excludes_original(client):
@@ -99,9 +103,7 @@ def test_sanitize_job_privacy_bundle_excludes_original(client):
     assert body["status"] == "done", body["error"]
     job_id = body["id"]
 
-    manifest = client.get(
-        f"/v1/matters/{doc['_matter']}/jobs/{job_id}/manifest"
-    ).json()
+    manifest = client.get(f"/v1/matters/{doc['_matter']}/jobs/{job_id}/manifest").json()
     assert manifest["policy"]["id"] == "privacy_only"
     assert manifest["verification"]["pass"] is True
 
@@ -116,14 +118,10 @@ def test_sanitize_job_privacy_bundle_excludes_original(client):
 
 def test_include_original_denied_by_default(client):
     doc = _upload(client, "spa.txt")
-    r = client.post(
-        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs", json={}
-    )
+    r = client.post(f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs", json={})
     job_id = r.json()["id"]
     assert r.json()["status"] == "done"
-    denied = client.get(
-        f"/v1/matters/{doc['_matter']}/jobs/{job_id}/bundle?include_original=true"
-    )
+    denied = client.get(f"/v1/matters/{doc['_matter']}/jobs/{job_id}/bundle?include_original=true")
     assert denied.status_code == 403
 
 
@@ -149,9 +147,32 @@ def test_macro_docm_job_refuses(client):
     assert "macro" in r["error"].lower()
 
 
-def test_audit_log_records_download(client):
+def test_audit_chain_and_download_original_perm(client):
     doc = _upload(client, "spa.txt")
-    r = client.post(
-        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/inspect-jobs"
-    ).json()
+    matter = doc["_matter"]
+    r = client.post(f"/v1/matters/{matter}/documents/{doc['id']}/sanitize-jobs", json={}).json()
     assert r["status"] == "done"
+    job_id = r["id"]
+    denied = client.get(f"/v1/matters/{matter}/jobs/{job_id}/bundle?include_original=true")
+    assert denied.status_code == 403
+    granted = client.put(f"/v1/matters/{matter}/acl", json={"perm": "download_original"})
+    assert granted.status_code == 200
+    allowed = client.get(f"/v1/matters/{matter}/jobs/{job_id}/bundle?include_original=true")
+    assert allowed.status_code == 200
+    events = client.get(f"/v1/matters/{matter}/audit").json()["events"]
+    actions = [e["action"] for e in events]
+    assert "matter.create" in actions
+    assert "document.upload" in actions
+    assert "bundle.download" in actions
+    by_hash = {e["row_hash"]: e for e in events}
+    genesis = [e for e in events if e["prev_hash"] == "0" * 64]
+    assert len(genesis) == 1
+    walk = genesis[0]
+    seen = 1
+    while True:
+        nxt = next((e for e in events if e["prev_hash"] == walk["row_hash"]), None)
+        if not nxt:
+            break
+        walk = nxt
+        seen += 1
+    assert seen == len(events) == len(by_hash)
