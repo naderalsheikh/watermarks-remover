@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "service" / "scripts"
@@ -220,3 +222,75 @@ def test_cli_exit_codes(tmp_path):
         capture_output=True, text=True, check=False,
     )
     assert proc3.returncode == 2
+
+
+# --- Layer A body / non-body split -------------------------------------------
+
+def _docx_with_zwsp(*, header: bool = False, body: bool = False) -> bytes:
+    """spa.docx plus a zero-width space in the chosen part(s)."""
+    src = (FIXTURES / "spa.docx").read_bytes()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(src)) as zin, zipfile.ZipFile(
+        buf, "w", zipfile.ZIP_DEFLATED
+    ) as zout:
+        for info in zin.infolist():
+            if info.filename == "word/header1.xml":
+                continue
+            raw = zin.read(info.filename)
+            if body and info.filename == "word/document.xml":
+                raw = raw.replace(b"</w:t>", "​</w:t>".encode(), 1)
+            zout.writestr(info, raw)
+        if header:
+            zout.writestr(
+                "word/header1.xml",
+                '<?xml version="1.0"?><w:hdr xmlns:w="http://schemas.openxmlformats.org'
+                '/wordprocessingml/2006/main"><w:p><w:r><w:t>PRIVILEGED​</w:t>'
+                "</w:r></w:p></w:hdr>",
+            )
+    return buf.getvalue()
+
+
+def test_layer_a_hits_carry_part_scope():
+    data = _docx_with_zwsp(header=True)
+    hits = inspect_bytes(data, "h.docx").report["layer_a_hits"]
+    assert hits, "expected a Layer A hit in the header"
+    assert all("body" in h and "part" in h for h in hits)
+    assert any(h["part"] == "word/header1.xml" and h["body"] is False for h in hits)
+
+
+def test_header_only_invisible_is_non_body_and_does_not_fail_the_gate():
+    """The composition rule deliberately leaves kept headers alone under
+    external_sharing. Classifying that hit as layer_a_body made verify fail a
+    job that behaved exactly as designed."""
+    data = _docx_with_zwsp(header=True)
+    res = inspect_bytes(data, "h.docx")
+    subs = {f.subtype for f in res.findings if f.subtype.startswith("layer_a")}
+    assert subs == {"layer_a_non_body"}
+
+    plan = plan_actions(res, "external_sharing")
+    cleaned, _ = apply_actions(data, plan)
+    report = verify_derivative(data, cleaned, plan, name="h.docx")
+    assert report["pass"] is True, [c for c in report["checks"] if not c["pass"]]
+
+
+def test_body_and_header_invisibles_split_into_both_subtypes():
+    data = _docx_with_zwsp(header=True, body=True)
+    res = inspect_bytes(data, "hb.docx")
+    subs = {f.subtype for f in res.findings if f.subtype.startswith("layer_a")}
+    assert subs == {"layer_a_body", "layer_a_non_body"}
+
+    plan = plan_actions(res, "external_sharing")
+    cleaned, _ = apply_actions(data, plan)
+    assert verify_derivative(data, cleaned, plan, name="hb.docx")["pass"] is True
+
+
+def test_unsanitized_body_invisible_still_fails_the_gate():
+    """The split must not blunt the gate: real body residue still fails."""
+    data = _docx_with_zwsp(body=True)
+    res = inspect_bytes(data, "b.docx")
+    plan = plan_actions(res, "external_sharing")
+    # a "derivative" that sanitized nothing
+    report = verify_derivative(data, data, plan, name="b.docx")
+    assert report["pass"] is False
+    gone = next(c for c in report["checks"] if c["name"] == "reinspect_targeted_gone")
+    assert "layer_a_body" in gone["detail"]

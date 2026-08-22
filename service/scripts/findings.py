@@ -254,10 +254,41 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                 notes="AI generator metadata markers present",
             )
         )
-    # Container Layer A totals are aggregated across parts until the per-part
-    # inspectors (PR 6+) can split body vs comments/headers/notes; classify as
-    # body conservatively.
-    if int(report.get("suspicious_total") or 0):
+    # Layer A, split by the part scope the cleaner actually honours. The
+    # composition rule leaves non-body parts (headers/footers/notes) alone
+    # under sharing, so reporting their hits as layer_a_body made verify
+    # fail correct jobs — the first real document with a stray ZWSP in a
+    # footer would hard-fail. Hits carry their scope from the inspector;
+    # a report without per-hit scope falls back to the old conservative
+    # "all body" reading.
+    hits = report.get("layer_a_hits") or []
+    scoped = [h for h in hits if isinstance(h, dict) and "body" in h]
+    if scoped:
+        buckets: dict[bool, int] = {}
+        parts: dict[bool, set[str]] = {}
+        for h in scoped:
+            is_body = bool(h.get("body"))
+            buckets[is_body] = buckets.get(is_body, 0) + int(h.get("count") or 1)
+            parts.setdefault(is_body, set()).add(str(h.get("part") or "?"))
+        for is_body, count in sorted(buckets.items(), reverse=True):
+            where = ", ".join(sorted(parts[is_body])[:4])
+            out.append(
+                Finding(
+                    category="invisible_text",
+                    subtype="layer_a_body" if is_body else "layer_a_non_body",
+                    format=fmt,
+                    location=FindingLocation(pane="body" if is_body else "other"),
+                    risk_level="high",
+                    confidence="probable",
+                    value_redacted=f"present ({count} hits)",
+                    action_recommended="sanitize" if is_body else "flag",
+                    action_allowed_by_policy=("sanitize", "keep")
+                    if is_body
+                    else ("flag", "sanitize", "keep"),
+                    notes=f"in {where}",
+                )
+            )
+    elif int(report.get("suspicious_total") or 0):
         out.append(
             Finding(
                 category="invisible_text",
@@ -266,7 +297,7 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                 risk_level="high",
                 confidence="probable",
                 value_redacted=f"present ({int(report['suspicious_total'])} hits)",
-                notes="aggregated across parts; per-part split lands with part-aware inspectors",
+                notes="unscoped hits; classified as body conservatively",
             )
         )
     # PR 4 refuse-list signals surface as prefixed finding strings.

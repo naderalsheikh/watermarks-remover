@@ -1279,6 +1279,18 @@ def _inspect_ooxml_layer_a(data: bytes, fmt: str) -> tuple[int, list[dict], list
                 if not n:
                     continue
                 total += n
+                # Tag each hit with the part scope the *cleaner* uses, via the
+                # same _layer_a_body_part helper the clean path consults. The
+                # inspector previously reported every hit unscoped, so a hit
+                # in a kept header/footer/note was classified as body — and
+                # since the composition rule deliberately leaves those parts
+                # alone, verify then failed a job that did exactly the right
+                # thing. Scope travels with the hit so findings can split
+                # layer_a_body from layer_a_non_body.
+                is_body = _layer_a_body_part(fmt, name)
+                for item in h:
+                    item["part"] = name
+                    item["body"] = is_body
                 hits.extend(h)
                 for item in h:
                     findings.append(
