@@ -124,7 +124,7 @@ def _findings_html(findings: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     for category, items in by_category.items():
         parts.append(f'<div class="group"><h3>{_esc(_label(CATEGORY_LABELS, category))}'
-                      f' &middot; {len(items)}</h3><table><thead><tr>'
+                      f' &middot; {len(items)}</h3><div class="tablewrap"><table><thead><tr>'
                       "<th>Risk</th><th>What</th><th>Where</th><th>Action</th>"
                       "<th>Detail</th></tr></thead><tbody>")
         for f in items:
@@ -139,7 +139,7 @@ def _findings_html(findings: list[dict[str, Any]]) -> str:
                 f"<td>{_esc(what)}</td><td>{_esc(where)}</td>"
                 f"<td>{_esc(action)}</td><td>{_esc(detail)}</td></tr>"
             )
-        parts.append("</tbody></table></div>")
+        parts.append("</tbody></table></div></div>")
     return "".join(parts)
 
 
@@ -157,10 +157,10 @@ def _checks_html(checks: list[dict[str, Any]]) -> str:
             f'<td class="mono">{_esc(c.get("detail") or "")}</td></tr>'
         )
     return (
-        '<div class="group"><h3>Verification checks</h3><table><thead><tr>'
+        '<div class="group"><h3>Verification checks</h3><div class="tablewrap"><table><thead><tr>'
         "<th>Result</th><th>Check</th><th>Detail</th></tr></thead><tbody>"
         + "".join(rows)
-        + "</tbody></table></div>"
+        + "</tbody></table></div></div>"
     )
 
 
@@ -210,7 +210,8 @@ h2 {
   font: 10.5px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.1em;
   text-transform: uppercase; margin: 0 0 0.4rem; color: var(--mute);
 }
-table { width: 100%; border-collapse: collapse; font: 13px/1.35 ui-sans-serif, system-ui, sans-serif; }
+.tablewrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font: 13px/1.35 ui-sans-serif, system-ui, sans-serif; min-width: 32rem; }
 th {
   text-align: left; font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
   font-weight: 650; color: var(--mute); border-bottom: 1px solid var(--rule);
@@ -392,14 +393,14 @@ def render_intake_report(
         identity_rows = _identity_rollup(scanned)
         if identity_rows:
             body.append(
-                "<table><thead><tr><th>Field</th><th>Value</th><th>Files</th>"
-                "</tr></thead><tbody>"
+                '<div class="tablewrap"><table><thead><tr><th>Field</th><th>Value</th>'
+                "<th>Files</th></tr></thead><tbody>"
             )
             for label, value, n in identity_rows:
                 body.append(
                     f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td><td>{n}</td></tr>"
                 )
-            body.append("</tbody></table>")
+            body.append("</tbody></table></div>")
         else:
             body.append('<p class="empty">No authoring identity fields found.</p>')
     else:
@@ -414,7 +415,7 @@ def render_intake_report(
         body.append('<p class="empty">No files found.</p>')
     else:
         body.append(
-            "<table><thead><tr><th>Risk</th><th>File</th><th>Format</th>"
+            '<div class="tablewrap"><table><thead><tr><th>Risk</th><th>File</th><th>Format</th>'
             "<th>Findings</th><th>Most severe</th></tr></thead><tbody>"
         )
         for r in sorted(
@@ -435,7 +436,7 @@ def render_intake_report(
                 f'<tr><td class="risk skip">skip</td><td>{_esc(r["name"])}</td>'
                 f'<td colspan="3">{_esc(r.get("error"))}</td></tr>'
             )
-        body.append("</tbody></table>")
+        body.append("</tbody></table></div>")
 
     return (
         "<!doctype html><meta charset=\"utf-8\">"
