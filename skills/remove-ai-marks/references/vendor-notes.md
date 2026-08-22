@@ -2,6 +2,8 @@
 
 This skill targets **mark classes**, not reverse-engineered private detectors. Details below are from public docs and the research literature. Algorithms may change.
 
+For the *mechanics* behind "generative / statistical token-sampling watermark" (how a green-list or a keyed-Gumbel sampler actually nudges word choice, with a worked example and real detector output), see [`how-word-choice-watermarks-work.md`](how-word-choice-watermarks-work.md).
+
 ## Industry two-layer model (context)
 
 Product and regulatory guidance often frames AI disclosure as:

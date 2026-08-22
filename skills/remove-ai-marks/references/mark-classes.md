@@ -26,6 +26,8 @@ Maps to Nature paper “edit-based watermarking.”
 
 Bias next-token sampling toward a pseudo-random green list / score (Kirchenbauer, SynthID-Text / Tournament sampling, etc.). Signal lives in **word choice**, not metadata.
 
+**How it actually works, with a worked example:** [`how-word-choice-watermarks-work.md`](how-word-choice-watermarks-work.md) — the mechanics behind "biases sampling" for both the green-list (KGW) and keyed-Gumbel (EXP) families, including real output from this repo's own `detect_gumbel.py`.
+
 **Removal:** Layer B rewrite (paraphrase → back-translate → structural). Best-effort; no gold cert without vendor detector/key.
 
 Maps to Nature paper primary method (SynthID-Text).

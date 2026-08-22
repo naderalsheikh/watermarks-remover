@@ -773,7 +773,7 @@ Details: [`skills/remove-ai-marks/references/vendor-notes.md`](skills/remove-ai-
 
 ## How text marking works (short)
 
-Modern LLM watermarks often hide a signal in **which tokens are chosen** (generative / sampling bias), not only in invisible characters. Edit-based schemes inject Unicode or synonym rules. File schemes attach **C2PA** or generator metadata.
+Modern LLM watermarks often hide a signal in **which tokens are chosen** (generative / sampling bias), not only in invisible characters. Edit-based schemes inject Unicode or synonym rules. File schemes attach **C2PA** or generator metadata. For what "biases token choice" actually means mechanically — green-list sampling, keyed-Gumbel sampling, a worked example, and real output from this repo's own detector — see [`how-word-choice-watermarks-work.md`](skills/remove-ai-marks/references/how-word-choice-watermarks-work.md).
 
 - **Layer A** removes edit-based Unicode carriers (testable).
 - **Layer B** attacks sampling watermarks via heavy rewrite (best-effort; literature-standard attacks such as paraphrase / back-translation).
