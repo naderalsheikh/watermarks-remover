@@ -1949,6 +1949,10 @@ def clean_docx(
 
 
 _XLSX_COMMENTS_PART_RE = re.compile(r"^xl/comments\d*\.xml$", re.I)
+# Real Excel writes numbered parts (person1.xml, person2.xml, ...); the
+# unnumbered person.xml form was the only one matched before, so numbered
+# commenter names/emails survived a sharing clean unstripped.
+_XLSX_PERSONS_PART_RE = re.compile(r"^xl/persons/person\d*\.xml$", re.I)
 _XLSX_LEGACY_DRAWING_RE = re.compile(r"<legacyDrawing\b[^>]*/>")
 _XLSX_EXTERNAL_REFS_RE = re.compile(
     r"<externalReferences\b[^>]*>.*?</externalReferences>|<externalReferences\b[^>]*/>", re.S
@@ -1976,7 +1980,7 @@ def _xlsx_legal_clean(
             if strip_comments and (
                 _XLSX_COMMENTS_PART_RE.match(name)
                 or name.lower().startswith("xl/threadedcomments/")
-                or name.lower() == "xl/persons/person.xml"
+                or _XLSX_PERSONS_PART_RE.match(name)
             ):
                 actions.append(f"drop part {name}")
                 dropped.add(name)

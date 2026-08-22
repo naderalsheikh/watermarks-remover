@@ -418,6 +418,23 @@ def test_clean_xlsx_opt_out_flags_keep_parts():
     assert "xl/externalLinks/externalLink1.xml" in names
 
 
+def test_numbered_persons_part_detected_and_stripped():
+    """Regression: real Excel numbers this part (person1.xml, person2.xml, ...)
+    and never writes the unnumbered xl/persons/person.xml alone. The scanner
+    and the sharing-clean drop logic must both match the numbered form, or
+    commenter names/emails silently survive an external_sharing clean."""
+    data = _xlsx(("xl/persons/person1.xml", PERSONS_XML))
+
+    scan = xlsx_legal.scan_xlsx_legal(data)
+    assert scan["persons_part"] is True
+
+    out, actions = clean_xlsx(data)
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        names = zf.namelist()
+    assert "xl/persons/person1.xml" not in names
+    assert any("xl/persons/person1.xml" in a for a in actions)
+
+
 # --- canonical findings projection ----------------------------------------------
 
 

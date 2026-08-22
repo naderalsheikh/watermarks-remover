@@ -211,7 +211,9 @@ def main() -> None:
                 '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
             ),
             "xl/comments1.xml": "<comments xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><comment ref=\"A1\"/></comments>",
-            "xl/persons/person.xml": '<persons xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person/></persons>',
+            # Real Excel numbers this part (person1.xml, person2.xml, ...); it
+            # never writes the unnumbered person.xml this fixture used to use.
+            "xl/persons/person1.xml": '<persons xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person/></persons>',
             "xl/externalLinks/externalLink1.xml": '<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>',
         },
         sheets_xml=(

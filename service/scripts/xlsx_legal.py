@@ -5,7 +5,7 @@ Stdlib-only scans over the raw XLSX zip bytes (independent of
 workbook.xml, legacy comment parts (xl/comments*.xml) with their
 ``<comment>`` element counts, threaded-comment parts, external workbook
 links (xl/externalLinks/*.xml), defined names carrying ``hidden="1"``,
-person metadata (xl/persons/person.xml), and a redacted docProps/core.xml
+person metadata (xl/persons/person*.xml), and a redacted docProps/core.xml
 identity summary mirroring ``pdf_legal.pdf_info_summary``.
 
 Counts are heuristic regex counts over member bytes; they are for
@@ -32,7 +32,10 @@ _WORKBOOK_PART_RE = re.compile(r"^xl/workbook\.xml$", re.IGNORECASE)
 _COMMENTS_PART_RE = re.compile(r"^xl/comments\d*\.xml$", re.IGNORECASE)
 _THREADED_PART_RE = re.compile(r"^xl/threadedComments/[^/]+\.xml$", re.IGNORECASE)
 _EXTERNAL_LINK_PART_RE = re.compile(r"^xl/externalLinks/[^/]+\.xml$", re.IGNORECASE)
-_PERSONS_PART_RE = re.compile(r"^xl/persons/person\.xml$", re.IGNORECASE)
+# Real Excel writes numbered parts (person1.xml, person2.xml, ...); the
+# unnumbered person.xml form was the only one matched before, so numbered
+# commenter names/emails survived every scan and sharing clean unflagged.
+_PERSONS_PART_RE = re.compile(r"^xl/persons/person\d*\.xml$", re.IGNORECASE)
 _WORKSHEET_PART_RE = re.compile(r"^xl/worksheets/sheet\d+\.xml$", re.IGNORECASE)
 _CORE_PART_RE = re.compile(r"^docProps/core\.xml$", re.IGNORECASE)
 
