@@ -7,6 +7,37 @@
         "keep"
       ],
       "action_recommended": "strip",
+      "category": "file_metadata",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_bbd53e64680e5e46",
+      "format": "docx",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "metadata",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": "authoring identity (docProps / PDF /Info)",
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "high",
+      "subtype": "authoring_props",
+      "value_redacted": "authoring-props: Application (21 chars), Company (18 chars), Manager (7 chars), cp:keywords (20 chars), cp:lastModifiedBy (14 chars), dc:creator (14 chars), dc:subject (11 chars)"
+    },
+    {
+      "action_allowed_by_policy": [
+        "strip",
+        "replace",
+        "keep"
+      ],
+      "action_recommended": "strip",
       "category": "embedded_content",
       "confidence": "confirmed",
       "content_visible": false,
@@ -83,10 +114,12 @@
       "parts": 8
     },
     "findings": [
+      "authoring-props: Application (21 chars), Company (18 chars), Manager (7 chars), cp:keywords (20 chars), cp:lastModifiedBy (14 chars), dc:creator (14 chars), dc:subject (11 chars)",
       "docx-comments: 1 comment(s) across 1 part(s)",
       "docx-tracked-changes: insertions=1 deletions=2 format-changes=0"
     ],
     "findings_confidence": [
+      "informational",
       "informational",
       "informational"
     ],

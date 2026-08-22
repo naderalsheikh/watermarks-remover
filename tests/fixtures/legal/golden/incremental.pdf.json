@@ -30,6 +30,67 @@
       "risk_level": "high",
       "subtype": "ai_generator_metadata",
       "value_redacted": null
+    },
+    {
+      "action_allowed_by_policy": [
+        "rebuild",
+        "keep"
+      ],
+      "action_recommended": "rebuild",
+      "category": "revision_history",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_714b211b3766cb3e",
+      "format": "pdf",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "other",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": "prior revisions remain recoverable until the file is rebuilt",
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "high",
+      "subtype": "pdf_incremental",
+      "value_redacted": "pdf-incremental-updates: 1 update section(s)"
+    },
+    {
+      "action_allowed_by_policy": [
+        "strip",
+        "replace",
+        "keep"
+      ],
+      "action_recommended": "strip",
+      "category": "file_metadata",
+      "confidence": "confirmed",
+      "content_visible": false,
+      "field": null,
+      "finding_id": "f_b172a57cd20a86c3",
+      "format": "pdf",
+      "location": {
+        "bbox": null,
+        "offset": null,
+        "page": null,
+        "pane": "metadata",
+        "part": null,
+        "sheet": null,
+        "slide": null,
+        "xpath_or_field": null
+      },
+      "notes": "authoring identity (docProps / PDF /Info)",
+      "removal_changes_visible_content": false,
+      "requires_approval": false,
+      "requires_attestation": false,
+      "risk_level": "high",
+      "subtype": "authoring_props",
+      "value_redacted": "authoring-props: /Info author, title"
     }
   ],
   "format": "pdf",
@@ -56,10 +117,12 @@
     },
     "findings": [
       "pdf-structured:ai:Claude",
-      "pdf-incremental-updates: 1 update section(s)"
+      "pdf-incremental-updates: 1 update section(s)",
+      "authoring-props: /Info author, title"
     ],
     "findings_confidence": [
       "probable",
+      "informational",
       "informational"
     ],
     "format": "pdf",

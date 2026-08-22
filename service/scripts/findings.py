@@ -353,6 +353,36 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                     value_redacted=text,
                 )
             )
+        elif text.startswith("pdf-incremental"):
+            out.append(
+                Finding(
+                    category="revision_history",
+                    subtype="pdf_incremental",
+                    format=fmt,
+                    risk_level="high",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="other"),
+                    action_recommended="rebuild",
+                    action_allowed_by_policy=("rebuild", "keep"),
+                    value_redacted=text,
+                    notes="prior revisions remain recoverable until the file is rebuilt",
+                )
+            )
+        elif text.startswith("authoring-props:"):
+            out.append(
+                Finding(
+                    category="file_metadata",
+                    subtype="authoring_props",
+                    format=fmt,
+                    risk_level="high",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="metadata"),
+                    action_recommended="strip",
+                    action_allowed_by_policy=("strip", "replace", "keep"),
+                    value_redacted=text,
+                    notes="authoring identity (docProps / PDF /Info)",
+                )
+            )
         elif text.startswith("docx-comments:"):
             out.append(
                 Finding(

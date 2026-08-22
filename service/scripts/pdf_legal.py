@@ -64,10 +64,26 @@ def scan_pdf_legal(blob: bytes) -> dict[str, Any]:
         "additional_actions": bool(_PDF_TOKEN_RES["additional_actions"].search(blob)),
         "embedded_files": len(_PDF_TOKEN_RES["embedded_files"].findall(blob)),
         "acroform": bool(_PDF_TOKEN_RES["acroform"].search(blob)),
-        "incremental_updates": max(0, blob.count(b"startxref") - 1),
+        "incremental_updates": _incremental_updates(blob),
         "info": pdf_info_summary(blob),
     }
     return report
+
+
+def _incremental_updates(blob: bytes) -> int:
+    """Count real prior-revision sections, not linearization structure.
+
+    Each incremental update appends another xref section, so the naive count
+    is ``startxref`` occurrences minus the document's own. But a *linearized*
+    PDF also carries two xref sections by specification (the first-page xref
+    at the front plus the main one), which is exactly what
+    ``qpdf --linearize`` produces on the sanitize path. Counting that as an
+    update made every rebuilt PDF report a phantom prior revision — and, once
+    pdf_incremental became a gated finding, fail its own verification.
+    """
+    sections = blob.count(b"startxref")
+    baseline = 2 if b"/Linearized" in blob else 1
+    return max(0, sections - baseline)
 
 
 def producer_is_allowlisted(info: dict[str, str | None]) -> bool:
@@ -93,4 +109,13 @@ def legal_findings(scan: dict[str, Any]) -> list[str]:
         out.append("pdf-acroform: interactive form present (flag-only in v1)")
     if scan["incremental_updates"]:
         out.append(f"pdf-incremental-updates: {scan['incremental_updates']} update section(s)")
+    info = scan.get("info") or {}
+    # /Producer is deliberately excluded: after a qpdf rewrite it is the
+    # sanitizer's own stamp (see producer_is_allowlisted), not authored
+    # identity. The rest is identity the sharing policy is meant to strip —
+    # without this finding, verify's residual-identity check has nothing to
+    # fire on and a leftover /Author ships in a derivative labeled clean.
+    identity = sorted(k for k in ("author", "creator", "title", "subject", "keywords") if info.get(k))
+    if identity:
+        out.append("authoring-props: /Info " + ", ".join(identity))
     return out

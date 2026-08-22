@@ -92,3 +92,47 @@ def extract_identities(data: bytes, fmt: str) -> dict[str, str]:
         info = pdf_legal.pdf_info_summary(blob, reveal=True)
         return {"Author": info["author"]} if info.get("author") else {}
     return {}
+
+
+# Fields the *inspect* path reports on. Wider than the intake extractor's
+# privacy_only list above: inspect answers "does this file still carry
+# authoring identity?", which includes fields the sharing policy scrubs
+# (title/subject/keywords) and not just the PII subset.
+# Derived from the cleaner's own scrub list, deliberately, so inspect and
+# clean cannot drift: reporting a field the cleaner does not scrub makes
+# verify fail correct jobs, and reporting fewer makes the gate blind. Note
+# what is NOT here: dc:title is a document's own name (content the recipient
+# is meant to see), not authoring identity.
+_CORE_PREFIXES = ("dc:", "cp:")
+
+
+def _presence_fields() -> tuple[tuple[str, str], ...]:
+    import container_meta
+
+    return tuple(container_meta.DOCX_SCRUB_FIELDS)
+
+
+def ooxml_identity_presence(data: bytes) -> dict[str, int]:
+    """Redacted view of the same docProps fields: ``{field: value_length}``.
+
+    The inspect/verify path must never carry real identity values (they end
+    up in manifests and audit records), so this reports only *which* fields
+    are populated and how long each value is. Same parser as
+    ``extract_ooxml_identities`` so the two views cannot drift.
+    """
+    out: dict[str, int] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = set(zf.namelist())
+            fields = _presence_fields()
+            for part in ("docProps/core.xml", "docProps/app.xml"):
+                if part not in names:
+                    continue
+                text = zf.read(part).decode("utf-8", errors="replace")
+                for tag, label in fields:
+                    v = _extract_tag(text, tag)
+                    if v:
+                        out[label] = len(v)
+    except (zipfile.BadZipFile, OSError, KeyError):
+        pass
+    return out

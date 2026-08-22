@@ -19,6 +19,7 @@ render-compare is deliberately absent in v1 (warn-only future work).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import re
@@ -41,6 +42,10 @@ _ALLOWED_DROP_TAGS = (
 )
 
 _PDF_PAGE_RE = re.compile(rb"/Type\s*/Page(?![a-zA-Z])")
+_QPDF_RE = re.compile(r"^qpdf", re.I)
+
+# Parts whose *bytes* (not just their presence) a structural check needs.
+_STRUCTURAL_PARTS = ("xl/workbook.xml",)
 
 
 class VerifyError(RuntimeError):
@@ -85,6 +90,25 @@ def _gif_dimensions(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+def _image_magic(data: bytes) -> str | None:
+    """Recognize image container bytes without needing to measure them."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png magic"
+    if data[:2] == b"\xff\xd8":
+        return "jpeg magic"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif magic"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp magic"
+    if data[4:8] == b"ftyp":
+        return "isobmff magic"
+    if data[:2] in (b"II", b"MM"):
+        return "tiff magic"
+    if data[:2] == b"BM":
+        return "bmp magic"
+    return None
+
+
 def _image_dimensions(data: bytes) -> tuple[int, int] | None:
     for fn in (_png_dimensions, _gif_dimensions):
         d = fn(data)
@@ -103,7 +127,9 @@ def _xlsx_visible_sheets(names: set[str], blobs: dict[str, bytes]) -> int | None
     wb = None
     for n in names:
         if re.fullmatch(r"xl/workbook\.xml", n):
-            wb = blobs[n]
+            # .get, not [n]: a caller that knows the part's name but could not
+            # read its bytes must degrade to "cannot check" rather than raise.
+            wb = blobs.get(n)
             break
     if wb is None:
         return None
@@ -192,6 +218,33 @@ def verify_derivative(
         )
     )
 
+    # 1b. PDF identity residue. pdf_legal.producer_is_allowlisted existed but
+    # was only ever called from tests, so nothing checked that a "clean" PDF
+    # had actually lost its authored /Info — or that the qpdf stamp the
+    # rewrite legitimately leaves behind is the *only* producer surviving.
+    if derivative.startswith(b"%PDF-") and "authoring_props" in mutating:
+        import pdf_legal
+        from container_meta import _pdf_structured_blob
+
+        d_info = pdf_legal.pdf_info_summary(_pdf_structured_blob(derivative))
+        o_info = pdf_legal.pdf_info_summary(_pdf_structured_blob(original))
+        producer_ok = pdf_legal.producer_is_allowlisted(d_info)
+        orig_producer = (o_info.get("producer") or "").strip()
+        # A qpdf stamp is allowed; the document's *original* producer is not.
+        leaked = bool(orig_producer) and not _QPDF_RE.match(orig_producer) and (
+            orig_producer.encode("latin-1", errors="ignore") in derivative
+        )
+        checks.append(
+            _check(
+                "pdf_producer_allowlisted",
+                producer_ok and not leaked,
+                (
+                    f"producer={d_info.get('producer')!r}"
+                    + ("; ORIGINAL producer bytes still present" if leaked else "")
+                ),
+            )
+        )
+
     # 2. format validator (sniff bytes first: PDFs classify as containers)
     fmt_ok = True
     fmt_detail = "unknown kind"
@@ -218,8 +271,20 @@ def verify_derivative(
         except zipfile.BadZipFile as e:
             fmt_ok, fmt_detail = False, f"bad zip: {e}"
     elif kind == "image":
+        # Format validity is "are these still recognizable image bytes", NOT
+        # "could we measure the dimensions". Conflating the two failed every
+        # sanitize of an image whose size this stdlib parser cannot read
+        # (e.g. a JPEG whose SOF sits behind a marker we skip), refusing a
+        # perfectly good derivative. Dimension *equality* is a separate
+        # structural check below, which correctly skips when unmeasurable.
+        magic = _image_magic(derivative)
+        fmt_ok = magic is not None
         dims = _image_dimensions(derivative)
-        fmt_ok, fmt_detail = dims is not None, f"dimensions parsed: {dims}"
+        fmt_detail = (
+            f"{magic}; dimensions {dims if dims else 'unmeasured'}"
+            if magic
+            else "unrecognized image bytes"
+        )
         names, blobs = set(), {}
     elif kind == "text":
         try:
@@ -237,10 +302,22 @@ def verify_derivative(
     if kind == "container":
         o_names: set[str] = set()
         d_names: set[str] = set()
-        for _label, blob, sink in (("o", original, o_names), ("d", derivative, d_names)):
+        o_blobs: dict[str, bytes] = {}
+        d_blobs: dict[str, bytes] = {}
+        for blob, sink, blob_sink in (
+            (original, o_names, o_blobs),
+            (derivative, d_names, d_blobs),
+        ):
             try:
                 with zipfile.ZipFile(io.BytesIO(blob)) as zf:
                     sink.update(zf.namelist())
+                    # _xlsx_visible_sheets needs the workbook part itself, not
+                    # just its name: passing an empty dict here used to raise
+                    # KeyError and abort every XLSX sanitize outright.
+                    for part in _STRUCTURAL_PARTS:
+                        if part in sink:
+                            with contextlib.suppress(KeyError, zipfile.BadZipFile):
+                                blob_sink[part] = zf.read(part)
             except zipfile.BadZipFile:
                 pass
         added = sorted(d_names - o_names)
@@ -278,8 +355,8 @@ def verify_derivative(
                     + (" (delta expected)" if page_delta_expected and not same else ""),
                 )
             )
-        vis_sheets_o = _xlsx_visible_sheets(o_names, {})
-        vis_sheets_d = _xlsx_visible_sheets(d_names, {})
+        vis_sheets_o = _xlsx_visible_sheets(o_names, o_blobs)
+        vis_sheets_d = _xlsx_visible_sheets(d_names, d_blobs)
         if vis_sheets_o is not None and vis_sheets_d is not None:
             counts["visible_sheet_count"] = [vis_sheets_o, vis_sheets_d]
             checks.append(

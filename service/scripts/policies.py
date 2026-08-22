@@ -178,6 +178,15 @@ _APPROVE_RESOLVES_TO = {
     st: DEFAULT_POLICIES["external_sharing"][st] for st in SUBTYPES if st != "cms_or_xml_dsig"
 }
 
+# macros_vba: the only actions that do not end in a derivative labeled clean.
+# (inspect_only is evidence_preservation, which never calls apply_actions.)
+_MACROS_ALLOWED = {"refuse", "inspect_only"}
+
+# Policies whose PDF path requires real tooling (design KD 6). privacy_only
+# is excluded: it takes the GPS/Author-only exiftool path and deliberately
+# does not rebuild the document.
+_PDF_STRICT_TOOLING_POLICIES = {"external_sharing", "production"}
+
 # structured Finding subtypes that name a different policy row
 _FINDING_SUBTYPE_ALIASES = {
     "office_tracked_changes": "tracked_changes",
@@ -192,6 +201,7 @@ _FINDING_SUBTYPE_ALIASES = {
 # with real emitted prefixes before (pdf-attachments: / hidden-sheet: etc.
 # were never emitted; see tests/test_policies_prefix_subtypes.py).
 _PREFIX_SUBTYPES = {
+    "authoring-props:": "authoring_props",
     "docx-comments:": "comments_and_notes",
     "docx-tracked-changes:": "tracked_changes",
     "docx-hidden-text:": "hidden_text",
@@ -234,6 +244,16 @@ def validate_policy(doc: Any, *, base_id: str | None = None) -> dict[str, str]:
             raise PolicyError(f"unknown action for {key}: {value}")
         if key in ("macros_vba", "cms_or_xml_dsig") and value in ("strip", "sanitize"):
             raise PolicyError(f"{key} may not be weakened to {value}")
+        # macros_vba is the design's one unconditional refusal: no attestation
+        # weakens it. Banning only strip/sanitize left `keep` open, which is a
+        # *worse* outcome than strip — the plan gate below stops refusing, the
+        # cleaner is called anyway, and nothing drops vbaProject.bin, so the
+        # macro ships inside a derivative labeled clean.
+        if key == "macros_vba" and value not in _MACROS_ALLOWED:
+            raise PolicyError(
+                f"macros_vba may only be {' or '.join(sorted(_MACROS_ALLOWED))}, not {value}: "
+                "a macro-bearing package never yields a derivative labeled clean"
+            )
         resolved[key] = value
     return resolved
 
@@ -324,9 +344,11 @@ def plan_actions(
             policy.get("base", "external_sharing") if isinstance(policy.get("base"), str) else None
         )
         policy_id = str(policy.get("id", base or "custom"))
-        doc = validate_policy(
-            {k: v for k, v in policy.items() if k in SUBTYPES}, base_id=base or "external_sharing"
-        )
+        # Pass through every key except the two envelope fields so that an
+        # unknown subtype (a typo) raises instead of being silently discarded
+        # and reverting to the base policy without telling anyone.
+        overlay = {k: v for k, v in policy.items() if k not in ("id", "base")}
+        doc = validate_policy(overlay, base_id=base or "external_sharing")
 
     for st, d in decisions.items():
         if st not in SUBTYPES:
@@ -346,7 +368,9 @@ def plan_actions(
         raise PolicyError("plan requires source_sha256 (from inspect result)")
 
     # Hard gates before anything else.
-    if "macros_vba" in seen and doc["macros_vba"] == "refuse":
+    if "macros_vba" in seen and doc["macros_vba"] != "inspect_only":
+        # Not `== "refuse"`: any macro action that still reaches apply_actions
+        # would ship vbaProject.bin inside a derivative labeled clean.
         raise PolicyError("macro-enabled file refused by policy (no derivative path)")
     if (
         "cms_or_xml_dsig" in seen
@@ -495,6 +519,25 @@ def _apply_pdf(
         dest = tmpdir / "out.pdf"
         src.write_bytes(data)
         _, meta = container_meta.clean_pdf(src, dest)
+        # Design KD 6: a sharing/production PDF is only clean when exiftool
+        # AND a successful qpdf structural rewrite both ran. clean_pdf has
+        # three degraded outcomes it reports rather than raises —
+        # mode="copy" (no exiftool: the file is copied verbatim, metadata
+        # intact), mode="stdlib-xmp" (best-effort byte surgery), and
+        # structural_rewrite=False (exiftool's incremental update leaves the
+        # original /Info bytes recoverable). Every one of those previously
+        # sailed through as a clean derivative because nothing inspected
+        # `meta`. Missing tooling is a failed job, not a warning.
+        if plan.policy_id in _PDF_STRICT_TOOLING_POLICIES:
+            mode = str(meta.get("mode", ""))
+            if mode != "exiftool" or not meta.get("structural_rewrite"):
+                raise PolicyError(
+                    f"pdf clean did not meet the {plan.policy_id} tooling bar "
+                    f"(mode={mode or 'unknown'}, "
+                    f"structural_rewrite={bool(meta.get('structural_rewrite'))}): "
+                    "exiftool and a successful qpdf --linearize are both required, "
+                    "otherwise the original metadata stays recoverable in the output"
+                )
         return dest.read_bytes(), [
             ActionRecord(
                 "pdf_incremental" if k == "structural_rewrite" else "authoring_props", k, str(v)

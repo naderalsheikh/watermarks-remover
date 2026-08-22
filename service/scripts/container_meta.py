@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import authoring_identity
 from common import (
     c2patool_probe_note,
     classify_finding_confidence,
@@ -1020,6 +1021,17 @@ def _inspect_ooxml_zip(data: bytes, fmt: str) -> tuple[bool, bool, list[str], di
             custom = [n for n in parts if n.startswith("customXml/")]
             if custom:
                 findings.append(f"customXml parts: {len(custom)}")
+            # Authoring identity in docProps. Reported redacted (field names +
+            # value lengths only) so manifests/audit records never carry the
+            # real values; without this finding verify's residual-identity
+            # check has nothing to fire on and a leftover dc:creator ships
+            # inside a derivative labeled clean.
+            present = authoring_identity.ooxml_identity_presence(data)
+            if present:
+                findings.append(
+                    "authoring-props: "
+                    + ", ".join(f"{k} ({v} chars)" for k, v in sorted(present.items()))
+                )
     except _ZIP_PARSE_ERRORS as exc:
         # A member that failed to read must not discard the evidence already
         # collected from earlier members, nor read as "opened and found
