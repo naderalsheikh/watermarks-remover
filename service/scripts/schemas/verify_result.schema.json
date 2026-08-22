@@ -23,6 +23,17 @@
     },
     "counts": { "type": "object" },
     "page_count_delta_expected": { "type": "boolean" },
+    "visual_compare": {
+      "type": "object",
+      "properties": {
+        "visual_compare_version": { "const": 1 },
+        "available": { "type": "boolean" },
+        "warn": { "type": "boolean" },
+        "note": { "type": "string" },
+        "pages": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
     "hashes": {
       "type": "object",
       "properties": {

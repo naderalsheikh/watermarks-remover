@@ -600,6 +600,14 @@ def clean_to_bundle(
         failed = [c["name"] for c in verification["checks"] if not c["pass"]]
         raise custody_mod.CustodyError(f"verification failed: {', '.join(failed)}")
 
+    # ff.visual_compare_gate: PDF render-and-compare, warn-only (PR 14)
+    from verify_render import feature_enabled, visual_compare
+
+    if feature_enabled() and (data.startswith(b"%PDF-") or cleaned.startswith(b"%PDF-")):
+        verification["visual_compare"] = visual_compare(
+            data, cleaned, original_report=result.report
+        )
+
     original_path, _orig_created = custody_mod.write_once(
         out_dir / "original" / src.name, data
     )
