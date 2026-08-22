@@ -59,7 +59,9 @@ def write_once(dest: Path, data: bytes) -> tuple[Path, bool]:
 
     Returns ``(path, created)``. Idempotent for identical content;
     raises :class:`CustodyError` on conflicting content or a directory
-    collision. A failed write removes its partial file.
+    collision. A failed write removes only the partial file *this call*
+    created — never a file that lost the O_EXCL race to a concurrent writer,
+    which belongs to whoever created it and must stay immutable.
     """
     dest = Path(dest).absolute()
     if dest.is_dir():
@@ -72,15 +74,22 @@ def write_once(dest: Path, data: bytes) -> tuple[Path, bool]:
             f"write-once violation: {dest} exists with different content"
         )
     dest.parent.mkdir(parents=True, exist_ok=True)
-    fd = None
     try:
         fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+    except FileExistsError:
+        # Lost the O_EXCL race to a concurrent writer: dest is not ours to
+        # remove. Defer to the same idempotent/conflict check used above for
+        # a pre-existing file.
+        if sha256_file(dest) == sha256_bytes(data):
+            _lock_readonly(dest)
+            return dest, False
+        raise CustodyError(
+            f"write-once violation: {dest} exists with different content"
+        ) from None
+    try:
         with os.fdopen(fd, "wb") as fh:
-            fd = None
             fh.write(data)
     except BaseException:
-        if fd is not None:
-            os.close(fd)
         dest.unlink(missing_ok=True)
         raise
     _lock_readonly(dest)

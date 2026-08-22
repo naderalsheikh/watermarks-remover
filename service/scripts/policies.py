@@ -30,6 +30,7 @@ from typing import Any
 
 import container_meta
 from av_meta import clean_av
+from common import subprocess_preexec_fn
 from findings import Finding, findings_for_report
 from text_unicode import clean_text
 
@@ -185,24 +186,35 @@ _FINDING_SUBTYPE_ALIASES = {
     "ai_generator_metadata": "c2pa",  # provenance family; rides c2pa action
 }
 
-# legacy string-finding prefixes (fallback when no report payload is present)
+# legacy string-finding prefixes (fallback when no report payload is present).
+# Keep in sync with the prefixes findings.py's structured adapter actually
+# matches (findings_from_container_report) — this table drifted out of sync
+# with real emitted prefixes before (pdf-attachments: / hidden-sheet: etc.
+# were never emitted; see tests/test_policies_prefix_subtypes.py).
 _PREFIX_SUBTYPES = {
     "docx-comments:": "comments_and_notes",
+    "docx-tracked-changes:": "tracked_changes",
+    "docx-hidden-text:": "hidden_text",
+    "docx-embeddings:": "embeddings_ole",
     "xlsx-comments:": "comments_and_notes",
+    "xlsx-threaded-comments:": "comments_and_notes",
+    "xlsx-external-links:": "external_links",
+    "xlsx-hidden-sheets:": "hidden_structure",
+    "xlsx-hidden-rows-cols:": "hidden_structure",
+    "xlsx-hidden-names:": "hidden_structure",
     "pptx-comments:": "comments_and_notes",
     "pptx-notes:": "comments_and_notes",
-    "docx-embeddings:": "embeddings_ole",
-    "docx-hidden-text:": "hidden_text",
-    "xlsx-external-links:": "external_links",
-    "hidden-sheet:": "hidden_structure",
-    "hidden-row:": "hidden_structure",
-    "hidden-col:": "hidden_structure",
     "pptx-hidden-slides:": "hidden_structure",
     "macros-office:": "macros_vba",
+    "macros_vba:": "macros_vba",
+    "digital_signature:": "cms_or_xml_dsig",
     "pdf-js:": "pdf_js_actions",
+    "pdf-openaction:": "pdf_js_actions",
+    "pdf-aa:": "pdf_js_actions",
     "pdf-acroform:": "pdf_acroform",
     "pdf-annots:": "pdf_annots",
-    "pdf-attachments:": "pdf_attachments",
+    "pdf-embeddedfiles:": "pdf_attachments",
+    "pdf-incremental-updates:": "pdf_incremental",
     "pdf-incremental:": "pdf_incremental",
     "layer-a:": "layer_a_body",
 }
@@ -391,7 +403,23 @@ class ActionRecord:
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, check=False)
+    # Same RLIMIT_AS/RLIMIT_FSIZE + timeout guard as every other exiftool/qpdf
+    # call in the codebase (container_meta.py) — a crafted input file must not
+    # be able to run this subprocess out of memory or disk just because the
+    # call happens to be on the privacy_only path.
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            check=False,
+            timeout=120,
+            preexec_fn=subprocess_preexec_fn,
+        )
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout=e.stdout or b"", stderr=(e.stderr or b"") + b"\ntimed out after 120s"
+        )
 
 
 def _exiftool_privacy_jpeg(src: Path, dest: Path) -> list[str]:

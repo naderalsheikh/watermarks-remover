@@ -155,7 +155,11 @@ def _finding_id(f: Finding) -> str:
             f.field,
         )
     )
-    return "f_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:4]
+    # 16 hex chars (64 bits) — enough that a report with hundreds of findings
+    # has a negligible birthday-paradox collision chance; a shorter prefix
+    # (previously 4 chars / 16 bits) collides too easily at that scale, and
+    # decisions keyed by finding_id would silently apply to the wrong finding.
+    return "f_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
 
 
 # --- Adapters (prototype reports -> canonical findings) ---------------------

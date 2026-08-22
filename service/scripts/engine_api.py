@@ -168,13 +168,67 @@ def _processor() -> ProcessorInfo:
     return ProcessorInfo()
 
 
+def _write_bundle_report(
+    out_dir: Path,
+    *,
+    original_name: str,
+    kind: str,
+    format: str,
+    findings: list[Any],
+    policy_id: str,
+    actions: list[str],
+    verification: dict[str, Any],
+    original_sha256: str,
+    derivative_name: str,
+    derivative_sha256: str,
+    processor: dict[str, Any],
+) -> Path:
+    """Render + write report.html (write-once, same as manifest.json)."""
+    from datetime import UTC, datetime
+
+    import custody as custody_mod
+    from report_html import render_report_html
+
+    html_report = render_report_html(
+        subject_name=original_name,
+        kind=kind,
+        format=format,
+        findings=findings,
+        mode="sanitize",
+        generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        policy_id=policy_id,
+        actions=actions,
+        checks=verification.get("checks"),
+        verification_pass=verification.get("pass"),
+        original_sha256=original_sha256,
+        derivative_name=derivative_name,
+        derivative_sha256=derivative_sha256,
+        processor=processor,
+    )
+    path, _created = custody_mod.write_once(
+        out_dir / "report.html", html_report.encode("utf-8")
+    )
+    return path
+
+
 def _run_capped(fn, timeout_s: int):
-    """Run *fn* in a worker thread; raise TimeoutError when Caps budget is hit."""
+    """Run *fn* in a worker thread; raise TimeoutError when Caps budget is hit.
+
+    Returns control to the caller at *timeout_s* even if the worker is still
+    running. Python cannot forcibly kill a thread, so a runaway call keeps
+    executing in the background, but this function itself no longer blocks
+    the caller for that duration — using ``ThreadPoolExecutor`` as a context
+    manager would join the worker on ``__exit__`` before a TimeoutError could
+    ever propagate, silently defeating the cap.
+    """
     if timeout_s <= 0:
         return fn()
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        fut = pool.submit(fn)
+    pool = ThreadPoolExecutor(max_workers=1)
+    fut = pool.submit(fn)
+    try:
         return fut.result(timeout=timeout_s)
+    finally:
+        pool.shutdown(wait=False)
 
 
 def _sha256(data: bytes) -> str:
@@ -692,6 +746,7 @@ def clean_to_bundle(
         cleaned,
         plan,
         pre_present=set(plan.present_subtypes),
+        name=src.name,
     )
     if not verification["pass"]:
         failed = [c["name"] for c in verification["checks"] if not c["pass"]]
@@ -705,18 +760,29 @@ def clean_to_bundle(
             data, cleaned, original_report=result.report
         )
 
-    original_path, _orig_created = custody_mod.write_once(out_dir / "original" / src.name, data)
+    original_dest = out_dir / "original" / src.name
     deriv_rel = custody_mod.derivative_name(src.name, policy_id)
-    derivative_path, _deriv_created = custody_mod.write_once(
-        out_dir / "derivative" / deriv_rel, cleaned
-    )
+    derivative_dest = out_dir / "derivative" / deriv_rel
 
-    for p in (original_path, derivative_path):
-        try:
-            if p.resolve() == src.resolve():
-                raise custody_mod.CustodyError(f"bundle path collides with the original input: {p}")
-        except OSError:
-            continue
+    # Check for a collision with the input BEFORE writing anything: write_once
+    # locks its target read-only even on the idempotent same-content path, so
+    # checking only after the write could chmod the caller's own input file.
+    try:
+        src_resolved: Path | None = src.resolve()
+    except OSError:
+        src_resolved = None
+    if src_resolved is not None:
+        for p in (original_dest, derivative_dest):
+            try:
+                if p.resolve() == src_resolved:
+                    raise custody_mod.CustodyError(
+                        f"bundle path collides with the original input: {p}"
+                    )
+            except OSError:
+                continue
+
+    original_path, _orig_created = custody_mod.write_once(original_dest, data)
+    derivative_path, _deriv_created = custody_mod.write_once(derivative_dest, cleaned)
 
     actions = [f"{r.subtype}:{r.action}: {r.detail}" for r in records] or list(
         result.finding_strings
@@ -746,6 +812,7 @@ def clean_to_bundle(
             and existing.get("original", {}).get("sha256") == orig_sha
             and existing.get("derivative", {}).get("sha256") == deriv_sha
         ):
+            existing_report = out_dir / "report.html"
             return {
                 "bundle": str(out_dir),
                 "original": str(original_path),
@@ -753,6 +820,7 @@ def clean_to_bundle(
                 "manifest": str(manifest_path),
                 "manifest_data": existing,
                 "verification": verification,
+                "report_html": str(existing_report) if existing_report.is_file() else None,
             }
 
     manifest = custody_mod.emit_manifest(
@@ -771,6 +839,20 @@ def clean_to_bundle(
         matter_id=matter_id,
     )
     manifest_path, _m_created = custody_mod.write_manifest(out_dir, manifest)
+    report_path = _write_bundle_report(
+        out_dir,
+        original_name=src.name,
+        kind=result.kind,
+        format=result.format,
+        findings=result.findings,
+        policy_id=policy_id,
+        actions=actions,
+        verification=verification,
+        original_sha256=orig_sha,
+        derivative_name=deriv_rel,
+        derivative_sha256=deriv_sha,
+        processor=processor_dict,
+    )
 
     return {
         "bundle": str(out_dir),
@@ -779,4 +861,5 @@ def clean_to_bundle(
         "manifest": str(manifest_path),
         "manifest_data": manifest,
         "verification": verification,
+        "report_html": str(report_path),
     }

@@ -35,17 +35,23 @@ def _redact(value: bytes) -> str:
     return f"present ({len(v)} chars)" if v else ""
 
 
-def pdf_info_summary(blob: bytes) -> dict[str, str | None]:
-    """Redacted /Info identity fields. Producer is kept verbatim (allowlist)."""
+def pdf_info_summary(blob: bytes, *, reveal: bool = False) -> dict[str, str | None]:
+    """/Info identity fields. Producer is always kept verbatim (allowlist —
+    it names the generating tool, not a person). The rest are redacted to a
+    length-only placeholder by default; ``reveal=True`` decodes the real
+    value instead, for the explicit-opt-in counterparty-intake report only
+    (see authoring_identity.py) — never the default inspect/sanitize path.
+    """
     out: dict[str, str | None] = {}
     for key in _IDENTITY_KEYS:
         m = re.search(rb"/%s\s*\(((?:[^()\\]|\\.)*)\)" % key.encode(), blob)
         if not m:
             out[key.lower()] = None
             continue
-        out[key.lower()] = (
-            m.group(1).decode("latin-1", errors="replace") if key == "Producer" else _redact(m.group(1)) or None
-        )
+        if key == "Producer" or reveal:
+            out[key.lower()] = m.group(1).decode("latin-1", errors="replace") or None
+        else:
+            out[key.lower()] = _redact(m.group(1)) or None
     return out
 
 

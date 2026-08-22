@@ -56,6 +56,39 @@ def test_frozen_matrix_spot_checks():
                ("external_sharing", "privacy_only", "production"))
 
 
+def test_prefix_subtypes_values_are_all_valid_policy_subtypes():
+    from policies import _PREFIX_SUBTYPES
+
+    for prefix, subtype in _PREFIX_SUBTYPES.items():
+        assert subtype in SUBTYPES, f"{prefix!r} maps to unknown subtype {subtype!r}"
+
+
+def test_prefix_subtypes_match_real_emitted_prefixes():
+    # Legacy-string fallback path (_collect_subtypes): must recognize the
+    # prefixes actually emitted by pdf_legal.py / xlsx_legal.py / the docx
+    # legal scanners, not stale guesses. This table previously listed
+    # "pdf-attachments:" (never emitted; real prefix is "pdf-embeddedfiles:")
+    # and "hidden-sheet:"/"hidden-row:"/"hidden-col:" (never emitted; real
+    # prefixes are "xlsx-hidden-sheets:"/"xlsx-hidden-rows-cols:") and was
+    # missing "docx-tracked-changes:"/"xlsx-hidden-names:"/
+    # "xlsx-threaded-comments:" entirely, so those subtypes silently fell
+    # through to unmapped_findings on this fallback path.
+    from policies import _collect_subtypes
+
+    cases = {
+        "pdf-embeddedfiles: 2 attachment(s)": "pdf_attachments",
+        "pdf-incremental-updates: 3 update section(s)": "pdf_incremental",
+        "xlsx-hidden-sheets: 1 hidden sheet(s)": "hidden_structure",
+        "xlsx-hidden-rows-cols: 4 hidden row(s)/col(s)": "hidden_structure",
+        "xlsx-hidden-names: 1 hidden defined name(s)": "hidden_structure",
+        "xlsx-threaded-comments: 2 threaded comment(s)": "comments_and_notes",
+        "docx-tracked-changes: 5 revision(s)": "tracked_changes",
+    }
+    for text, expected_subtype in cases.items():
+        seen, unmapped = _collect_subtypes({"kind": None, "report": None, "findings": [text]})
+        assert seen == [expected_subtype], f"{text!r}: got seen={seen} unmapped={unmapped}"
+
+
 def test_validate_overlay_rules():
     ok = validate_policy({"hidden_text": "strip"}, base_id="production")
     assert ok["hidden_text"] == "strip" and ok["tracked_changes"] == "approve"

@@ -54,7 +54,7 @@ def main() -> int:
         print(f"plan refused: {e}", file=sys.stderr)
         return 2
 
-    report = verify_derivative(original, derivative, plan)
+    report = verify_derivative(original, derivative, plan, name=args.original.name)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["pass"] else 1
 

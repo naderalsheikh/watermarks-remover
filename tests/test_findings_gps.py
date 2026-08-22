@@ -118,7 +118,7 @@ def test_finding_id_is_deterministic_and_stable():
     )
     d = f.to_dict()
     assert d["finding_id"] == f.to_dict()["finding_id"]
-    assert d["finding_id"].startswith("f_") and len(d["finding_id"]) == 6
+    assert d["finding_id"].startswith("f_") and len(d["finding_id"]) == 18
     other = Finding(category="file_metadata", subtype="ai_generator_metadata", format="png")
     assert other.to_dict()["finding_id"] != d["finding_id"]
 

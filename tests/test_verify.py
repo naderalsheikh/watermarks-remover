@@ -96,6 +96,88 @@ def test_pdf_page_counts_recorded_with_delta_expected():
         assert report["pass"] is True
 
 
+def _zip(names: dict[str, str]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n, content in names.items():
+            zf.writestr(n, content)
+    return buf.getvalue()
+
+
+def test_evidence_preservation_fails_on_any_dropped_part():
+    from policies import ActionPlan
+
+    original = _zip({"word/document.xml": "<a/>", "word/comments.xml": "<c/>"})
+    derivative = _zip({"word/document.xml": "<a/>"})  # comments.xml dropped
+
+    # A comments.xml drop is allowlisted under external_sharing, but
+    # evidence_preservation/privacy_only promise an IDENTICAL part inventory
+    # — no drop is acceptable, allowlisted or not.
+    plan = ActionPlan(
+        policy_id="evidence_preservation", source_sha256="0" * 64, kind="container", actions={}
+    )
+    report = verify_derivative(original, derivative, plan, name="input.docx")
+    inv = next(c for c in report["checks"] if c["name"] == "part_inventory")
+    assert inv["pass"] is False, inv["detail"]
+    assert report["pass"] is False
+
+
+def test_part_inventory_allowlist_is_case_insensitive_and_covers_identity_parts():
+    from policies import ActionPlan
+
+    # Real comment-identity parts container_meta drops alongside comments.xml
+    # under external_sharing — mixed-case (threadedComments) and without the
+    # literal substring "comments" at all (people.xml, commentAuthors.xml).
+    original = _zip({
+        "word/document.xml": "<a/>",
+        "word/comments.xml": "<c/>",
+        "word/people.xml": "<p/>",
+        "xl/threadedComments/threadedComment1.xml": "<t/>",
+        "ppt/commentAuthors.xml": "<ca/>",
+    })
+    derivative = _zip({"word/document.xml": "<a/>"})
+
+    plan = ActionPlan(
+        policy_id="external_sharing", source_sha256="0" * 64, kind="container", actions={}
+    )
+    report = verify_derivative(original, derivative, plan, name="input.docx")
+    inv = next(c for c in report["checks"] if c["name"] == "part_inventory")
+    assert inv["pass"] is True, inv["detail"]
+
+
+def test_part_inventory_still_rejects_non_allowlisted_drop():
+    from policies import ActionPlan
+
+    original = _zip({"word/document.xml": "<a/>", "word/settings.xml": "<s/>"})
+    derivative = _zip({"word/document.xml": "<a/>"})  # settings.xml: not allowlisted
+
+    plan = ActionPlan(
+        policy_id="external_sharing", source_sha256="0" * 64, kind="container", actions={}
+    )
+    report = verify_derivative(original, derivative, plan, name="input.docx")
+    inv = next(c for c in report["checks"] if c["name"] == "part_inventory")
+    assert inv["pass"] is False
+
+
+def test_markdown_reinspect_uses_name_to_catch_residual_watermark():
+    # Without threading a real name/extension through, the re-inspect used
+    # to classify markdown as "unknown" (no magic-byte fallback), so a
+    # cleaner that failed to strip the mark would still pass verification.
+    zwsp = chr(0x200B)
+    original = f"Hello{zwsp}World\n".encode()
+    broken_derivative = original  # simulated: cleaner did nothing
+
+    res = inspect_bytes(original, "notes.md")
+    plan = plan_actions(res, "external_sharing")
+    report = verify_derivative(original, broken_derivative, plan, name="notes.md")
+    gone = next(c for c in report["checks"] if c["name"] == "reinspect_targeted_gone")
+    assert gone["pass"] is False, gone["detail"]
+    assert report["pass"] is False
+
+
 def test_corrupt_zip_fails_format_check():
     data = _load("spa.docx")
     res = inspect_bytes(data, "spa.docx")

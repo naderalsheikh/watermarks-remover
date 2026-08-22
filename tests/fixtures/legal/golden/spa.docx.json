@@ -11,7 +11,7 @@
       "confidence": "confirmed",
       "content_visible": false,
       "field": null,
-      "finding_id": "f_b8fd",
+      "finding_id": "f_b8fdabfe0be708e5",
       "format": "docx",
       "location": {
         "bbox": null,
@@ -41,7 +41,7 @@
       "confidence": "confirmed",
       "content_visible": true,
       "field": null,
-      "finding_id": "f_f1f8",
+      "finding_id": "f_f1f8ff42d1544ba0",
       "format": "docx",
       "location": {
         "bbox": null,

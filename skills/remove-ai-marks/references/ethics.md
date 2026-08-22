@@ -17,6 +17,53 @@ This skill removes machine-readable provenance marks and hygiene problems from c
 
 A removed mark does **not** mean the content was never AI-assisted. Use this toolkit honestly.
 
+## Documents received from a counterparty (`counselclear intake`)
+
+Everything above is about content *you* produce and send. `counselclear intake`
+is the inverse case: read-only inspection of files someone else sent *you* —
+an opposing-counsel production, a deal-room upload, a vendor submission —
+within an engagement you're actually on. This is standard due-diligence
+practice (equivalent to opening a received Word document and checking File →
+Info, or running Document Inspector on it) made systematic across a whole
+production instead of one file at a time. It never cleans or modifies
+anything; it only reports what's already embedded in files you legitimately
+hold a copy of.
+
+**Appropriate**
+
+- Due diligence: checking a production or submission for leaked privilege,
+  internal deliberation, or negotiating-position tells the sender didn't mean
+  to share (stray tracked changes, comments, hidden sheets/slides)
+- Provenance/authenticity checks on files received as part of a matter you're
+  engaged on (who actually drafted this, does the metadata match who it was
+  represented to be from)
+- Verifying your own outbound productions didn't leak anything, from the
+  recipient's likely vantage point
+
+**Not appropriate**
+
+- Analyzing files you obtained outside the scope of an actual engagement, or
+  that you are not authorized to hold or process at all
+- Circumventing a legal hold, protective order, or an explicit confidentiality
+  restriction that governs how the files may be used
+- Compiling extracted identities across matters, or any use beyond the matter
+  the files were produced for
+- Republishing or forwarding extracted personal information (names, GPS
+  coordinates, contact details) for any purpose other than the matter itself
+
+**How access is limited:** the command refuses to run without an explicit
+`--i-am-authorized` flag (the same pattern as `--attest` for breaking a
+digital signature) — there is no default/implicit path into this feature.
+Real identity values (author/company names, not just "present") stay
+redacted unless `--reveal-identities` is *also* passed explicitly; the
+default report shows only counts and categories, matching the same
+"categories only" posture the rest of the product uses for its own audit
+logs. Both flags are per-invocation, not a standing setting.
+
+As with removal, a finding here is informational, not proof of anything —
+metadata can be wrong, stale, or attributable to a template rather than a
+person. Treat it as a lead to verify, not a conclusion to act on directly.
+
 ## Honesty in reports
 
 Always separate:

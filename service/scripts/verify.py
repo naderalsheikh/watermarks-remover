@@ -34,6 +34,11 @@ VERIFY_VERSION = 1
 
 _PASSIVE = {"keep", "flag", "inspect_only"}
 _MUTATING = {"strip", "accept_all", "rebuild", "sanitize"}
+# Dropped-part name fragments allowed under non-strict policies (external_sharing /
+# production). Matched case-insensitively against the full part path.
+_ALLOWED_DROP_TAGS = (
+    "comment", "customxml", "embedding", "externallink", "notesslide", "people", "person",
+)
 
 _PDF_PAGE_RE = re.compile(rb"/Type\s*/Page(?![a-zA-Z])")
 
@@ -143,9 +148,16 @@ def verify_derivative(
     plan: ActionPlan,
     *,
     pre_present: set[str] | None = None,
+    name: str = "",
 ) -> dict[str, Any]:
     """Gate a derivative against its plan. Returns a VerifyResult dict;
-    ``pass`` is False when any check fails."""
+    ``pass`` is False when any check fails.
+
+    ``name`` should be the original file's name (real extension included) so
+    the re-inspect classifies formats like markdown/HTML correctly instead of
+    falling back to ``unknown`` on an extensionless label — callers that omit
+    it fall back to magic-byte-only classification.
+    """
     checks: list[dict[str, Any]] = []
     counts: dict[str, Any] = {}
     # cms_or_xml_dsig resolves to rebuild-with-consent, not removal
@@ -156,8 +168,9 @@ def verify_derivative(
     }
 
     # 1. re-inspect both sides
-    res_before = inspect_bytes(original, "original")
-    res_after = inspect_bytes(derivative, "derivative")
+    label = name or "input"
+    res_before = inspect_bytes(original, label)
+    res_after = inspect_bytes(derivative, label)
     before = pre_present if pre_present is not None else _present_subtypes(
         res_before.kind, res_before.report
     )
@@ -232,11 +245,14 @@ def verify_derivative(
                 pass
         added = sorted(d_names - o_names)
         dropped = sorted(o_names - d_names)
-        inv_pass = (not added) and (strict or all(
-            any(tag in p for tag in ("comments", "customXml", "embeddings", "externalLink",
-                                     "notesSlide"))
-            for p in dropped
-        ))
+        if strict:
+            # privacy_only / evidence_preservation promise an identical part
+            # inventory: no dropped part is allowed, not even an allowlisted one.
+            inv_pass = not added and not dropped
+        else:
+            inv_pass = not added and all(
+                any(tag in p.lower() for tag in _ALLOWED_DROP_TAGS) for p in dropped
+            )
         checks.append(
             _check(
                 "part_inventory",

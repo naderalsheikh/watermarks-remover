@@ -70,6 +70,61 @@ def test_write_once_refuses_directory_collision(tmp_path):
         write_once(d, b"x")
 
 
+def test_write_once_lost_race_does_not_delete_concurrent_winner(tmp_path, monkeypatch):
+    """A concurrent writer wins O_EXCL between our exists() check and our
+    os.open() call. The loser must never unlink a file it didn't create."""
+    dest = tmp_path / "race.bin"
+    winner_data = b"winner-content"
+    real_open = os.open
+
+    def racy_open(path, flags, mode=0o777, *, dir_fd=None):
+        if str(path) == str(dest) and (flags & os.O_EXCL):
+            dest.write_bytes(winner_data)  # concurrent writer creates it first
+            raise FileExistsError(17, "File exists")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", racy_open)
+    path, created = write_once(dest, winner_data)
+    assert created is False
+    assert path == dest
+    assert dest.read_bytes() == winner_data  # the winner's file must survive
+
+
+def test_write_once_lost_race_with_conflicting_content_keeps_winner(tmp_path, monkeypatch):
+    dest = tmp_path / "race2.bin"
+    winner_data = b"winner-content"
+    real_open = os.open
+
+    def racy_open(path, flags, mode=0o777, *, dir_fd=None):
+        if str(path) == str(dest) and (flags & os.O_EXCL):
+            dest.write_bytes(winner_data)
+            raise FileExistsError(17, "File exists")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", racy_open)
+    with pytest.raises(CustodyError, match="write-once violation"):
+        write_once(dest, b"different-content")
+    # the loser must not have deleted the winner's file on its way out
+    assert dest.exists()
+    assert dest.read_bytes() == winner_data
+
+
+def test_bundle_collision_check_runs_before_any_write(tmp_path):
+    """out_dir/original/<name> resolving onto src itself must be caught
+    BEFORE write_once runs — not after it has already locked src read-only."""
+    original_dir = tmp_path / "original"
+    original_dir.mkdir()
+    src = original_dir / "self.txt"
+    src.write_bytes(b"hi there\n")
+    mode_before = stat.S_IMODE(src.stat().st_mode)
+
+    with pytest.raises(CustodyError, match="collides with the original"):
+        clean_to_bundle(src, tmp_path)
+
+    assert stat.S_IMODE(src.stat().st_mode) == mode_before  # src untouched
+    assert os.access(src, os.W_OK)  # never locked read-only
+
+
 def test_derivative_naming():
     assert derivative_name("SPA_v3.docx") == "SPA_v3.external.docx"
     assert derivative_name("SPA_v3.docx", "privacy_only") == "SPA_v3.privacy.docx"
@@ -210,6 +265,25 @@ def test_bundle_refuses_in_place_collision(tmp_path):
     stored_original = Path(staged_result["original"])
     with pytest.raises(CustodyError, match="collides with the original"):
         clean_to_bundle(stored_original, staged)
+
+
+def test_bundle_writes_readable_html_report(tmp_path):
+    src = FIXTURES / "spa.docx"
+    out = tmp_path / "report-bundle"
+    result = clean_to_bundle(src, out, policy_id="external_sharing")
+
+    report_path = Path(result["report_html"])
+    assert report_path.is_file()
+    assert report_path.parent == out
+    html = report_path.read_text(encoding="utf-8")
+    assert "spa.docx" in html
+    assert "external_sharing" in html
+    assert stat.S_IMODE(report_path.stat().st_mode) & 0o222 == 0  # write-once, read-only
+
+    # idempotent rerun: report.html is not regenerated (and must not raise —
+    # a fresh timestamp would collide with write_once's content check)
+    result2 = clean_to_bundle(src, out, policy_id="external_sharing")
+    assert result2["report_html"] == result["report_html"]
 
 
 def test_bundle_pdf_fixture_actions_recorded(tmp_path):

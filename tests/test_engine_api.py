@@ -66,6 +66,21 @@ def test_clean_bytes_unknown_raises():
         clean_bytes(b"no magic, no extension", "input")
 
 
+def test_run_capped_returns_control_at_timeout_not_after_runaway_finishes():
+    # ThreadPoolExecutor used as a context manager joins the worker on
+    # __exit__ before a TimeoutError can propagate, so the caller used to
+    # block for the full runaway duration instead of the documented budget.
+    import time
+
+    from engine_api import _run_capped
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        _run_capped(lambda: time.sleep(2.0), timeout_s=1)
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.5, f"blocked for {elapsed:.2f}s waiting on a 1s-capped call"
+
+
 def test_inspect_http_includes_structured_findings_without_detect():
     data = "Hello\u200bWorld\u00ad!".encode("utf-8")
     body = inspect_http(data, "note.txt")
