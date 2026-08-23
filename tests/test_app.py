@@ -263,3 +263,51 @@ def test_unpinned_docker_worker_fails_the_job_instead_of_500ing(tmp_path, monkey
     # and the job row itself must not be stuck at "running"
     r2 = c.get(f"/v1/matters/{matter['id']}/jobs/{body['id']}")
     assert r2.json()["status"] == "failed"
+
+
+def test_production_policy_approve_cells_unreachable_without_finding_decisions(client):
+    """Documents the gap this fix closes: without an explicit decision,
+    plan_actions' own no_decision default resolves an approve-default
+    subtype to "keep" — so production sanitize without finding_decisions
+    is, correctly, a strip of nothing approve-gated."""
+    doc = _upload(client, "spa.docx")
+    r = client.post(
+        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
+        json={"policy_id": "production"},
+    ).json()
+    assert r["status"] == "done", r["error"]
+    bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{r['id']}/bundle")
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as zf:
+        deriv_name = next(n for n in zf.namelist() if n.startswith("derivative/"))
+        with zipfile.ZipFile(io.BytesIO(zf.read(deriv_name))) as inner:
+            assert "word/comments.xml" in inner.namelist()
+
+
+def test_finding_decisions_makes_production_approve_cells_reachable(client):
+    """The actual fix: passing finding_decisions lets an approve-default
+    cell (production's comments_and_notes) resolve to the sharing-path
+    action instead of being permanently unreachable."""
+    doc = _upload(client, "spa.docx")
+    r = client.post(
+        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
+        json={"policy_id": "production", "finding_decisions": {"comments_and_notes": "approve"}},
+    ).json()
+    assert r["status"] == "done", r["error"]
+    bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{r['id']}/bundle")
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as zf:
+        deriv_name = next(n for n in zf.namelist() if n.startswith("derivative/"))
+        with zipfile.ZipFile(io.BytesIO(zf.read(deriv_name))) as inner:
+            assert "word/comments.xml" not in inner.namelist()
+
+
+def test_finding_decisions_bad_value_refuses_the_job_with_a_clear_error(client):
+    """plan_actions raises PolicyError for an unknown decision value, which
+    clean_to_bundle wraps as a policy refusal — same category as a macro
+    file or an unattested signature, not an unexpected crash."""
+    doc = _upload(client, "spa.docx")
+    r = client.post(
+        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
+        json={"policy_id": "production", "finding_decisions": {"comments_and_notes": "nonsense"}},
+    ).json()
+    assert r["status"] == "refused"
+    assert "approve" in r["error"] or "keep" in r["error"]

@@ -61,7 +61,7 @@ def job_root(cfg: Config, matter_id: str, job_id: str) -> Path:
 
 def build_subprocess_cmd(
     *, input_path: Path, output_dir: Path, kind: str, policy_id: str,
-    attest: bool, matter_id: str,
+    attest: bool, matter_id: str, decisions: dict[str, str] | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable, "-m", "app.worker", "run-job",
@@ -73,12 +73,15 @@ def build_subprocess_cmd(
     ]
     if attest:
         cmd.append("--attest")
+    if decisions:
+        cmd += ["--decisions", json.dumps(decisions)]
     return cmd
 
 
 def build_docker_cmd(
     cfg: Config, *, mount_root: Path, input_path: Path, output_dir: Path,
     kind: str, policy_id: str, attest: bool, matter_id: str,
+    decisions: dict[str, str] | None = None,
 ) -> list[str]:
     image = cfg.worker_image
     if not _DIGEST_RE.search(image):
@@ -134,6 +137,8 @@ def build_docker_cmd(
     ]
     if attest:
         cmd.append("--attest")
+    if decisions:
+        cmd += ["--decisions", json.dumps(decisions)]
     return cmd
 
 
@@ -179,6 +184,7 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize") -> Run
     common = dict(
         input_path=staged_input, output_dir=output_dir, kind=kind,
         policy_id=job.policy_id, attest=bool(job.attestation), matter_id=job.matter_id,
+        decisions=job.finding_decisions or None,
     )
     import os
 

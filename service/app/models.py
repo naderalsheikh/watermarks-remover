@@ -100,6 +100,12 @@ class Job(Base):
     policy_id: Mapped[str] = mapped_column(String(40), default="external_sharing")
     reason: Mapped[str] = mapped_column(String(500), default="")
     attestation: Mapped[bool] = mapped_column(default=False)
+    # {subtype: "approve"|"keep"} for approve-default policy cells (e.g.
+    # production's comments_and_notes) — plan_actions defaults an omitted
+    # decision to "keep", so without this every approve-default cell was
+    # unreachable through the API and production sanitize was effectively
+    # a no-op strip.
+    finding_decisions: Mapped[dict] = mapped_column(JSON, default=dict)
     # queued | running | done | refused | failed
     status: Mapped[str] = mapped_column(String(12), default="queued", index=True)
     error: Mapped[str] = mapped_column(String(1000), default="")

@@ -707,13 +707,18 @@ def clean_to_bundle(
     operator_id: str | None = None,
     matter_id: str | None = None,
     signature_break_attestation: bool = False,
+    decisions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Inspect -> plan -> apply -> verify -> store write-once + manifest.
 
     Product path (PR 13): the derivative is produced by
     ``policies.apply_actions`` under ``policy_id``, gated by
     ``verify.verify_derivative`` BEFORE anything is written. A failed gate
-    or refused plan raises and leaves ``out_dir`` untouched. Layout:
+    or refused plan raises and leaves ``out_dir`` untouched. ``decisions``
+    is the per-subtype approve/keep map for policies with "approve"-default
+    cells (production's comments_and_notes, hidden_structure, and friends
+    all default to "approve" — without an explicit decision they resolve
+    to "keep", so production is otherwise a no-op sanitize). Layout:
     ``{out_dir}/original/{name}``, ``{out_dir}/derivative/
     {stem}.{policy}.{ext}``, ``{out_dir}/manifest.json``. Never touches
     ``src``; refuses any bundle path resolving onto the input. Re-running a
@@ -735,6 +740,7 @@ def clean_to_bundle(
         plan = plan_actions(
             result,
             policy_id,
+            decisions,
             signature_break_attestation=signature_break_attestation,
         )
         cleaned, records = _run_capped(lambda: apply_actions(data, plan), Caps().apply_timeout_s)

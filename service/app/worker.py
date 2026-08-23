@@ -45,7 +45,7 @@ def _write_result(output_dir: Path, payload: dict) -> None:
 
 
 def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, attest: bool,
-             matter_id: str | None = None) -> int:
+             matter_id: str | None = None, decisions: dict[str, str] | None = None) -> int:
     """Pure: no DB, no network, no filesystem access outside the two given
     paths. Always exits 0 once result.json is written — the *content* of
     that file (status: done|refused|failed) is the real outcome."""
@@ -91,6 +91,7 @@ def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, a
                 operator_id="operator",
                 matter_id=matter_id,
                 signature_break_attestation=attest,
+                decisions=decisions,
             )
             return finish(
                 "done",
@@ -131,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
     jp.add_argument("--policy", default="external_sharing")
     jp.add_argument("--attest", action="store_true")
     jp.add_argument("--matter-id", default=None)
+    jp.add_argument(
+        "--decisions", default=None,
+        help="JSON object {subtype: 'approve'|'keep'} for approve-default policy cells "
+             "(e.g. production's comments_and_notes) — without this every such cell "
+             "resolves to keep, per plan_actions' own no_decision default",
+    )
 
     p.add_argument("verb", choices=("inspect", "sanitize"), nargs="?")
     p.add_argument("path", type=Path, nargs="?")
@@ -141,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     if args.mode == "run-job":
+        decisions = json.loads(args.decisions) if args.decisions else None
         return _run_job(
             kind=args.kind,
             input_path=args.input,
@@ -148,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             policy_id=args.policy,
             attest=args.attest,
             matter_id=args.matter_id,
+            decisions=decisions,
         )
 
     if not args.verb or not args.path:

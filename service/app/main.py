@@ -43,6 +43,12 @@ class SanitizeBody(BaseModel):
     policy_id: str = "external_sharing"
     reason: str = ""
     signature_break_attestation: bool = False
+    # {subtype: "approve"|"keep"}, for policies with approve-default cells
+    # (production's comments_and_notes and friends). Validated inside the
+    # worker by plan_actions itself (an unknown subtype or action becomes a
+    # failed job with a clear PolicyError message) — the same place
+    # policy_id's own validity is checked, not pre-validated here.
+    finding_decisions: dict[str, str] = {}
 
 
 class AclBody(BaseModel):
@@ -289,6 +295,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             policy_id=body.policy_id,
             reason=body.reason[:500],
             attestation=bool(body.signature_break_attestation),
+            finding_decisions=dict(body.finding_decisions),
         )
         _execute_job(job.id, kind="sanitize")
         s.expire_all()
