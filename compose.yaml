@@ -31,18 +31,81 @@ services:
       dockerfile: Dockerfile.counselclear
     environment:
       COUNSELCLEAR_DATA_ROOT: /data
-      COUNSELCLEAR_LOCAL_PASSWORD: ${COUNSELCLEAR_LOCAL_PASSWORD:?required}
+      # Required only when OIDC SSO is not configured (the app enforces this
+      # itself: with COUNSELCLEAR_OIDC_* set below, no password hash is used).
+      COUNSELCLEAR_LOCAL_PASSWORD: ${COUNSELCLEAR_LOCAL_PASSWORD:-}
+      # Optional OIDC SSO (Phase 3): all three of ISSUER/CLIENT_ID/CLIENT_SECRET
+      # enable it, local login is then disabled. ALLOWED is a fail-closed
+      # comma-separated email/sub allowlist — empty denies everyone.
+      COUNSELCLEAR_OIDC_ISSUER: ${COUNSELCLEAR_OIDC_ISSUER:-}
+      COUNSELCLEAR_OIDC_CLIENT_ID: ${COUNSELCLEAR_OIDC_CLIENT_ID:-}
+      COUNSELCLEAR_OIDC_CLIENT_SECRET: ${COUNSELCLEAR_OIDC_CLIENT_SECRET:-}
+      COUNSELCLEAR_OIDC_ALLOWED: ${COUNSELCLEAR_OIDC_ALLOWED:-}
       COUNSELCLEAR_WORKER_MODE: ${COUNSELCLEAR_WORKER_MODE:-docker}
       COUNSELCLEAR_WORKER_IMAGE: ${COUNSELCLEAR_WORKER_IMAGE:-}
+      # Optional hardened OCI runtime (e.g. runsc/gVisor) for per-job worker
+      # containers; must be registered with Docker on the host first.
+      COUNSELCLEAR_WORKER_RUNTIME: ${COUNSELCLEAR_WORKER_RUNTIME:-}
+      # Empty = embedded SQLite (single-tenant default). Set to point at an
+      # external managed Postgres instead, or bring up the bundled one with
+      #   docker compose --profile legal --profile pg up -d cc-api
+      # plus COUNSELCLEAR_DATABASE_URL from .env (see .env.example).
+      COUNSELCLEAR_DATABASE_URL: ${COUNSELCLEAR_DATABASE_URL:-}
+      # Docs (/docs, /openapi.json) are fail-closed — opt in explicitly for
+      # local development only.
+      COUNSELCLEAR_ENABLE_DOCS: ${COUNSELCLEAR_ENABLE_DOCS:-}
+      # Live ClamAV definitions from the cc-freshclam sidecar (falls back to
+      # the image's build-time seed when the sidecar/volume is absent).
+      COUNSELCLEAR_CLAMAV_DB_DIR: /clamav-defs
+    depends_on:
+      # Optional: only enforced when cc-postgres is actually started (the
+      # pg profile). Keeps SQLite-only deployments dependency-free.
+      cc-postgres:
+        condition: service_healthy
+        required: false
     ports:
       - "127.0.0.1:8443:8443"
     volumes:
       - cc-data:/data
+      - clamav-db:/clamav-defs:ro
     read_only: true
     tmpfs:
       - /tmp
     init: true
     user: "10001:10001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8443/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Keeps the shared ClamAV definition volume current (build-time seeds go
+  # stale within days). Needs egress to database.clamav.net:443 — this is
+  # the only legal-profile service with network access; job workers never.
+  cc-freshclam:
+    profiles: [legal]
+    build:
+      context: service
+      dockerfile: Dockerfile.counselclear
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /defs
+        cp -n /var/lib/clamav/* /defs/ 2>/dev/null || true
+        while true; do
+          freshclam --datadir=/defs --stdout \
+            || echo "freshclam update failed; retrying next cycle"
+          sleep 21600
+        done
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
+    init: true
+    volumes:
+      - clamav-db:/defs
     restart: unless-stopped
 
   # One-shot job worker; normally spawned per job by the API's runner with
@@ -56,7 +119,6 @@ services:
     command: ["--help"]
     environment:
       COUNSELCLEAR_DATA_ROOT: /data
-      COUNSELCLEAR_LOCAL_PASSWORD: ${COUNSELCLEAR_LOCAL_PASSWORD:?required}
     volumes:
       - cc-data:/data
     read_only: true
@@ -65,6 +127,37 @@ services:
     init: true
     user: "10001:10001"
     network_mode: none
+
+  # Optional bundled Postgres for the legal profile (pg profile): shared
+  # state for multi-replica API deployments, or simply a real server instead
+  # of the embedded SQLite file. Enable together with COUNSELCLEAR_DATABASE_URL
+  # in .env (see .env.example); the API waits for its healthcheck before
+  # running migrations. Production with a managed Postgres should skip this
+  # service entirely and set COUNSELCLEAR_DATABASE_URL directly. Digest-pin
+  # the image for production (repo convention: see docs/COUNSELCLEAR_DESIGN.md).
+  cc-postgres:
+    profiles: [pg]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${COUNSELCLEAR_PG_USER:-counselclear}
+      POSTGRES_PASSWORD: ${COUNSELCLEAR_PG_PASSWORD:?required}
+      POSTGRES_DB: ${COUNSELCLEAR_PG_DB:-counselclear}
+    volumes:
+      - cc-pgdata:/var/lib/postgresql/data
+    # DB reachable only from the compose network — no host port mapping.
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    init: true
+    restart: unless-stopped
 
   wr-core:
     build:
@@ -200,6 +293,8 @@ services:
 
 volumes:
   cc-data:
+  cc-pgdata:
+  clamav-db:
   markllm-cache:
   bench-out:
   markdiffusion-cache:

@@ -129,7 +129,7 @@ def test_run_job_real_subprocess_timeout_is_recorded_as_failed(tmp_path, monkeyp
     from app import runner
     from app.db import make_engine, make_session_factory
     from app.migrate import upgrade_head
-    from app.models import Document, Job
+    from app.models import Document, Job, Matter
 
     monkeypatch.setenv("COUNSELCLEAR_WORKER_TIMEOUT_S", "1")
     cfg = Config(tmp_path)
@@ -137,8 +137,10 @@ def test_run_job_real_subprocess_timeout_is_recorded_as_failed(tmp_path, monkeyp
     s = make_session_factory(make_engine(cfg))()
     original = tmp_path / "orig.txt"
     original.write_bytes(b"hello")
+    s.add(Matter(id="m1", name="m"))
+    s.flush()
     s.add(Document(id="doc1", matter_id="m1", filename="orig.txt", sha256="0" * 64,
-                    bytes=5, storage_path=str(original)))
+                   bytes=5, storage_path=str(original)))
     s.add(Job(id="j1", matter_id="m1", document_id="doc1", kind="inspect"))
     s.commit()
 
@@ -160,12 +162,16 @@ def test_sync_backstop_marks_failed_on_crash(tmp_path, monkeypatch):
     from app import runner
     from app.db import make_engine, make_session_factory
     from app.main import create_app
-    from app.models import Job
+    from app.models import Document, Job, Matter
 
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw17")
     root = tmp_path / "data"
     create_app(root)  # brings schema up
     s = make_session_factory(make_engine(Config(root)))()
+    s.add(Matter(id="m", name="m"))
+    s.flush()
+    s.add(Document(id="d", matter_id="m", filename="f.txt", sha256="0" * 64,
+                   bytes=0, storage_path=""))
     job = Job(matter_id="m", document_id="d", kind="inspect", status="running")
     s.add(job)
     s.commit()
@@ -203,6 +209,7 @@ def test_docker_cmd_is_hardened_and_digest_pinned(tmp_path):
     cfg = Config.__new__(Config)
     cfg.data_root = tmp_path / "srv" / "cc"
     cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
+    cfg.worker_runtime = ""
     mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
     cmd = build_docker_cmd(cfg, **_docker_kwargs(mount_root))
     joined = " ".join(cmd)
@@ -225,6 +232,7 @@ def test_docker_mount_is_scoped_to_one_job_not_the_whole_data_root(tmp_path):
     cfg = Config.__new__(Config)
     cfg.data_root = tmp_path / "srv" / "cc"
     cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
+    cfg.worker_runtime = ""
     mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
     cmd = build_docker_cmd(cfg, **_docker_kwargs(mount_root))
     mount_flag = cmd[cmd.index("-v") + 1]
@@ -243,6 +251,20 @@ def test_docker_mode_refuses_unpinned_image(tmp_path):
     mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
     with pytest.raises(ValueError, match="digest-pinned"):
         build_docker_cmd(cfg, **_docker_kwargs(mount_root))
+
+
+def test_docker_cmd_selects_hardened_runtime_when_configured(tmp_path):
+    """COUNSELCLEAR_WORKER_RUNTIME (e.g. gVisor's runsc) must translate to
+    an explicit --runtime flag on the worker container."""
+    cfg = Config.__new__(Config)
+    cfg.data_root = tmp_path / "srv" / "cc"
+    cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
+    cfg.worker_runtime = "runsc"
+    mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
+    cmd = build_docker_cmd(cfg, **_docker_kwargs(mount_root))
+    assert cmd[cmd.index("--runtime") + 1] == "runsc"
+    # ...and it stays a hardened container: network off either way.
+    assert cmd[cmd.index("--network") + 1] == "none"
 
 
 def test_config_rejects_unknown_worker_mode(monkeypatch, tmp_path):

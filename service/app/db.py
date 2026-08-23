@@ -1,8 +1,6 @@
-"""SQLite engine/session (single-tenant profile)."""
+"""Engine/session for the configured backend (SQLite or Postgres)."""
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -15,10 +13,19 @@ class Base(DeclarativeBase):
 
 
 def make_engine(cfg: Config):
+    url = cfg.db_url()
+
+    # Postgres (COUNSELCLEAR_DATABASE_URL): a real server handles
+    # concurrency — MVCC snapshots plus row locks serialize the audit
+    # chain's read-then-insert across processes, and none of SQLite's
+    # file-level knobs below exist. pool_pre_ping drops connections the
+    # server (or an intermediate firewall) has reaped instead of failing
+    # a request on first use after idle.
+    if not url.startswith("sqlite"):
+        return create_engine(url, pool_pre_ping=True)
+
     cfg.data_root.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(
-        f"sqlite:///{Path(cfg.db_path)}", connect_args={"check_same_thread": False}
-    )
+    engine = create_engine(url, connect_args={"check_same_thread": False})
 
     # Every write transaction acquires SQLite's write lock immediately
     # instead of deferring it until the first write statement. Without this,
@@ -41,6 +48,17 @@ def make_engine(cfg: Config):
         # Disable pysqlite's own implicit BEGIN so our "begin" listener
         # below controls exactly when and how each transaction starts.
         dbapi_connection.isolation_level = None
+        # WAL lets readers proceed while a writer holds the write lock —
+        # without it every BEGIN IMMEDIATE below blocks reads too, so one
+        # long job-status commit stalls every concurrent request.
+        dbapi_connection.execute("PRAGMA journal_mode=WAL")
+        # Block up to 5 s instead of failing instantly with "database is
+        # locked" when another process is mid-commit. BEGIN IMMEDIATE makes
+        # writers serialize; this keeps them serializing *patiently*.
+        dbapi_connection.execute("PRAGMA busy_timeout=5000")
+        # Enforce the declared ForeignKeys (matters -> documents -> jobs) —
+        # SQLite leaves them off by default, silently accepting orphans.
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     @event.listens_for(engine, "begin")
     def _sqlite_begin_immediate(conn):

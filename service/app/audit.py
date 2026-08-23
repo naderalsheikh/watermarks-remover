@@ -6,13 +6,15 @@ sha256(prev_hash | seq | actor_id | action | canonical payload).
 Three layers keep the chain from forking under concurrent appends:
 1. A process-local threading.Lock per matter (below) — fast, in-process
    ordering for the common case.
-2. BEGIN IMMEDIATE on every write transaction (db.py's make_engine) — a
-   real database-level lock that also covers multiple processes sharing
-   the same SQLite file, which a Python-level lock cannot.
+2. A database-level write lock that also covers multiple processes: on
+   SQLite, BEGIN IMMEDIATE (db.py's make_engine); on Postgres, the
+   unique-constraint conflict handled by the retry below (MVCC lets both
+   transactions read the same max(seq), so serialization happens at
+   commit time instead of lock-acquisition time).
 3. A unique (matter_id, seq) constraint (models.AuditEvent) as the final
-   backstop: if two writers ever raced past both of the above, SQLite
-   refuses the second insert with IntegrityError instead of silently
-   creating two rows that claim the same seq.
+   backstop: if two writers ever raced past both of the above, the
+   database refuses the second insert with IntegrityError instead of
+   silently creating two rows that claim the same seq.
 Gapless `seq` and the recomputed-hash walk in verify_chain() are what
 detect a chain that was tampered with after the fact, not what prevents
 one from forking during a race — that's what 1-3 are for.
@@ -26,11 +28,18 @@ import threading
 import uuid
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .models import AuditEvent
 
 GENESIS = "0" * 64
+
+# Bounded retries for layer-3 conflicts (only reachable across processes
+# on Postgres). Each attempt re-reads max(seq), so a loser simply appends
+# at the winner's seq+1; three attempts is far beyond any realistic
+# contention for a per-matter serialized log.
+_APPEND_ATTEMPTS = 3
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -56,33 +65,42 @@ def append_event(
 ) -> AuditEvent:
     """Serialized per-matter append. Commits."""
     with _matter_lock(matter_id):
-        last_seq = s.execute(
-            select(func.max(AuditEvent.seq)).where(AuditEvent.matter_id == matter_id)
-        ).scalar_one()
-        seq = 0 if last_seq is None else last_seq + 1
-        prev = (
-            s.execute(
-                select(AuditEvent)
-                .where(AuditEvent.matter_id == matter_id, AuditEvent.seq == last_seq)
-                .limit(1)
-            ).scalar_one_or_none()
-            if seq > 0
-            else None
-        )
-        prev_hash = GENESIS if prev is None else prev.row_hash
-        ev = AuditEvent(
-            id=uuid.uuid4().hex[:16],
-            matter_id=matter_id,
-            seq=seq,
-            actor_id=actor_id,
-            action=action,
-            payload=payload,
-            prev_hash=prev_hash,
-            row_hash=event_hash(prev_hash, seq, actor_id, action, payload),
-        )
-        s.add(ev)
-        s.commit()
-        return ev
+        for _attempt in range(_APPEND_ATTEMPTS):
+            last_seq = s.execute(
+                select(func.max(AuditEvent.seq)).where(AuditEvent.matter_id == matter_id)
+            ).scalar_one()
+            seq = 0 if last_seq is None else last_seq + 1
+            prev = (
+                s.execute(
+                    select(AuditEvent)
+                    .where(AuditEvent.matter_id == matter_id, AuditEvent.seq == last_seq)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if seq > 0
+                else None
+            )
+            prev_hash = GENESIS if prev is None else prev.row_hash
+            ev = AuditEvent(
+                id=uuid.uuid4().hex[:16],
+                matter_id=matter_id,
+                seq=seq,
+                actor_id=actor_id,
+                action=action,
+                payload=payload,
+                prev_hash=prev_hash,
+                row_hash=event_hash(prev_hash, seq, actor_id, action, payload),
+            )
+            s.add(ev)
+            try:
+                s.commit()
+                return ev
+            except IntegrityError:
+                # Another process claimed this seq between our read and our
+                # commit (possible only on Postgres — SQLite's BEGIN IMMEDIATE
+                # holds the write lock across the whole transaction). Roll
+                # back and re-read; the retry appends at the winner's seq+1.
+                s.rollback()
+        raise RuntimeError(f"audit append kept colliding on seq for matter {matter_id}")
 
 
 def verify_chain(events: list[AuditEvent]) -> tuple[bool, str]:

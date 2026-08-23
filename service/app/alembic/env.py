@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import contextlib
+import logging
 import sys
-from logging.config import fileConfig
 from pathlib import Path
 
 _SERVICE = Path(__file__).resolve().parents[2]
@@ -15,10 +14,15 @@ from sqlalchemy import engine_from_config, pool
 from app.db import Base
 from app import models  # noqa: F401  — register tables
 
+# Deliberately NO fileConfig() here. This env.py runs inside the API process
+# (migrate.upgrade_head on every boot), and fileConfig would rip out the
+# host application's root-logging handlers and install alembic.ini's own —
+# silently breaking pytest's caplog, uvicorn's handlers, and any structured
+# logging the app configures. Alembic's "alembic.runtime" records propagate
+# to the root logger like everyone else's; only their level is set here.
+logging.getLogger("alembic").setLevel(logging.INFO)
+
 config = context.config
-if config.config_file_name is not None:
-    with contextlib.suppress(Exception):
-        fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

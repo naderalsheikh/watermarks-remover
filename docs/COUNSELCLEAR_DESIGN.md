@@ -959,6 +959,20 @@ PRs 15–18 landed with a real gap: the isolated-worker design's own trust bound
 
 Deliberately **not** done in this pass (flagged, not silently deferred): defaulting `COUNSELCLEAR_WORKER_MODE` to `docker` — compose's `legal` profile already defaults it that way (`compose.yaml`), and flipping the bare-Python default would just break local dev/tests for no isolation gain, since a bare `docker run` of this image has no `docker` CLI or host socket access to actually execute docker-mode jobs anyway. Wiring up docker-outside-of-docker (installing the docker CLI + mounting `/var/run/docker.sock` into `cc-api`) is a distinct architecture decision — it trades "isolate the worker" for "give the long-lived API container host-root-equivalent socket access" — and deserves its own explicit sign-off rather than riding in as part of a bug-fix pass.
 
+#### Production-readiness pass (2026-08-23) — single-tenant hardening
+
+- **Orphaned-job sweep on boot.** With in-request job execution, a crash mid-job left the Job row `"running"` forever (its worker died with the old API process; `sync_job` would never run). `create_app` now sweeps queued/running rows to `failed` ("interrupted by an application restart") at startup, before the app can serve.
+- **SQLite durability pragmas.** WAL journal mode (readers no longer block behind a writer's `BEGIN IMMEDIATE`), `busy_timeout=5000` (concurrent commits wait instead of failing instantly with "database is locked"), and `foreign_keys=ON` (the declared matters→documents→jobs graph is now actually enforced; SQLite leaves FKs off by default).
+- **Login brute-force throttle.** Sliding-window per-peer-address failure counter (`COUNSELCLEAR_LOGIN_MAX_FAILURES/WINDOW_S/LOCKOUT_S`, defaults 5/300/300); once tripped, even correct passwords get 429 + Retry-After until lockout expiry. Keyed by socket peer, never X-Forwarded-For (spoofable).
+- **Logout + session revocation.** `POST /v1/auth/logout` clears the cookie; `POST /v1/auth/revoke-sessions` rotates the cookie secret so every outstanding HMAC token dies server-side instantly (the honest revocation story for stateless tokens).
+- **Deep health + compose healthcheck.** `/health` now executes `SELECT 1` against the DB (503 when unavailable); `cc-api` in compose gained a `healthcheck:` hitting it, so orchestrators can see a wedged instance.
+- **Fail-closed API docs.** `/docs`, `/redoc`, `/openapi.json` now exist only with `COUNSELCLEAR_ENABLE_DOCS=1` (they carry no auth check; the old disable-only flag still wins if both are set). Compose leaves them off.
+- **Structured JSON logging + request IDs.** Every request logs one JSON line (`event`, `request_id`, method, path, status, duration_ms, client) via the app logger; responses carry `X-Request-ID` for correlation. Startup posture lines use the same funnel. `COUNSELCLEAR_ACCESS_LOG=0` silences per-request lines. Filenames/basenames are still never logged (path has no query string).
+- **Live ClamAV definitions.** A `cc-freshclam` sidecar (legal profile) refreshes a shared `clamav-db` volume every 6 h; `cc-api` mounts it read-only and scans with `COUNSELCLEAR_CLAMAV_DB_DIR=/clamav-defs` instead of the build-time seed that goes stale the day the image was built.
+- **Incomplete-bundle guard.** A truncated worker output (no `derivative/` tree) now answers `GET .../bundle` with 409 instead of an unhandled 500.
+- **CI audits the shipped dependencies.** pip-audit now covers `service/requirements-app.txt` (FastAPI/uvicorn/SQLAlchemy/argon2/alembic/python-multipart) — previously only dev deps and the synthid scorer were audited, so the actual runtime pins were never scanned.
+- **Alembic no longer hijacks logging.** `alembic/env.py` dropped `fileConfig()` (which replaced the host process's root handlers on every boot, silently breaking pytest's caplog and any structured logging config); alembic records now propagate through normal root-logger config.
+
 ### Phase 3 — Production (PR 21)
 
 Postgres, OIDC, CMK, residency, Object Lock, gVisor.
@@ -1221,3 +1235,26 @@ PR 14 (PDF raster warn) is optional-parallel after 13 and is **not** required to
 - **Changes:** Multi-tenant schema, OIDC, customer key, region pin, legal hold. No engine changes.
 
 Each engine PR merges if its tests pass without the next PR. After PR 13 the local service is usable for the operator’s own matters. Shell PRs 15–21 do not rewrite `container_meta.py`.
+
+#### Postgres backend — implemented (2026-08-23)
+
+`COUNSELCLEAR_DATABASE_URL` (empty = embedded SQLite, unchanged default) selects the relational backend for engines and Alembic alike:
+
+- `Config.db_url()` returns the configured URL or `sqlite:///{db_path}`; `make_engine` early-returns a plain pooled engine (`pool_pre_ping`) for non-SQLite URLs — no SQLite listeners (isolation_level, WAL/busy_timeout/FK pragmas, BEGIN IMMEDIATE) ever attach to a Postgres connection.
+- JSON columns (`AuditEvent.payload`, `Job.result_json`, `Job.finding_decisions`) are `JSON().with_variant(JSONB(), "postgresql")` in models *and* in migrations 0001/0003, so fresh Postgres installs get indexable JSONB DDL. The two migrations are edited in place rather than followed by a "switch to JSONB" revision: every deployment that already ran them is SQLite, where both render identically — a follow-up would be a no-op everywhere except fresh PG installs, which start from scratch anyway.
+- Audit chain serialization on Postgres: MVCC lets two processes read the same max(seq), so the unique `(matter_id, seq)` constraint rejects one at commit; `audit.append_event` now rolls back and retries (bounded) at winner_seq+1. SQLite keeps BEGIN IMMEDIATE serialization — the retry branch is simply unreachable there.
+- Driver: `psycopg[binary]` pinned in requirements-app.txt and shipped in the image even for SQLite deployments (the URL scheme needs it importable).
+- compose: optional bundled `cc-postgres` under a new `pg` profile (healthchecked, host-network-isolated, digest-pin before production); `cc-api` passes `COUNSELCLEAR_DATABASE_URL` through with an empty default and declares the dependency `required: false`, so SQLite-only bring-up stays dependency-free.
+- Tests (`tests/test_postgres_support.py`) need no live server: lazy engine construction asserts dialect selection, Alembic offline `--sql` mode renders the whole migration chain against a postgres URL (proving JSONB DDL), and the audit retry path is exercised by simulating commit-time IntegrityError. A live end-to-end run happens at deployment time (compose pg profile), not in CI.
+
+#### OIDC SSO — implemented (2026-08-23)
+
+Setting `COUNSELCLEAR_OIDC_ISSUER` + `CLIENT_ID` + `CLIENT_SECRET` switches authentication from the shared local password to OpenID Connect (authorization-code flow); all three must be present (`Config.oidc_enabled`), otherwise behavior is byte-for-byte the historical local-password flow.
+
+- **One principal model everywhere.** The auth dependency no longer returns "authenticated yes/no" — it resolves the session token to a *subject*: `"operator"` for local logins, `"oidc:" + sha256(sub)[:24]` for SSO (bounded, charset-checked, stable regardless of how long or odd the IdP's `sub` is). Every route's permission check (`has_perm`) and every audit `actor_id` keys on that subject, so OIDC principals are isolated from each other by exactly the matter ACL that already scoped the operator; matter creation bootstraps OWNER perms for the creating principal.
+- **Stateless CSRF**: the `state` parameter is HMAC-signed with the cookie secret and carries nonce + timestamp (10 min TTL) — nothing stored between redirect and callback. The same nonce rides in the authorization request and is checked against the validated ID token's `nonce` claim.
+- **ID-token verification** (PyJWT + JWKS client, cached per issuer): RS256 signature against the discovery document's `jwks_uri`, plus issuer, audience, expiry (30 s leeway) and nonce. Discovery/token/JWKS fetches go through stdlib urllib with https-only enforcement (http tolerated solely for loopback dev IdPs) — deliberately no new HTTP client dependency.
+- **Fail-closed allowlist**: `COUNSELCLEAR_OIDC_ALLOWED` (comma-separated emails/subs, case-insensitive) gates who may sign in; empty denies everyone, and a startup warning says so. Non-allowlisted callbacks get a uniform 403 with no enumeration signal.
+- **Local password retired when SSO is on**: `/v1/auth/login` answers 403, no hash file is created or required (compose's `:?required` guard moved into the app, which enforces it only when actually using password auth).
+- Session subjects are now validated against `[A-Za-z0-9][A-Za-z0-9._:@-]{0,62}` before issuance and on every request — they populate ACL `user_id` (String(64)) and audit rows, so they're treated as data with a schema.
+- Tests (`tests/test_oidc.py`) stub exactly the three IdP-boundary functions (`discover`, `exchange_code`, `validated_claims`) — main.py calls them through the module object so stubbing works — and separately exercise real RS256 verification with an in-process RSA keypair (signature, wrong-key, wrong-audience, wrong-nonce and expired tokens).

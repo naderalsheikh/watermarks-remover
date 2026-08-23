@@ -11,11 +11,20 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB
 
 revision: str = "0001"
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+# JSON on SQLite (unchanged DDL for every existing data root), JSONB on
+# Postgres. This migration is edited in place rather than followed by a
+# "switch to JSONB" revision because every deployment that has already run
+# it is SQLite — where the two render identically — so a follow-up would be
+# a no-op everywhere except fresh Postgres installs, which start from
+# scratch here anyway.
+_PG_JSON = sa.JSON().with_variant(JSONB(), "postgresql")
 
 
 def upgrade() -> None:
@@ -48,7 +57,7 @@ def upgrade() -> None:
         sa.Column("attestation", sa.Boolean(), nullable=False),
         sa.Column("status", sa.String(12), nullable=False),
         sa.Column("error", sa.String(1000), nullable=False),
-        sa.Column("result_json", sa.JSON(), nullable=True),
+        sa.Column("result_json", _PG_JSON, nullable=True),
         sa.Column("bundle_dir", sa.String(1024), nullable=False),
         sa.Column("worker_image", sa.String(200), nullable=False),
         sa.Column("created_utc", sa.String(32), nullable=False),
@@ -70,7 +79,7 @@ def upgrade() -> None:
         sa.Column("seq", sa.Integer(), nullable=False),
         sa.Column("actor_id", sa.String(64), nullable=False),
         sa.Column("action", sa.String(64), nullable=False),
-        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("payload", _PG_JSON, nullable=False),
         sa.Column("prev_hash", sa.String(64), nullable=False),
         sa.Column("row_hash", sa.String(64), nullable=False),
         sa.Column("at", sa.String(32), nullable=False),

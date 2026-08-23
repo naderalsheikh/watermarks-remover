@@ -5,3 +5,11 @@ SQLAlchemy==2.0.52
 argon2-cffi==25.1.0
 python-multipart==0.0.32
 alembic==1.16.5
+# Optional-but-shipped Postgres driver: COUNSELCLEAR_DATABASE_URL selects the
+# backend, and the URL scheme postgresql+psycopg needs this importable even
+# when a deployment stays on SQLite.
+psycopg[binary]==3.2.13
+# OIDC ID-token signature verification (RS256 via JWKS). Hand-rolling JWT
+# crypto is where subtle bugs live; PyJWT + the cryptography extra is the
+# boring correct choice. Only exercised when COUNSELCLEAR_OIDC_ISSUER is set.
+pyjwt[crypto]==2.13.0

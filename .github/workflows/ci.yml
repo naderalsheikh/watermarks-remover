@@ -58,6 +58,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           python -m pip_audit -r requirements-dev.txt \
+            -r service/requirements-app.txt \
             -r service/scripts/requirements-synthid-scorer.txt
 
   lint:

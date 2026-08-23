@@ -16,17 +16,22 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB
 
 revision: str = "0003"
 down_revision: Union[str, Sequence[str], None] = "0002"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+# JSONB on Postgres, JSON on SQLite (see 0001 for why this is edited in
+# place rather than shipped as its own revision).
+_PG_JSON = sa.JSON().with_variant(JSONB(), "postgresql")
+
 
 def upgrade() -> None:
     with op.batch_alter_table("jobs") as batch_op:
         batch_op.add_column(
-            sa.Column("finding_decisions", sa.JSON(), nullable=False, server_default="{}")
+            sa.Column("finding_decisions", _PG_JSON, nullable=False, server_default="{}")
         )
 
 

@@ -501,7 +501,7 @@ def test_run_job_uses_caps_budget_as_timeout(monkeypatch, tmp_path):
     from app.config import Config
     from app.db import make_engine, make_session_factory
     from app.migrate import upgrade_head
-    from app.models import Document, Job
+    from app.models import Document, Job, Matter
 
     captured = {}
 
@@ -519,8 +519,10 @@ def test_run_job_uses_caps_budget_as_timeout(monkeypatch, tmp_path):
     s = make_session_factory(make_engine(cfg))()
     original = tmp_path / "orig.txt"
     original.write_bytes(b"hello")
+    s.add(Matter(id="m1", name="m"))
+    s.flush()
     s.add(Document(id="doc1", matter_id="m1", filename="orig.txt", sha256="0" * 64,
-                    bytes=5, storage_path=str(original)))
+                   bytes=5, storage_path=str(original)))
     s.add(Job(id="j1", matter_id="m1", document_id="doc1", kind="inspect"))
     s.commit()
 

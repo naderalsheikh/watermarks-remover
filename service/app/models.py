@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -17,6 +18,12 @@ def _uuid() -> str:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+# JSON columns: plain JSON on SQLite, real indexable JSONB on Postgres.
+# (with_variant only changes the DDL the Postgres dialect renders; SQLite
+# behaviour is untouched.)
+JSONColumn = JSON().with_variant(JSONB(), "postgresql")
 
 
 class Matter(Base):
@@ -68,7 +75,7 @@ class AuditEvent(Base):
     seq: Mapped[int] = mapped_column()
     actor_id: Mapped[str] = mapped_column(String(64), default="operator")
     action: Mapped[str] = mapped_column(String(64))
-    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    payload: Mapped[dict] = mapped_column(JSONColumn, default=dict)
     prev_hash: Mapped[str] = mapped_column(String(64))
     row_hash: Mapped[str] = mapped_column(String(64), index=True)
     at: Mapped[str] = mapped_column(String(32), default=_now)
@@ -105,11 +112,11 @@ class Job(Base):
     # decision to "keep", so without this every approve-default cell was
     # unreachable through the API and production sanitize was effectively
     # a no-op strip.
-    finding_decisions: Mapped[dict] = mapped_column(JSON, default=dict)
+    finding_decisions: Mapped[dict] = mapped_column(JSONColumn, default=dict)
     # queued | running | done | refused | failed
     status: Mapped[str] = mapped_column(String(12), default="queued", index=True)
     error: Mapped[str] = mapped_column(String(1000), default="")
-    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
     bundle_dir: Mapped[str] = mapped_column(String(1024), default="")
     # digest-pinned image that executed this job (PR 17), "" for subprocess
     worker_image: Mapped[str] = mapped_column(String(200), default="")

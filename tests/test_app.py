@@ -38,22 +38,32 @@ def test_health_is_unauthenticated(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json() == {"ok": True}
 
 
-def test_login_cookie_not_secure_over_plain_http_but_docs_default_on(tmp_path, monkeypatch):
+def test_login_cookie_not_secure_over_plain_http_and_docs_fail_closed(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
     c = TestClient(create_app(tmp_path / "d"))
     r = c.post("/v1/auth/login", json={"password": "pw12345"})
     # TestClient's default base_url is http://testserver — secure=False is
     # correct here (a hardcoded secure=True would just drop the cookie).
     assert "secure" not in r.headers["set-cookie"].lower()
-    assert c.get("/docs").status_code == 200
+    # Docs are fail-closed now: they exist only with COUNSELCLEAR_ENABLE_DOCS=1.
+    assert c.get("/docs").status_code == 404
+    assert c.get("/openapi.json").status_code == 404
 
 
-def test_docs_disabled_via_env(tmp_path, monkeypatch):
+def test_docs_enabled_via_opt_in_env(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    monkeypatch.setenv("COUNSELCLEAR_ENABLE_DOCS", "1")
+    c = TestClient(create_app(tmp_path / "d"))
+    assert c.get("/docs").status_code == 200
+    assert c.get("/openapi.json").status_code == 200
+
+
+def test_docs_disable_wins_over_enable(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    monkeypatch.setenv("COUNSELCLEAR_ENABLE_DOCS", "1")
     monkeypatch.setenv("COUNSELCLEAR_DISABLE_DOCS", "1")
     c = TestClient(create_app(tmp_path / "d"))
     assert c.get("/docs").status_code == 404
-    assert c.get("/openapi.json").status_code == 404
 
 
 def test_auth_required_and_login_flow(tmp_path, monkeypatch):

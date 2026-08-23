@@ -97,6 +97,12 @@ def build_docker_cmd(
         "docker",
         "run",
         "--rm",
+    ]
+    if cfg.worker_runtime:
+        # Optional hardened OCI runtime (e.g. gVisor's "runsc"): the
+        # deployment registers the runtime with Docker; we only select it.
+        cmd += ["--runtime", cfg.worker_runtime]
+    cmd += [
         "--network",
         "none",
         "--read-only",
