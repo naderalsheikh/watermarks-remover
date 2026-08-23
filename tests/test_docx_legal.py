@@ -524,3 +524,41 @@ def test_chained_paragraph_mark_deletions_merge_in_one_pass():
     assert stats["paragraphs_merged"] == 2
     assert text.count("<w:p>") == 1
     assert "A " in text and "B " in text and "C" in text
+
+
+# --- Quote-tolerance sweep: privacy-relevant detectors ------------------------
+
+
+def test_white_on_white_detected_with_single_quoted_attribute():
+    """XML permits either quote style; a double-quote-only regex made
+    single-quoted w:val='FFFFFF' (valid XML, e.g. LibreOffice output)
+    invisible to exactly the detector meant to catch it."""
+    double = b'<w:color w:val="FFFFFF"/>'
+    single = b"<w:color w:val='FFFFFF'/>"
+    assert container_meta._DOCX_WHITE_RE.search(double)
+    assert container_meta._DOCX_WHITE_RE.search(single), "single-quoted white-on-white must match too"
+
+
+def test_xmlns_declarations_detected_with_single_quotes():
+    """A document declaring namespaces with single quotes previously found
+    zero declarations, so accept-all's namespace preservation never ran for
+    any of its real prefixes."""
+    double = '<w:document xmlns:w14="urn:x"><w:body/></w:document>'
+    single = "<w:document xmlns:w14='urn:x'><w:body/></w:document>"
+    assert container_meta._XMLNS_PREFIXED_RE.findall(double)
+    found = container_meta._XMLNS_PREFIXED_RE.findall(single)
+    assert found and found[0][0] == "w14" and found[0][2] == "urn:x"
+
+
+def test_accept_all_preserves_single_quoted_namespace_prefix():
+    """End-to-end: the actual accept_all path round-trips a single-quoted
+    xmlns declaration without falling back to an auto-generated ns0."""
+    xml = (
+        b"<?xml version='1.0'?><w:document "
+        b"xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main' "
+        b"xmlns:w14='urn:w14ns'><w:body><w:p><w:r w14:paraId='1'>"
+        b"<w:t>hi</w:t></w:r></w:p></w:body></w:document>"
+    )
+    out, _ = container_meta._docx_accept_all(xml, strip_comment_markers=False)
+    assert b'xmlns:w14="urn:w14ns"' in out
+    assert b"ns0" not in out and b"ns1" not in out

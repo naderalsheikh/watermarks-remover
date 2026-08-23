@@ -1067,7 +1067,11 @@ _DOCX_FMT_CHANGE_RE = re.compile(rb"<w:(?:rPrChange|pPrChange|sectPrChange|tblPr
 _DOCX_ROW_DEL_RE = re.compile(rb"<w:trPr\b[^>]*>(?:(?!</w:trPr>).)*?<w:del\b", re.S)
 _DOCX_CELL_REVISION_RE = re.compile(rb"<w:(?:cellIns|cellDel|cellMerge)\b")
 _DOCX_VANISH_RE = re.compile(rb"<w:vanish\b")
-_DOCX_WHITE_RE = re.compile(rb'<w:color\b[^>]*w:val="[Ff]{6}"')
+# ["'] backreference, not a hardcoded double quote: XML allows either
+# quote style (issue #130's fix, _target_attr, is the same pattern) — a
+# double-quote-only match let white-on-white text written with single
+# quotes (w:val='FFFFFF') hide from this exact privilege-risk detector.
+_DOCX_WHITE_RE = re.compile(rb'<w:color\b[^>]*w:val=(["\'])[Ff]{6}\1')
 _DOCX_HIGHLIGHT_RE = re.compile(rb"<w:highlight\b")
 _DOCX_COMMENT_MARKER_RE = re.compile(rb"<w:(?:commentRangeStart|commentRangeEnd|commentReference)\b")
 # Anything that makes a part worth an XML-aware pass on clean.
@@ -1944,8 +1948,14 @@ def _merge_deleted_paragraph_marks_scoped(
 _DOCX_COMMENT_MARKER_TAGS = frozenset(
     {_W_NS + "commentRangeStart", _W_NS + "commentRangeEnd", _W_NS + "commentReference"}
 )
-_XMLNS_PREFIXED_RE = re.compile(r'xmlns:([\w.\-]+)="([^"]+)"')
-_XMLNS_DEFAULT_RE = re.compile(r'xmlns="([^"]+)"')
+# Quote-tolerant (['"] backreference, same pattern as issue #130's fix):
+# a document declaring its namespaces with single quotes (valid XML,
+# e.g. LibreOffice or a hand-edited file) previously found ZERO
+# namespace declarations here, so _register_declared_namespaces never
+# ran ET.register_namespace for any of its real prefixes — round-tripping
+# the document through Accept All with every prefix renamed to ns0/ns1/...
+_XMLNS_PREFIXED_RE = re.compile(r'xmlns:([\w.\-]+)=(["\'])([^"\']+)\2')
+_XMLNS_DEFAULT_RE = re.compile(r'xmlns=(["\'])([^"\']+)\1')
 
 
 # xml.etree.ElementTree.register_namespace mutates process-global state with
@@ -1995,11 +2005,11 @@ def _scoped_namespace_registration(xml_bytes: bytes):
     try:
         head = xml_bytes[:16384].decode("utf-8", errors="replace")
         seen: set[tuple[str, str]] = set()
-        for prefix, uri in _XMLNS_PREFIXED_RE.findall(head):
+        for prefix, _quote, uri in _XMLNS_PREFIXED_RE.findall(head):
             if (prefix, uri) not in seen:
                 ET.register_namespace(prefix, uri)
                 seen.add((prefix, uri))
-        for uri in _XMLNS_DEFAULT_RE.findall(head):
+        for _quote, uri in _XMLNS_DEFAULT_RE.findall(head):
             if ("", uri) not in seen:
                 ET.register_namespace("", uri)
                 seen.add(("", uri))
@@ -2359,7 +2369,11 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
 # PPTX legal content (PR 8): speaker notes, hidden slides, comments
 # ---------------------------------------------------------------------------
 
-_PPTX_HIDDEN_SLIDE_RE = re.compile(rb'<(?:\w+:)?sld\b[^>]*\bshow="(?:0|false)"')
+# Same quote-tolerance fix as _DOCX_WHITE_RE above: a hidden slide marked
+# with show='0' (single-quoted) was invisible to this detector.
+_PPTX_HIDDEN_SLIDE_RE = re.compile(
+    rb'<(?:\w+:)?sld\b[^>]*\bshow=(["\'])(?:0|false)\1'
+)
 
 _PART_PANE_MAP = (
     (re.compile(r"^word/document\.xml$"), "body"),

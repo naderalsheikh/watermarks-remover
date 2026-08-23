@@ -24,8 +24,20 @@ from typing import Any
 _SHEET_TAG_RE = re.compile(r"<(?:\w+:)?sheet\b[^>]*>", re.IGNORECASE)
 _DEFINED_NAME_TAG_RE = re.compile(r"<(?:\w+:)?definedName\b[^>]*>", re.IGNORECASE)
 _COMMENT_ELEMENT_RE = re.compile(r"<(?:\w+:)?comment(?=[\s/>])", re.IGNORECASE)
-_HIDDEN_ROW_RE = re.compile(r'<(?:\w+:)?row\b[^>]*\bhidden="(?:1|true)"', re.IGNORECASE)
-_HIDDEN_COL_RE = re.compile(r"<(?:\w+:)?col\b[^>]*\bhidden=", re.IGNORECASE)
+# Quote-tolerant (["'] backreference — sheet/definedName detection above
+# already goes through the quote-tolerant _attr() helper; these two direct
+# regexes didn't, so a row/col hidden with single-quoted hidden='1' (valid
+# XML — e.g. LibreOffice output) went undetected by exactly the check this
+# module exists to run.
+_HIDDEN_ROW_RE = re.compile(
+    r'<(?:\w+:)?row\b[^>]*\bhidden=(["\'])(?:1|true)\1', re.IGNORECASE
+)
+# Also fixed here: the old pattern only checked the attribute was *present*,
+# not its value, so hidden="0" (explicitly NOT hidden) false-positived as a
+# hidden column. Matches _HIDDEN_ROW_RE's value check now.
+_HIDDEN_COL_RE = re.compile(
+    r'<(?:\w+:)?col\b[^>]*\bhidden=(["\'])(?:1|true)\1', re.IGNORECASE
+)
 
 # Part-name patterns (zip entry paths).
 _WORKBOOK_PART_RE = re.compile(r"^xl/workbook\.xml$", re.IGNORECASE)

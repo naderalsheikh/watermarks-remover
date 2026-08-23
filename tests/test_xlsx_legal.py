@@ -467,3 +467,18 @@ def test_findings_project_defined_names_and_rows_cols():
     assert set(found) == {"defined_names_hidden_range", "hidden_structure"}
     assert found["defined_names_hidden_range"].risk_level == "low"
     assert found["defined_names_hidden_range"].confidence == "probable"
+
+
+def test_hidden_row_detected_with_single_quoted_attribute():
+    double = '<row hidden="1"/>'
+    single = "<row hidden='1'/>"
+    assert xlsx_legal._HIDDEN_ROW_RE.search(double)
+    assert xlsx_legal._HIDDEN_ROW_RE.search(single), "single-quoted hidden row must match too"
+
+
+def test_hidden_col_checks_the_value_not_just_presence():
+    """hidden="0" (explicitly not hidden) must not false-positive, and
+    single-quoted hidden='1' must still be caught."""
+    assert xlsx_legal._HIDDEN_COL_RE.search('<col hidden="1"/>')
+    assert xlsx_legal._HIDDEN_COL_RE.search("<col hidden='1'/>")
+    assert not xlsx_legal._HIDDEN_COL_RE.search('<col hidden="0"/>')
