@@ -294,3 +294,18 @@ def test_unsanitized_body_invisible_still_fails_the_gate():
     assert report["pass"] is False
     gone = next(c for c in report["checks"] if c["name"] == "reinspect_targeted_gone")
     assert "layer_a_body" in gone["detail"]
+
+
+def test_qpdf_check_rejects_a_damaged_pdf():
+    """format_valid on a PDF is structural now, not just magic bytes."""
+    from verify import _qpdf_check
+
+    good = (FIXTURES / "incremental.pdf").read_bytes()
+    ok, detail = _qpdf_check(good)
+    assert ok is True, detail
+    bad_ok, bad_detail = _qpdf_check(good[:120])
+    # degrades to True only when qpdf is absent; otherwise it must reject
+    import shutil as _shutil
+
+    if _shutil.which("qpdf"):
+        assert bad_ok is False and "qpdf --check failed" in bad_detail

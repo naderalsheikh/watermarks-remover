@@ -22,11 +22,16 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import io
+import os
 import re
+import shutil
 import struct
+import subprocess
+import tempfile
 import zipfile
 from typing import Any
 
+from common import subprocess_preexec_fn
 from engine_api import inspect_bytes
 from findings import findings_for_report
 from policies import SUBTYPES, ActionPlan
@@ -168,6 +173,42 @@ def _present_subtypes(kind: str, report: dict[str, Any]) -> set[str]:
     return out
 
 
+def _qpdf_check(data: bytes) -> tuple[bool, str]:
+    """Structural validation of a PDF derivative via ``qpdf --check``.
+
+    Magic bytes alone said nothing about whether the rebuilt file is
+    actually well-formed. qpdf exits 0 clean, 3 for warnings-only (a
+    recoverable file — not a reason to fail a job), and 2 for real
+    structural errors. Without qpdf installed this degrades to the old
+    magic-byte answer rather than failing every PDF on a bare host.
+    """
+    qpdf = shutil.which("qpdf")
+    if qpdf is None:
+        return True, "pdf magic (qpdf not installed; structure unverified)"
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as fh:
+        fh.write(data)
+        tmp = fh.name
+    try:
+        proc = subprocess.run(
+            [qpdf, "--check", tmp],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            preexec_fn=subprocess_preexec_fn,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return True, f"pdf magic (qpdf --check unavailable: {type(e).__name__})"
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+    if proc.returncode in (0, 3):
+        note = "clean" if proc.returncode == 0 else "warnings only"
+        return True, f"qpdf --check {note}"
+    detail = (proc.stdout or proc.stderr or "").strip().splitlines()
+    return False, "qpdf --check failed: " + (detail[0] if detail else f"rc={proc.returncode}")
+
+
 def verify_derivative(
     original: bytes,
     derivative: bytes,
@@ -252,7 +293,7 @@ def verify_derivative(
     names: set[str] = set()
     blobs: dict[str, bytes] = {}
     if derivative.startswith(b"%PDF-"):
-        fmt_ok, fmt_detail = True, "pdf magic"
+        fmt_ok, fmt_detail = _qpdf_check(derivative)
     elif kind == "container":
         names: set[str] = set()
         blobs: dict[str, bytes] = {}
