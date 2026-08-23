@@ -164,3 +164,64 @@ def test_manifest_carries_no_matter_name(env):
     manifest = c.get(f"/v1/matters/{matter['id']}/jobs/{job['id']}/manifest").json()
     blob = json.dumps(manifest)
     assert "Project Juniper" not in blob
+
+
+def test_audit_chain_cannot_fork_even_if_the_process_lock_is_bypassed(tmp_path):
+    """The regression this exists for: two writers that both read
+    max(seq) before either commits must not both succeed at inserting the
+    same (matter_id, seq) — that's a forked, no-longer-tamper-evident
+    chain. This deliberately bypasses audit.append_event's own
+    threading.Lock (two separate sessions racing on purpose) to prove the
+    *database* layer (BEGIN IMMEDIATE + the unique constraint) is what
+    actually prevents the fork, not just the in-process lock a second
+    worker process wouldn't share anyway."""
+    import threading
+
+    from app.config import Config
+    from app.db import make_engine, make_session_factory
+    from app.migrate import upgrade_head
+    from app.models import AuditEvent, Matter
+
+    cfg = Config(tmp_path / "data")
+    cfg.ensure_dirs()
+    upgrade_head(f"sqlite:///{cfg.db_path}")
+    engine = make_engine(cfg)
+    factory = make_session_factory(engine)
+
+    s0 = factory()
+    s0.add(Matter(id="m1", name="Race Matter"))
+    s0.commit()
+    s0.close()
+
+    results: list[str] = []
+    start = threading.Barrier(2)
+
+    def racer(actor: str):
+        s = factory()
+        try:
+            start.wait()  # maximize the chance both threads read seq=None together
+            last = s.query(AuditEvent).filter_by(matter_id="m1").count()
+            ev = AuditEvent(
+                matter_id="m1", seq=last, actor_id=actor, action="matter.create",
+                payload={}, prev_hash="0" * 64, row_hash=f"hash-{actor}",
+            )
+            s.add(ev)
+            s.commit()
+            results.append(f"{actor}:ok")
+        except Exception as e:
+            s.rollback()
+            results.append(f"{actor}:blocked({type(e).__name__})")
+        finally:
+            s.close()
+
+    threads = [threading.Thread(target=racer, args=(f"actor{i}",)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    s = factory()
+    rows = s.query(AuditEvent).filter_by(matter_id="m1").all()
+    seqs = [r.seq for r in rows]
+    assert len(seqs) == len(set(seqs)), f"duplicate seq values: {seqs} (results: {results})"
+    s.close()

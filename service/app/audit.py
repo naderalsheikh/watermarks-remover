@@ -2,9 +2,20 @@
 
 Tamper-evident: every event commits to its predecessor via
 sha256(prev_hash | seq | actor_id | action | canonical payload).
-Appends are serialized per matter with a process-local lock so concurrent
-jobs cannot fork the chain; gapless `seq` is the backstop and the
-recomputed-hash walk in verify_chain() is the detector.
+
+Three layers keep the chain from forking under concurrent appends:
+1. A process-local threading.Lock per matter (below) — fast, in-process
+   ordering for the common case.
+2. BEGIN IMMEDIATE on every write transaction (db.py's make_engine) — a
+   real database-level lock that also covers multiple processes sharing
+   the same SQLite file, which a Python-level lock cannot.
+3. A unique (matter_id, seq) constraint (models.AuditEvent) as the final
+   backstop: if two writers ever raced past both of the above, SQLite
+   refuses the second insert with IntegrityError instead of silently
+   creating two rows that claim the same seq.
+Gapless `seq` and the recomputed-hash walk in verify_chain() are what
+detect a chain that was tampered with after the fact, not what prevents
+one from forking during a race — that's what 1-3 are for.
 """
 
 from __future__ import annotations

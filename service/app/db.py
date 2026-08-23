@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import Config
@@ -16,9 +16,37 @@ class Base(DeclarativeBase):
 
 def make_engine(cfg: Config):
     cfg.data_root.mkdir(parents=True, exist_ok=True)
-    return create_engine(
+    engine = create_engine(
         f"sqlite:///{Path(cfg.db_path)}", connect_args={"check_same_thread": False}
     )
+
+    # Every write transaction acquires SQLite's write lock immediately
+    # instead of deferring it until the first write statement. Without this,
+    # audit.append_event's read-then-insert (max(seq), then INSERT seq+1)
+    # relied entirely on a Python threading.Lock to stay atomic — which only
+    # serializes writers *inside one process*. Two uvicorn worker processes
+    # (a normal production topology, not a hypothetical one) sharing this
+    # SQLite file could both read the same max(seq) before either commits
+    # and insert two rows claiming the same seq, forking the audit chain
+    # the design doc calls "tamper-evident" — silently, since SQLite's
+    # default deferred-lock mode lets both transactions proceed right up to
+    # the point of conflict instead of one blocking for the other's turn.
+    # BEGIN IMMEDIATE is the standard SQLAlchemy/pysqlite pattern for this
+    # exact scenario (concurrent writers to one SQLite file): it makes the
+    # second writer *block* until the first commits, rather than racing.
+    # The unique (matter_id, seq) constraint (see the migration alongside
+    # this change) is the backstop if that ever somehow isn't enough.
+    @event.listens_for(engine, "connect")
+    def _sqlite_manual_begin(dbapi_connection, _connection_record):
+        # Disable pysqlite's own implicit BEGIN so our "begin" listener
+        # below controls exactly when and how each transaction starts.
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine, "begin")
+    def _sqlite_begin_immediate(conn):
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+    return engine
 
 
 def make_session_factory(engine) -> sessionmaker[Session]:

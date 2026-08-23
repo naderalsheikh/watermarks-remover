@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, ForeignKey, String
+from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -50,11 +50,18 @@ class MatterAcl(Base):
 class AuditEvent(Base):
     """Per-matter tamper-evident log: sha256(prev_hash | seq | actor | action | payload).
 
-    Appends are serialized per matter (see app.audit) so seq is gapless and
-    the chain is total. `seq` — not the uuid `id` — defines chain order.
+    Appends are serialized per matter (see app.audit: a process-local lock
+    plus the engine's BEGIN IMMEDIATE, db.py) so seq is gapless and the
+    chain is total. `seq` — not the uuid `id` — defines chain order. The
+    unique (matter_id, seq) constraint is the database-level backstop: if
+    two writers ever raced past the application-level serialization (a
+    second worker process the lock can't see, a future bug), SQLite refuses
+    the second insert with an IntegrityError instead of silently forking
+    the chain with two rows claiming the same seq.
     """
 
     __tablename__ = "audit_events"
+    __table_args__ = (UniqueConstraint("matter_id", "seq", name="uq_audit_events_matter_seq"),)
 
     id: Mapped[str] = mapped_column(String(16), primary_key=True, default=_uuid)
     matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), index=True)
