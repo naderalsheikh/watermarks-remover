@@ -1824,12 +1824,88 @@ _DOCX_ACCEPT_DROP = frozenset(
 # accepted insertion.)
 _W_TR = _W_NS + "tr"
 _W_TRPR = _W_NS + "trPr"
-_W_ROW_DEL = _W_NS + "del"
+_W_DEL = _W_NS + "del"  # {...}del — the QName both row and paragraph-mark
+# deletion markers use; only their *parent* (w:trPr vs w:pPr/w:rPr) differs.
 
 
 def _row_marked_deleted(tr_elem) -> bool:
     trpr = tr_elem.find(_W_TRPR)
-    return trpr is not None and trpr.find(_W_ROW_DEL) is not None
+    return trpr is not None and trpr.find(_W_DEL) is not None
+
+
+# Paragraph-mark deletion: <w:p><w:pPr><w:rPr><w:del/></w:rPr></w:pPr>...</w:p>.
+# Word's Accept All merges this paragraph into the *next* one (deleting the
+# mark means "no break here anymore") — the mark's own w:del is generically
+# dropped by _DOCX_ACCEPT_DROP either way, but dropping only the marker
+# leaves two separate <w:p> elements where Word would show one, a fidelity
+# gap independent of any privacy concern (no content is hidden either way).
+_W_P = _W_NS + "p"
+_W_PPR = _W_NS + "pPr"
+_W_RPR = _W_NS + "rPr"
+_W_SECTPR = _W_NS + "sectPr"
+
+
+def _para_mark_deleted(p_elem) -> bool:
+    ppr = p_elem.find(_W_PPR)
+    if ppr is None:
+        return False
+    rpr = ppr.find(_W_RPR)
+    return rpr is not None and rpr.find(_W_DEL) is not None
+
+
+def _para_has_sectpr(p_elem) -> bool:
+    ppr = p_elem.find(_W_PPR)
+    return ppr is not None and ppr.find(_W_SECTPR) is not None
+
+
+def _merge_deleted_paragraph_marks_scoped(
+    children: list, deleted_ids: set[int]
+) -> tuple[list, int]:
+    """Merge each <w:p> whose ending mark was deleted into the following
+    sibling <w:p>, matching Word's Accept All.
+
+    ``deleted_ids`` is id(child) for paragraphs detected *before* the
+    generic drop pass consumed their w:pPr/w:rPr/w:del marker — by the time
+    this runs, that marker is already gone from every paragraph's own tree,
+    so membership in this set is the only surviving signal.
+
+    Conservative on purpose: only merges when the next sibling is also a
+    plain <w:p> and neither paragraph's pPr carries a w:sectPr (a section
+    break folded into a merge risks silently dropping page/section layout,
+    which is a worse outcome than leaving two paragraphs instead of one).
+    Anything that doesn't meet those conditions stays unmerged (its marker
+    is still stripped by the generic drop pass either way).
+
+    OOXML ordering: w:pPr, if present, must be <w:p>'s first child. The
+    merged paragraph takes the *next* paragraph's own pPr — properties
+    belong to the mark at a paragraph's end, and it's the deleted
+    paragraph's mark that's gone, not the next one's.
+    """
+    out: list = []
+    merged = 0
+    i = 0
+    n = len(children)
+    while i < n:
+        child = children[i]
+        if (
+            child.tag == _W_P
+            and id(child) in deleted_ids
+            and not _para_has_sectpr(child)
+            and i + 1 < n
+            and children[i + 1].tag == _W_P
+            and not _para_has_sectpr(children[i + 1])
+        ):
+            nxt = children[i + 1]
+            this_content = [c for c in child if c.tag != _W_PPR]
+            nxt_ppr = nxt.find(_W_PPR)
+            nxt_content = [c for c in nxt if c.tag != _W_PPR]
+            nxt[:] = ([nxt_ppr] if nxt_ppr is not None else []) + this_content + nxt_content
+            merged += 1
+            i += 1  # skip `child` — it merged into nxt, which is appended below
+            continue
+        out.append(child)
+        i += 1
+    return out, merged
 _DOCX_COMMENT_MARKER_TAGS = frozenset(
     {_W_NS + "commentRangeStart", _W_NS + "commentRangeEnd", _W_NS + "commentReference"}
 )
@@ -1916,10 +1992,14 @@ def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
     except ET.ParseError:
         return None
 
-    stats = {"unwrapped": 0, "dropped": 0, "markers": 0, "rows_deleted": 0}
+    stats = {
+        "unwrapped": 0, "dropped": 0, "markers": 0,
+        "rows_deleted": 0, "paragraphs_merged": 0,
+    }
 
     def walk(elem) -> None:
         kept = []
+        para_mark_deleted: set[int] = set()  # id(child) for pre-walk detection
         for child in list(elem):
             tag = child.tag
             if tag == _W_TR and _row_marked_deleted(child):
@@ -1928,6 +2008,12 @@ def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
                 # path below is wrong for this one case.
                 stats["rows_deleted"] += 1
                 continue
+            if tag == _W_P and _para_mark_deleted(child):
+                # Must check *before* walk(child) below: the marker lives at
+                # w:pPr/w:rPr/w:del, the same QName the generic drop pass
+                # below removes on sight, which would erase the signal this
+                # paragraph needs to merge with its next sibling.
+                para_mark_deleted.add(id(child))
             if tag in _DOCX_ACCEPT_DROP:
                 stats["dropped"] += 1
                 continue
@@ -1941,6 +2027,13 @@ def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
                 stats["unwrapped"] += 1
             else:
                 kept.append(child)
+        if para_mark_deleted:
+            # Re-derive from `kept` (post-walk objects, same identities as
+            # pre-walk since walk() mutates in place rather than replacing).
+            marked = [c for c in kept if id(c) in para_mark_deleted]
+            if marked:
+                kept, n = _merge_deleted_paragraph_marks_scoped(kept, para_mark_deleted)
+                stats["paragraphs_merged"] += n
         elem[:] = kept
 
     walk(root)

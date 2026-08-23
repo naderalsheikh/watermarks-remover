@@ -463,3 +463,64 @@ def _docx_from_document_xml(document_xml: bytes) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("word/document.xml", document_xml)
     return buf.getvalue()
+
+
+# --- Accept All: paragraph-mark merges ---------------------------------------
+
+_DEL_MARK = '<w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/>'
+
+
+def _body_doc(body_xml: str) -> bytes:
+    return f'<?xml version="1.0"?><w:document {_W}><w:body>{body_xml}</w:body></w:document>'.encode()
+
+
+def test_deleted_paragraph_mark_merges_into_the_next_paragraph():
+    """Word's Accept All merges a paragraph into its successor when the
+    paragraph's ending mark was deleted — dropping only the w:del marker
+    (the generic tag-drop path) left two separate paragraphs where Word
+    would show one."""
+    xml = _body_doc(
+        f'<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>First sentence.</w:t></w:r></w:p>'
+        '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t> Second sentence.</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>Third, untouched.</w:t></w:r></w:p>'
+    )
+    out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
+    text = out.decode()
+    assert stats["paragraphs_merged"] == 1
+    assert text.count("<w:p>") == 2
+    assert "First sentence." in text and "Second sentence." in text
+    assert "Third, untouched." in text
+    # merged paragraph keeps the *next* paragraph's own properties
+    assert '<w:jc w:val="center"' in text
+
+
+def test_paragraph_merge_skips_when_either_side_has_a_section_break():
+    xml = _body_doc(
+        f'<w:p><w:pPr><w:sectPr/><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>A</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>B</w:t></w:r></w:p>'
+    )
+    out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
+    text = out.decode()
+    assert stats["paragraphs_merged"] == 0
+    assert text.count("<w:p>") == 2
+    assert "<w:sectPr" in text, "section break must survive, not be silently dropped"
+
+
+def test_paragraph_merge_on_last_paragraph_does_not_crash():
+    xml = _body_doc(f'<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>only paragraph</w:t></w:r></w:p>')
+    out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
+    assert stats["paragraphs_merged"] == 0
+    assert "only paragraph" in out.decode()
+
+
+def test_chained_paragraph_mark_deletions_merge_in_one_pass():
+    xml = _body_doc(
+        f'<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>A </w:t></w:r></w:p>'
+        f'<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>B </w:t></w:r></w:p>'
+        '<w:p><w:r><w:t>C</w:t></w:r></w:p>'
+    )
+    out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
+    text = out.decode()
+    assert stats["paragraphs_merged"] == 2
+    assert text.count("<w:p>") == 1
+    assert "A " in text and "B " in text and "C" in text
