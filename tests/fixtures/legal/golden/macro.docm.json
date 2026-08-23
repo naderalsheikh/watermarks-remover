@@ -35,6 +35,7 @@
   "report": {
     "details": {
       "docx_legal": {
+        "cell_revisions": 0,
         "comment_count": 0,
         "comment_markers": 0,
         "comment_parts": [],
@@ -44,7 +45,8 @@
         "hidden_highlight": 0,
         "hidden_vanish": 0,
         "hidden_white": 0,
-        "insertions": 0
+        "insertions": 0,
+        "row_deletions": 0
       },
       "parts": 3,
       "unsupported": true

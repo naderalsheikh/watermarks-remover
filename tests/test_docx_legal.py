@@ -364,3 +364,102 @@ def test_accept_all_namespace_registration_survives_concurrent_documents():
 
     assert not errors, f"register_namespace race crashed {len(errors)} calls: {errors[:3]}"
     assert all(results), "a document's own prefix must survive concurrent siblings"
+
+
+# --- Accept All: missing revision markers -----------------------------------
+
+_W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+
+def _table_doc(rows_xml: str) -> bytes:
+    return f'<?xml version="1.0"?><w:document {_W}><w:body><w:tbl>{rows_xml}</w:tbl></w:body></w:document>'.encode()
+
+
+def test_accept_all_removes_a_deleted_row_and_its_visible_text():
+    """w:trPr/w:del marks the whole ROW deleted, not just the marker element.
+    Dropping only the marker (the generic tag-drop path) left a deleted
+    row's cell text fully visible after Accept All."""
+    xml = _table_doc(
+        '<w:tr><w:tc><w:p><w:r><w:t>keep me</w:t></w:r></w:p></w:tc></w:tr>'
+        '<w:tr><w:trPr><w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr>'
+        '<w:tc><w:p><w:r><w:t>PRIVILEGED SETTLEMENT TERMS</w:t></w:r></w:p></w:tc></w:tr>'
+    )
+    out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
+    text = out.decode()
+    assert "PRIVILEGED SETTLEMENT TERMS" not in text
+    assert "keep me" in text
+    assert stats["rows_deleted"] == 1
+    assert text.count("<w:tr>") == 1
+
+
+def test_accept_all_keeps_an_inserted_row():
+    """w:trPr/w:ins is the mirror case: accepting an insertion means the row
+    (and its properties marker, now unremarkable) stays."""
+    xml = _table_doc(
+        '<w:tr><w:trPr><w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr>'
+        '<w:tc><w:p><w:r><w:t>newly added row</w:t></w:r></w:p></w:tc></w:tr>'
+    )
+    out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
+    text = out.decode()
+    assert "newly added row" in text
+    assert text.count("<w:tr>") == 1
+    assert stats["rows_deleted"] == 0
+
+
+def test_accept_all_drops_property_change_and_range_bookmark_markers():
+    xml = (
+        f'<?xml version="1.0"?><w:document {_W}><w:body>'
+        '<w:p><w:moveFromRangeStart w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z" w:name="m"/>'
+        '<w:r><w:t>body text</w:t></w:r>'
+        '<w:moveFromRangeEnd w:id="1"/>'
+        '<w:moveToRangeStart w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z" w:name="m2"/>'
+        '<w:moveToRangeEnd w:id="2"/>'
+        '<w:customXmlInsRangeStart w:id="3" w:author="A" w:date="2026-01-01T00:00:00Z"/>'
+        '<w:customXmlInsRangeEnd w:id="3"/>'
+        '<w:customXmlDelRangeStart w:id="4" w:author="A" w:date="2026-01-01T00:00:00Z"/>'
+        '<w:customXmlDelRangeEnd w:id="4"/>'
+        "</w:p>"
+        '<w:tbl><w:tblGrid><w:tblGridChange w:id="5"><w:tblGrid><w:gridCol w:w="1"/></w:tblGrid>'
+        "</w:tblGridChange></w:tblGrid>"
+        '<w:tr><w:trPr><w:trPrChange w:id="6" w:author="A" w:date="2026-01-01T00:00:00Z">'
+        "<w:trPr/></w:trPrChange></w:trPr>"
+        '<w:tc><w:tcPr><w:tcPrChange w:id="7" w:author="A" w:date="2026-01-01T00:00:00Z">'
+        "<w:tcPr/></w:tcPrChange></w:tcPr>"
+        "<w:p><w:r><w:t>cell text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+        "</w:body></w:document>"
+    ).encode()
+    out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
+    text = out.decode()
+    for tag in (
+        "moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd",
+        "customXmlInsRangeStart", "customXmlInsRangeEnd",
+        "customXmlDelRangeStart", "customXmlDelRangeEnd",
+        "tblGridChange", "trPrChange", "tcPrChange",
+    ):
+        assert f"<w:{tag}" not in text, f"{tag} should have been dropped"
+    assert "body text" in text and "cell text" in text
+    assert stats["dropped"] == 11
+
+
+def test_cell_level_revisions_are_flagged_not_silently_dropped():
+    """cellIns/cellDel/cellMerge are not auto-resolved (grid-span surgery
+    risks an unopenable document) but must not be invisible either."""
+    xml = (
+        f'<?xml version="1.0"?><w:document {_W}><w:body><w:tbl><w:tr>'
+        '<w:tc><w:tcPr><w:cellDel w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:tcPr>'
+        "<w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc>"
+        "</w:tr></w:tbl></w:body></w:document>"
+    ).encode()
+    with zipfile.ZipFile(io.BytesIO(_docx_from_document_xml(xml))) as zf:
+        report, findings = container_meta._inspect_docx_legal(zf, [0])
+    assert report["cell_revisions"] == 1
+    assert any("cell-revisions" in f for f in findings)
+
+
+def _docx_from_document_xml(document_xml: bytes) -> bytes:
+    """Minimal valid docx wrapping just word/document.xml, for tests that
+    only need _inspect_docx_legal's zip-walking behaviour."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", document_xml)
+    return buf.getvalue()

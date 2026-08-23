@@ -1064,6 +1064,8 @@ _DOCX_COMMENT_PARTS = (
 _DOCX_INS_RE = re.compile(rb"<w:(?:ins|moveTo)\b")
 _DOCX_DEL_RE = re.compile(rb"<w:(?:del|moveFrom|delText)\b")
 _DOCX_FMT_CHANGE_RE = re.compile(rb"<w:(?:rPrChange|pPrChange|sectPrChange|tblPrChange)\b")
+_DOCX_ROW_DEL_RE = re.compile(rb"<w:trPr\b[^>]*>(?:(?!</w:trPr>).)*?<w:del\b", re.S)
+_DOCX_CELL_REVISION_RE = re.compile(rb"<w:(?:cellIns|cellDel|cellMerge)\b")
 _DOCX_VANISH_RE = re.compile(rb"<w:vanish\b")
 _DOCX_WHITE_RE = re.compile(rb'<w:color\b[^>]*w:val="[Ff]{6}"')
 _DOCX_HIGHLIGHT_RE = re.compile(rb"<w:highlight\b")
@@ -1071,7 +1073,22 @@ _DOCX_COMMENT_MARKER_RE = re.compile(rb"<w:(?:commentRangeStart|commentRangeEnd|
 # Anything that makes a part worth an XML-aware pass on clean.
 _DOCX_LEGAL_MARKUP_RE = re.compile(
     rb"<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange"
-    rb"|tblPrChange|delText|commentRangeStart|commentRangeEnd|commentReference)\b"
+    rb"|tblPrChange|delText|commentRangeStart|commentRangeEnd|commentReference"
+    # Same "worth an XML-aware pass" gate, extended for the row/cell/grid
+    # change wrappers and range bookmarks _DOCX_ACCEPT_DROP now handles —
+    # a part carrying only these and nothing from the list above would
+    # otherwise never reach _docx_accept_all at all, silently making those
+    # drop entries dead code for such a part.
+    rb"|trPrChange|tcPrChange|tblGridChange"
+    rb"|moveFromRangeStart|moveFromRangeEnd|moveToRangeStart|moveToRangeEnd"
+    rb"|customXmlInsRangeStart|customXmlInsRangeEnd"
+    rb"|customXmlDelRangeStart|customXmlDelRangeEnd"
+    # Cell-level revision markers: not auto-resolved (see _inspect_docx_legal
+    # — cell-grid surgery risks producing a document Word can't open, so
+    # these are surfaced as a finding for manual review, not auto-fixed),
+    # but a part carrying them still deserves the XML-aware pass for
+    # whatever else it contains.
+    rb"|cellIns|cellDel|cellMerge)\b"
 )
 
 
@@ -1094,6 +1111,7 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         raw = _read_zip_member(zf, zf.getinfo("word/comments.xml"), budget)
         comment_count = len(re.findall(rb"<w:comment\b", raw))
     ins = de = fmt_changes = vanish = white = highlight = markers = embeddings = 0
+    row_dels = cell_revs = 0
     for info in zf.infolist():
         name = info.filename
         if name.startswith("word/embeddings/"):
@@ -1108,6 +1126,8 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         white += len(_DOCX_WHITE_RE.findall(raw))
         highlight += len(_DOCX_HIGHLIGHT_RE.findall(raw))
         markers += len(_DOCX_COMMENT_MARKER_RE.findall(raw))
+        row_dels += len(_DOCX_ROW_DEL_RE.findall(raw))
+        cell_revs += len(_DOCX_CELL_REVISION_RE.findall(raw))
     report = {
         "comment_parts": comment_parts,
         "comment_count": comment_count,
@@ -1119,6 +1139,8 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         "hidden_highlight": highlight,
         "comment_markers": markers,
         "embeddings": embeddings,
+        "row_deletions": row_dels,
+        "cell_revisions": cell_revs,
     }
     findings: list[str] = []
     if comment_parts:
@@ -1126,6 +1148,16 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
     if ins or de or fmt_changes:
         findings.append(
             f"docx-tracked-changes: insertions={ins} deletions={de} format-changes={fmt_changes}"
+        )
+    if cell_revs:
+        # Not auto-resolved: cell-level insert/delete/merge changes carry
+        # w:gridSpan / w:tblGrid implications that risk producing a table
+        # Word cannot open if collapsed automatically without full grid
+        # modeling. Flagged for manual review rather than silently ignored
+        # or silently mis-fixed.
+        findings.append(
+            f"docx-cell-revisions: {cell_revs} cell insert/delete/merge marker(s) "
+            "(not auto-resolved by Accept All; review before sharing)"
         )
     if vanish or white or highlight:
         findings.append(f"docx-hidden-text: vanish={vanish} white={white} highlight={highlight}")
@@ -1758,8 +1790,46 @@ _DOCX_ACCEPT_DROP = frozenset(
         _W_NS + "sectPrChange",
         _W_NS + "tblPrChange",
         _W_NS + "delText",
+        # Property-change wrappers at the row/cell/grid level — same pattern
+        # as pPrChange/tblPrChange above (drop the "previous properties"
+        # record, keep the current ones). Previously missing: a document
+        # with row/cell formatting changes carried this markup through
+        # Accept All untouched.
+        _W_NS + "trPrChange",
+        _W_NS + "tcPrChange",
+        _W_NS + "tblGridChange",
+        # Move-range bookmarks. The moved *content* lives in a separate
+        # w:moveFrom/w:moveTo wrapper (already handled below); these are
+        # empty position markers around it and carry no content of their
+        # own once the move is resolved.
+        _W_NS + "moveFromRangeStart",
+        _W_NS + "moveFromRangeEnd",
+        _W_NS + "moveToRangeStart",
+        _W_NS + "moveToRangeEnd",
+        # Custom-XML tracked-change range bookmarks — same shape as the
+        # move-range markers above: empty, position-only.
+        _W_NS + "customXmlInsRangeStart",
+        _W_NS + "customXmlInsRangeEnd",
+        _W_NS + "customXmlDelRangeStart",
+        _W_NS + "customXmlDelRangeEnd",
     }
 )
+
+# w:trPr/w:del marks an entire table row as deleted. Unlike every tag in
+# _DOCX_ACCEPT_DROP above, dropping *this* element alone is wrong: it only
+# removes the marker, leaving the row — and all its visible cell text —
+# behind untouched. Accepting a row deletion means removing the row itself.
+# (w:trPr/w:ins needs no special case: the generic drop of the w:ins marker
+# already leaves the row in place, which is the correct outcome for an
+# accepted insertion.)
+_W_TR = _W_NS + "tr"
+_W_TRPR = _W_NS + "trPr"
+_W_ROW_DEL = _W_NS + "del"
+
+
+def _row_marked_deleted(tr_elem) -> bool:
+    trpr = tr_elem.find(_W_TRPR)
+    return trpr is not None and trpr.find(_W_ROW_DEL) is not None
 _DOCX_COMMENT_MARKER_TAGS = frozenset(
     {_W_NS + "commentRangeStart", _W_NS + "commentRangeEnd", _W_NS + "commentReference"}
 )
@@ -1846,12 +1916,18 @@ def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
     except ET.ParseError:
         return None
 
-    stats = {"unwrapped": 0, "dropped": 0, "markers": 0}
+    stats = {"unwrapped": 0, "dropped": 0, "markers": 0, "rows_deleted": 0}
 
     def walk(elem) -> None:
         kept = []
         for child in list(elem):
             tag = child.tag
+            if tag == _W_TR and _row_marked_deleted(child):
+                # The whole row goes, not just its w:trPr/w:del marker — see
+                # _row_marked_deleted's docstring for why the generic drop
+                # path below is wrong for this one case.
+                stats["rows_deleted"] += 1
+                continue
             if tag in _DOCX_ACCEPT_DROP:
                 stats["dropped"] += 1
                 continue
