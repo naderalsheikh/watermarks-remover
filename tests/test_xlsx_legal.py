@@ -482,3 +482,21 @@ def test_hidden_col_checks_the_value_not_just_presence():
     assert xlsx_legal._HIDDEN_COL_RE.search('<col hidden="1"/>')
     assert xlsx_legal._HIDDEN_COL_RE.search("<col hidden='1'/>")
     assert not xlsx_legal._HIDDEN_COL_RE.search('<col hidden="0"/>')
+
+
+def test_scan_xlsx_legal_rejects_decompression_bomb_instead_of_absorbing_it():
+    """scan_xlsx_legal used a bare zf.read(info) wrapped in a broad
+    suppress(Exception) — a member that decompresses past the budget was
+    silently skipped and reported as though the file scanned cleanly,
+    instead of the whole scan refusing like every other OOXML inspector
+    does for the same ZipBudgetExceeded signal."""
+    import container_meta
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        zf.writestr("xl/workbook.xml", b"\x00" * (200 * 1024 * 1024))
+    data = buf.getvalue()
+    assert len(data) < 1_000_000
+
+    with pytest.raises(container_meta.ZipBudgetExceeded):
+        xlsx_legal.scan_xlsx_legal(data)

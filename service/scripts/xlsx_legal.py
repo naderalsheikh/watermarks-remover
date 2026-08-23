@@ -14,7 +14,6 @@ flagging and policy decisions, not OOXML schema validation.
 
 from __future__ import annotations
 
-import contextlib
 import io
 import re
 import zipfile
@@ -124,13 +123,28 @@ def scan_xlsx_legal(data: bytes) -> dict[str, Any]:
         "core_info": None,
     }
 
+    # Real-bytes-charged decompression budget, same as every other OOXML
+    # inspector in container_meta.py — this function previously used a bare
+    # zf.read(info) with no cap, and wrapped it in `suppress(Exception)`,
+    # which would have silently swallowed ZipBudgetExceeded as if the
+    # member were merely corrupt rather than a decompression bomb. Other
+    # inspectors let that exception propagate as a hard refusal
+    # ("refusing to process") — this now matches that, instead of quietly
+    # reporting a bomb-truncated file as though it scanned cleanly.
+    import container_meta
+
+    budget: list[int] = [0]
     members: dict[str, bytes] = {}
     with zf:
         for info in zf.infolist():
             if not any(rx.match(info.filename) for rx in _INTERESTING_PART_RES):
                 continue
-            with contextlib.suppress(Exception):
-                members[info.filename] = zf.read(info)  # corrupt member: skipped
+            try:
+                members[info.filename] = container_meta._read_zip_member(zf, info, budget)
+            except container_meta.ZipBudgetExceeded:
+                raise  # a bomb, not a corrupt member — must propagate, not be skipped
+            except container_meta._ZIP_PARSE_ERRORS:
+                pass  # corrupt member: skipped, same tolerance as every other inspector
 
     workbook = next((blob for name, blob in members.items() if _WORKBOOK_PART_RE.match(name)), b"")
     if workbook:
