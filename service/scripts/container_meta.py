@@ -5,10 +5,12 @@ Stdlib-first; PDF prefers optional exiftool/c2patool when present.
 """
 
 import base64
+import contextlib
 import io
 import posixpath
 import re
 import subprocess
+import threading
 import urllib.parse
 import zipfile
 import zlib
@@ -1765,25 +1767,66 @@ _XMLNS_PREFIXED_RE = re.compile(r'xmlns:([\w.\-]+)="([^"]+)"')
 _XMLNS_DEFAULT_RE = re.compile(r'xmlns="([^"]+)"')
 
 
-def _register_declared_namespaces(xml_bytes: bytes) -> None:
-    """Preserve the document's namespace prefixes across an ElementTree round trip.
+# xml.etree.ElementTree.register_namespace mutates process-global state with
+# no locking of its own — internally it snapshots _namespace_map.items(),
+# then deletes stale entries from the live dict, which is not safe if
+# another thread mutates the same dict in between. server.py serves every
+# request from a ThreadingHTTPServer — genuinely concurrent threads, not
+# just sequential calls. Reproduced under contention (sys.setswitchinterval
+# turned way up, many threads hammering accept_all concurrently): a bare
+# KeyError raised *inside* ET.register_namespace itself, crashing whichever
+# request's thread hit the race — not silent corruption, a stdlib crash. A
+# save/restore alone does not prevent that race; only serializing the whole
+# register-then-tostring critical section behind a lock does.
+_NAMESPACE_REGISTRATION_LOCK = threading.Lock()
 
-    Without registration the serializer renames every prefix to ns0/ns1/...,
-    which Word tolerates but mc:Ignorable does not — prefixed attributes
-    (w14:paraId & co) would reference undeclared prefixes.
+
+@contextlib.contextmanager
+def _scoped_namespace_registration(xml_bytes: bytes):
+    """Preserve the document's namespace prefixes across an ElementTree round
+    trip, without leaking into any other document processed by the same
+    interpreter.
+
+    ``ET.register_namespace`` mutates ``xml.etree.ElementTree._namespace_map``
+    — module-global, process-wide state, not scoped to one call. Two DOCX
+    parts that happen to use the same prefix name for different namespace
+    URIs (which real files are not required to avoid — different Word
+    builds and third-party generators vary) collide in that shared dict.
+    Reproduced: register ("w14", URI_A), then register ("w14", URI_B) — a
+    document already holding URI_A elements now re-serializes them under an
+    auto-generated `ns0` prefix instead of `w14`, because the map briefly
+    holds two URIs claiming the same prefix. That is exactly the failure
+    this function exists to prevent, and it fires without touching the
+    *same* document again: any two documents sharing a process (the
+    still-shipped prototype `server.py` is one long-lived process handling
+    every request; a batch script or test run calling this repeatedly is
+    another) can corrupt each other's namespace prefixes.
+
+    Fix: snapshot the map, register, serialize *inside this context*, then
+    restore the snapshot — so registrations from one call never survive to
+    affect another, regardless of what runs before or after in the same
+    process.
     """
     import xml.etree.ElementTree as ET
 
-    head = xml_bytes[:16384].decode("utf-8", errors="replace")
-    seen: set[tuple[str, str]] = set()
-    for prefix, uri in _XMLNS_PREFIXED_RE.findall(head):
-        if (prefix, uri) not in seen:
-            ET.register_namespace(prefix, uri)
-            seen.add((prefix, uri))
-    for uri in _XMLNS_DEFAULT_RE.findall(head):
-        if ("", uri) not in seen:
-            ET.register_namespace("", uri)
-            seen.add(("", uri))
+    _NAMESPACE_REGISTRATION_LOCK.acquire()
+    snapshot = dict(ET._namespace_map)
+    try:
+        head = xml_bytes[:16384].decode("utf-8", errors="replace")
+        seen: set[tuple[str, str]] = set()
+        for prefix, uri in _XMLNS_PREFIXED_RE.findall(head):
+            if (prefix, uri) not in seen:
+                ET.register_namespace(prefix, uri)
+                seen.add((prefix, uri))
+        for uri in _XMLNS_DEFAULT_RE.findall(head):
+            if ("", uri) not in seen:
+                ET.register_namespace("", uri)
+                seen.add(("", uri))
+        yield
+    finally:
+        ET._namespace_map.clear()
+        ET._namespace_map.update(snapshot)
+        _NAMESPACE_REGISTRATION_LOCK.release()
 
 
 def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
@@ -1825,8 +1868,8 @@ def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
         elem[:] = kept
 
     walk(root)
-    _register_declared_namespaces(xml_bytes)
-    out = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    with _scoped_namespace_registration(xml_bytes):
+        out = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
     return out, stats
 
 

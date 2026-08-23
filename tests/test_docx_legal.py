@@ -286,3 +286,81 @@ def test_findings_project_docx_legal_signals():
     assert by_subtype["hidden_text_formatting"].category == "invisible_text"
     assert by_subtype["hidden_text_formatting"].content_visible is False
     assert by_subtype["comments_and_notes"].action_recommended == "strip"
+
+
+def test_accept_all_namespace_registration_does_not_leak_across_documents():
+    """xml.etree.ElementTree.register_namespace mutates module-global state.
+    Two documents that happen to use the same prefix name for different
+    namespace URIs — real files are not required to avoid this — must not
+    corrupt each other's serialization when processed in the same process
+    (the still-shipped prototype server.py is exactly such a process: one
+    long-lived interpreter handling every request)."""
+    import xml.etree.ElementTree as ET
+
+    def part(prefix: str, uri: str) -> bytes:
+        return (
+            f'<?xml version="1.0"?><w:document '
+            f'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            f'xmlns:{prefix}="{uri}"><w:body><w:p><w:r {prefix}:paraId="1">'
+            f"<w:t>hello</w:t></w:r></w:p></w:body></w:document>"
+        ).encode()
+
+    before = dict(ET._namespace_map)
+    out_a1, _ = container_meta._docx_accept_all(
+        part("w14", "urn:doc-A"), strip_comment_markers=False
+    )
+    container_meta._docx_accept_all(part("w14", "urn:doc-B"), strip_comment_markers=False)
+    out_a2, _ = container_meta._docx_accept_all(
+        part("w14", "urn:doc-A"), strip_comment_markers=False
+    )
+
+    assert b'xmlns:w14="urn:doc-A"' in out_a1
+    assert b'xmlns:w14="urn:doc-A"' in out_a2, (
+        "doc A's own prefix must survive an unrelated doc B being processed "
+        "in between, not degrade to an auto-generated ns0/ns1"
+    )
+    assert dict(ET._namespace_map) == before, "global namespace map must be restored"
+
+
+def test_accept_all_namespace_registration_survives_concurrent_documents():
+    """Under contention, unsynchronized ET.register_namespace access can raise
+    KeyError from inside the stdlib itself (it snapshots-then-deletes on the
+    shared dict), not just silently corrupt a prefix. server.py's
+    ThreadingHTTPServer makes this a real, not hypothetical, concurrent path."""
+    import concurrent.futures
+    import sys
+
+    def part(prefix: str, uri: str) -> bytes:
+        return (
+            f'<?xml version="1.0"?><w:document '
+            f'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+            f'xmlns:{prefix}="{uri}"><w:body><w:p><w:r {prefix}:paraId="1">'
+            f"<w:t>hello</w:t></w:r></w:p></w:body></w:document>"
+        ).encode()
+
+    def process(i: int) -> tuple[int, bool]:
+        uri = f"urn:doc-{i}"
+        out, _ = container_meta._docx_accept_all(
+            part("wX", uri), strip_comment_markers=False
+        )
+        return i, f'xmlns:wX="{uri}"'.encode() in out
+
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # widen the race window as far as possible
+    try:
+        errors = []
+
+        def safe(i: int) -> bool:
+            try:
+                return process(i)[1]
+            except Exception as e:  # the bug manifests as a raw stdlib KeyError
+                errors.append(e)
+                return False
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
+            results = list(ex.map(safe, range(1500)))
+    finally:
+        sys.setswitchinterval(old_interval)
+
+    assert not errors, f"register_namespace race crashed {len(errors)} calls: {errors[:3]}"
+    assert all(results), "a document's own prefix must survive concurrent siblings"
