@@ -231,3 +231,35 @@ def test_audit_chain_and_download_original_perm(client):
         walk = nxt
         seen += 1
     assert seen == len(events) == len(by_hash)
+
+
+def test_unpinned_docker_worker_fails_the_job_instead_of_500ing(tmp_path, monkeypatch):
+    """compose.yaml's own default is COUNSELCLEAR_WORKER_MODE=docker with
+    COUNSELCLEAR_WORKER_IMAGE unset (${VAR:-}) — build_docker_cmd's
+    ValueError on an unpinned image used to fire after job.status was
+    already committed to "running" and outside the runner's try block, so
+    it propagated as an unhandled 500 with the job stuck at "running"
+    forever. Reproduced against the real HTTP path, not a unit test of the
+    command builder alone."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw")
+    monkeypatch.setenv("COUNSELCLEAR_WORKER_MODE", "docker")
+    monkeypatch.setenv("COUNSELCLEAR_WORKER_IMAGE", "")
+    from app.main import create_app
+
+    c = TestClient(create_app(tmp_path / "d"), raise_server_exceptions=False)
+    c.post("/v1/auth/login", json={"password": "pw"})
+    matter = c.post("/v1/matters", json={"name": "m"}).json()
+    doc = c.post(
+        f"/v1/matters/{matter['id']}/documents",
+        files={"file": ("spa.txt", (FIXTURES / "spa.txt").read_bytes(), "text/plain")},
+    ).json()
+
+    r = c.post(f"/v1/matters/{matter['id']}/documents/{doc['id']}/inspect-jobs")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "failed"
+    assert "digest-pinned" in body["error"]
+
+    # and the job row itself must not be stuck at "running"
+    r2 = c.get(f"/v1/matters/{matter['id']}/jobs/{body['id']}")
+    assert r2.json()["status"] == "failed"

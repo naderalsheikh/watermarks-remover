@@ -180,24 +180,33 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize") -> Run
         input_path=staged_input, output_dir=output_dir, kind=kind,
         policy_id=job.policy_id, attest=bool(job.attestation), matter_id=job.matter_id,
     )
-    if cfg.worker_mode == "docker":
-        cmd = build_docker_cmd(cfg, mount_root=root, **common)
-        env_args: list[str] = []
-        cwd: str | None = None
-    else:
-        cmd = build_subprocess_cmd(**common)
-        # Child needs `app` importable regardless of how the API was started.
-        env_args = [f"PYTHONPATH={SERVICE_DIR}"]
-        cwd = str(SERVICE_DIR)
-
     import os
 
-    env = dict(os.environ)
-    for kv in env_args:
-        k, _, v = kv.partition("=")
-        env[k] = v + os.pathsep + env.get(k, "")
-    timeout = min(cfg.worker_timeout_s, job_budget_s(kind))
     try:
+        # Building the command (build_docker_cmd in particular: it raises
+        # ValueError on an unpinned/empty COUNSELCLEAR_WORKER_IMAGE — exactly
+        # compose.yaml's own ${COUNSELCLEAR_WORKER_IMAGE:-} default) used to
+        # sit outside this try block, after job.status was already committed
+        # to "running". That exception then propagated all the way up through
+        # the route handler as an unhandled 500 — sync_job was never reached,
+        # so the job stayed "running" forever with no error recorded and no
+        # way for the operator to tell it had failed. Reproduced directly
+        # against the real HTTP path before this fix.
+        if cfg.worker_mode == "docker":
+            cmd = build_docker_cmd(cfg, mount_root=root, **common)
+            env_args: list[str] = []
+            cwd: str | None = None
+        else:
+            cmd = build_subprocess_cmd(**common)
+            # Child needs `app` importable regardless of how the API started.
+            env_args = [f"PYTHONPATH={SERVICE_DIR}"]
+            cwd = str(SERVICE_DIR)
+
+        env = dict(os.environ)
+        for kv in env_args:
+            k, _, v = kv.partition("=")
+            env[k] = v + os.pathsep + env.get(k, "")
+        timeout = min(cfg.worker_timeout_s, job_budget_s(kind))
         proc = subprocess.run(
             cmd,
             cwd=cwd,
@@ -217,6 +226,16 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize") -> Run
         tail = ((e.stderr or b"").decode(errors="replace"))[-1000:]
         return RunnerResult(
             rc=-1, stderr_tail=tail or "worker timed out", timed_out=True, output_dir=output_dir,
+        )
+    except Exception as e:
+        # Any other setup/launch failure (bad worker config, missing docker
+        # binary, permission error, ...) is a failed job, not an unhandled
+        # 500 with the job stuck at "running" forever.
+        return RunnerResult(
+            rc=-1,
+            stderr_tail=f"{type(e).__name__}: {e}"[-1000:],
+            timed_out=False,
+            output_dir=output_dir,
         )
     finally:
         # The real original stays at doc.storage_path; this was only ever a
