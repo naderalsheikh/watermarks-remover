@@ -309,3 +309,46 @@ def test_qpdf_check_rejects_a_damaged_pdf():
 
     if _shutil.which("qpdf"):
         assert bad_ok is False and "qpdf --check failed" in bad_detail
+
+
+# --- Accept All deleted-text oracle ------------------------------------------
+
+
+def test_accept_all_deleted_text_confirmed_absent_on_a_real_clean():
+    data = _load("spa.docx")
+    plan, cleaned = _plan_and_apply(data, "spa.docx", "external_sharing")
+    report = verify_derivative(data, cleaned, plan, name="spa.docx")
+    oracle = next(c for c in report["checks"] if c["name"] == "accept_all_deleted_text_absent")
+    assert oracle["pass"] is True
+    assert report["pass"] is True
+
+
+def test_accept_all_deleted_text_oracle_catches_leaked_deleted_content():
+    """The real failure mode this oracle exists for: deleted content that
+    ends up mislabeled as ordinary visible text (e.g. a cleaner bug turning
+    w:delText into w:t) looks structurally clean to a tag-based check —
+    reinspect_targeted_gone would not necessarily notice — but the actual
+    deleted words are still there for anyone reading the document."""
+    import container_meta
+
+    data = _load("spa.docx")
+    deleted = container_meta.extract_docx_deleted_text(data)
+    assert deleted, "fixture must carry a real deleted-text run for this test to mean anything"
+
+    plan, cleaned = _plan_and_apply(data, "spa.docx", "external_sharing")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(cleaned)) as zin, zipfile.ZipFile(
+        buf, "w", zipfile.ZIP_DEFLATED
+    ) as zout:
+        for info in zin.infolist():
+            zout.writestr(info, zin.read(info.filename))
+        zout.writestr(
+            "word/injected.xml",
+            '<?xml version="1.0"?><w:sneaky '
+            'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            f"<w:t>{deleted[0]}</w:t></w:sneaky>",
+        )
+    report = verify_derivative(data, buf.getvalue(), plan, name="spa.docx")
+    oracle = next(c for c in report["checks"] if c["name"] == "accept_all_deleted_text_absent")
+    assert oracle["pass"] is False
+    assert report["pass"] is False

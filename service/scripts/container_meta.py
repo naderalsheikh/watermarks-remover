@@ -1363,6 +1363,41 @@ def extract_ooxml_plaintext(data: bytes, fmt: str) -> str:
     return "\n".join(chunks)
 
 
+_W_DELTEXT_OPEN_RE = re.compile(r"<w:delText\b[^>]*>")
+_W_DELTEXT_CLOSE_RE = re.compile(r"</w:delText>")
+
+
+def extract_docx_deleted_text(data: bytes, *, min_len: int = 4) -> list[str]:
+    """Text carried inside <w:delText> runs across every word/*.xml content
+    part — the content Accept All is supposed to make vanish.
+
+    Used as a verification oracle, not a cleaner: after Accept All, none of
+    these strings should still be findable in the derivative's plaintext.
+    ``min_len`` drops trivial fragments (single spaces, punctuation) that
+    would false-positive against ordinary surrounding prose.
+    """
+    out: list[str] = []
+    budget: list[int] = [0]
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if not _is_docx_content_part(name):
+                    continue
+                xml = _read_zip_member(zf, info, budget).decode(
+                    "utf-8", errors="surrogateescape"
+                )
+                for _os, oe, cs, _ce in _iter_tag_blocks(
+                    xml, _W_DELTEXT_OPEN_RE, _W_DELTEXT_CLOSE_RE
+                ):
+                    piece = _decode_xml_entities(xml[oe:cs]).strip()
+                    if len(piece) >= min_len:
+                        out.append(piece)
+    except zipfile.BadZipFile:
+        return []
+    return out
+
+
 def _inspect_odt_layer_a(data: bytes) -> tuple[int, list[dict], list[str]]:
     from text_unicode import inspect_text  # local import to avoid cycles
 

@@ -424,6 +424,35 @@ def verify_derivative(
                 _check("image_dimensions", do == dd, f"{do} -> {dd}")
             )
 
+    # 3b. Accept All's actual oracle: deleted text must be *gone*, not just
+    # its w:delText marker. reinspect_targeted_gone (check 1 above) only
+    # confirms the tracked_changes *subtype* stopped matching a finding
+    # heuristic — it never read the deleted content itself, so a cleaner
+    # that mishandled a revision marker (row/paragraph merge edge cases,
+    # a marker this engine doesn't yet resolve) could still leave the
+    # deleted text sitting in the derivative's plaintext and this gate
+    # would not have noticed.
+    if (
+        kind == "container"
+        and res_before.format == "docx"
+        and plan.actions.get("tracked_changes", {}).get("action") == "accept_all"
+    ):
+        import container_meta
+
+        deleted = container_meta.extract_docx_deleted_text(original)
+        if deleted:
+            derivative_text = container_meta.extract_ooxml_plaintext(derivative, "docx")
+            leaked = [d for d in deleted if d in derivative_text]
+            checks.append(
+                _check(
+                    "accept_all_deleted_text_absent",
+                    not leaked,
+                    f"{len(leaked)} of {len(deleted)} deleted string(s) still present"
+                    if leaked
+                    else f"{len(deleted)} deleted string(s) confirmed absent",
+                )
+            )
+
     # 4. body diff under privacy: only invisible codepoints may change
     if plan.policy_id == "privacy_only" and kind == "text":
         try:
