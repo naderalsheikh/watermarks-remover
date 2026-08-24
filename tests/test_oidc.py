@@ -286,6 +286,33 @@ def test_callback_rejects_bad_or_missing_state(tmp_path, monkeypatch):
     )
 
 
+def test_callback_error_does_not_leak_idp_internals(tmp_path, monkeypatch, caplog):
+    """A failed exchange/validation must return a generic message: the
+    OidcError text can carry token endpoints, audience values, and PyJWT
+    internals — those go to the operator's log, never to the client."""
+    import logging
+
+    _stub_idp(
+        monkeypatch,
+        {"bad-code": {"sub": "sub-x", "email": "x@example.com"}},
+        fail_claims=True,
+    )
+    c = _make_app(tmp_path, monkeypatch)
+    r = c.get("/v1/auth/oidc/login", follow_redirects=False)
+    state = r.headers["location"].split("state=")[1].split("&")[0]
+    with caplog.at_level(logging.WARNING, logger="counselclear"):
+        r2 = c.get(
+            "/v1/auth/oidc/callback",
+            params={"code": "bad-code", "state": state},
+        )
+    assert r2.status_code == 401
+    assert r2.json()["detail"] == "SSO sign-in failed"
+    # The raw internals ("id_token validation failed: ...") must not reach
+    # the client, but must be logged for the operator.
+    assert "id_token validation failed" not in r2.json()["detail"]
+    assert any("id_token validation failed" in rec.message for rec in caplog.records)
+
+
 def test_callback_throttles_repeated_failures(tmp_path, monkeypatch):
     """The callback is the credential-establishing step for OIDC, same as
     /v1/auth/login is for the local password — it must not be hammerable

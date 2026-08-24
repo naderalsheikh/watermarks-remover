@@ -86,13 +86,34 @@ def test_matter_create_and_get(client):
     mid = r.json()["id"]
     r2 = client.get(f"/v1/matters/{mid}")
     assert r2.json()["name"] == "Project Dandelion"
-    assert client.get("/v1/matters/nope").status_code == 404
+    # Uniform 403 for nonexistent + unauthorized (permission check first,
+    # like every other matter-scoped route) — no ID-existence oracle.
+    assert client.get("/v1/matters/nope").status_code == 403
 
 
 def test_auth_config_is_unauthenticated_and_reports_oidc_off(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
     c = TestClient(create_app(tmp_path / "d"))
     assert c.get("/v1/auth/config").json() == {"oidc_enabled": False}
+
+
+def test_cookie_secure_flag_follows_config(tmp_path, monkeypatch):
+    """COUNSELCLEAR_COOKIE_SECURE=true must set Secure on the session
+    cookie even when the request itself is plain HTTP (the proxy-terminated
+    deployment where the app only ever sees http)."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    monkeypatch.setenv("COUNSELCLEAR_COOKIE_SECURE", "true")
+    c = TestClient(create_app(tmp_path / "d"))
+    r = c.post("/v1/auth/login", json={"password": "pw12345"})
+    assert r.status_code == 200
+    assert "Secure" in r.headers["set-cookie"]
+
+    # Default (auto) over plain HTTP: not Secure — loopback v1 deployment.
+    monkeypatch.setenv("COUNSELCLEAR_COOKIE_SECURE", "auto")
+    c2 = TestClient(create_app(tmp_path / "d2"))
+    r2 = c2.post("/v1/auth/login", json={"password": "pw12345"})
+    assert r2.status_code == 200
+    assert "Secure" not in r2.headers["set-cookie"]
 
 
 def test_list_policies_requires_auth_and_returns_the_four_frozen_ids(client):
@@ -133,6 +154,25 @@ def test_list_matters_documents_jobs_require_auth(client):
     assert unauth.get("/v1/matters").status_code == 401
     assert unauth.get(f"/v1/matters/{m}/documents").status_code == 401
     assert unauth.get(f"/v1/matters/{m}/jobs").status_code == 401
+
+
+def test_list_endpoints_are_server_capped_and_jobs_omit_result(client):
+    """Lists must be bounded (a caller can't request an unbounded dump) and
+    the jobs list must not carry the full result payload — that lives on
+    the detail route only."""
+    m = client.post("/v1/matters", json={"name": "cap"}).json()["id"]
+    doc = _upload(client, "spa.docx", matter=m)
+    job = client.post(f"/v1/matters/{m}/documents/{doc['id']}/inspect-jobs").json()
+
+    # Server cap: requesting more than the cap clamps, never grows unbounded.
+    assert len(client.get(f"/v1/matters/{m}/jobs?limit=100000").json()["jobs"]) <= 500
+    assert len(client.get(f"/v1/matters/{m}/documents?limit=100000").json()["documents"]) <= 500
+
+    # Jobs list omits the result payload; the detail route includes it.
+    listed = client.get(f"/v1/matters/{m}/jobs").json()["jobs"]
+    assert listed and "result" not in listed[0]
+    detail = client.get(f"/v1/matters/{m}/jobs/{job['id']}").json()
+    assert "result" in detail
 
 
 def _upload(client, name: str, matter: str | None = None) -> dict:
