@@ -990,7 +990,9 @@ Eight findings from reviewing the production-hardening pass above, fixed:
 
 ### Phase 3 — Production (PR 21)
 
-Postgres, OIDC, gVisor, CMK, residency, Object Lock. **Landed (2026-08-24):** Postgres backend and OIDC SSO are implemented and tested (see PR 21 below); gVisor worker isolation is wired (`COUNSELCLEAR_WORKER_RUNTIME=runsc`) and documented in `docs/COUNSELCLEAR_PRODUCTION.md`; S3 Object Lock, CMK envelope encryption, and the residency pin shipped in `app/storage.py` (2026-08-24, env-gated — see PR 21 below). Not done: per-org residency rows (single-tenant `COUNSELCLEAR_ORG` only), KMS key-rotation policy, and operator-side IAM/bucket provisioning docs.
+**Status: complete for v1's single-tenant scope (2026-08-24).** Postgres, OIDC, gVisor, CMK, residency, Object Lock all landed, tested, and reviewed (see PR 21 below and the review-fixes pass above) — Postgres backend and OIDC SSO (2026-08-23); gVisor worker isolation (`COUNSELCLEAR_WORKER_RUNTIME=runsc`, documented in `docs/COUNSELCLEAR_PRODUCTION.md`); S3 Object Lock, CMK envelope encryption, and the residency pin in `app/storage.py` (2026-08-24). Every piece is env-gated and defaults to the unchanged Phase 2 local/single-password profile.
+
+Deliberately out of scope for v1, not blockers: per-org residency rows (single-tenant `COUNSELCLEAR_ORG` only — real multi-tenant residency needs a schema change, not a Phase 3 fix), KMS key-rotation policy, and operator-side IAM/bucket provisioning docs (these are deployment runbook content, not application code). Phase 4 is next.
 
 ### Phase 4 — Advanced
 
