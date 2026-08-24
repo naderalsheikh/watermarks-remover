@@ -89,6 +89,52 @@ def test_matter_create_and_get(client):
     assert client.get("/v1/matters/nope").status_code == 404
 
 
+def test_auth_config_is_unauthenticated_and_reports_oidc_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    c = TestClient(create_app(tmp_path / "d"))
+    assert c.get("/v1/auth/config").json() == {"oidc_enabled": False}
+
+
+def test_list_policies_requires_auth_and_returns_the_four_frozen_ids(client):
+    from app.main import POLICIES
+
+    assert TestClient(client.app).get("/v1/policies").status_code == 401
+    r = client.get("/v1/policies")
+    assert r.status_code == 200
+    ids = [p["id"] for p in r.json()["policies"]]
+    assert ids == [p["id"] for p in POLICIES]
+    assert set(ids) == {"external_sharing", "privacy_only", "production", "evidence_preservation"}
+
+
+def test_list_matters_scopes_to_the_caller_and_list_documents_and_jobs(client):
+    m1 = client.post("/v1/matters", json={"name": "m1"}).json()["id"]
+    m2 = client.post("/v1/matters", json={"name": "m2"}).json()["id"]
+    ids = {m["id"] for m in client.get("/v1/matters").json()["matters"]}
+    assert {m1, m2} <= ids
+
+    doc = _upload(client, "spa.docx", matter=m1)
+    assert [d["id"] for d in client.get(f"/v1/matters/{m1}/documents").json()["documents"]] == [
+        doc["id"]
+    ]
+    assert client.get(f"/v1/matters/{m2}/documents").json()["documents"] == []
+
+    job = client.post(f"/v1/matters/{m1}/documents/{doc['id']}/inspect-jobs").json()
+    jobs = client.get(f"/v1/matters/{m1}/jobs").json()["jobs"]
+    assert [j["id"] for j in jobs] == [job["id"]]
+    assert client.get(f"/v1/matters/{m1}/jobs?document_id={doc['id']}").json()["jobs"][0][
+        "id"
+    ] == job["id"]
+    assert client.get(f"/v1/matters/{m1}/jobs?document_id=nope").json()["jobs"] == []
+
+
+def test_list_matters_documents_jobs_require_auth(client):
+    m = client.post("/v1/matters", json={"name": "m"}).json()["id"]
+    unauth = TestClient(client.app)
+    assert unauth.get("/v1/matters").status_code == 401
+    assert unauth.get(f"/v1/matters/{m}/documents").status_code == 401
+    assert unauth.get(f"/v1/matters/{m}/jobs").status_code == 401
+
+
 def _upload(client, name: str, matter: str | None = None) -> dict:
     if matter is None:
         matter = client.post("/v1/matters", json={"name": "m"}).json()["id"]

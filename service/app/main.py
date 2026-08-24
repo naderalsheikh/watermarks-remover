@@ -33,7 +33,7 @@ from .config import Config
 from .db import make_engine, make_session_factory
 from .malware import get_scanner
 from .migrate import upgrade_head
-from .models import AuditEvent, Document, Job, Matter, _now, _uuid
+from .models import AuditEvent, Document, Job, Matter, MatterAcl, _now, _uuid
 from .oidc import OidcError
 from .runner import run_job, sync_job
 from .security import (
@@ -47,6 +47,48 @@ from .security import (
 )
 from .storage import StorageError as StorageError_
 from .storage import original_key, storage_from_config
+
+# Four frozen v1 default policies (docs/COUNSELCLEAR_DESIGN.md, "Key
+# Decisions" #5, and the full subtype table under Policy Engine). Literal
+# ids/labels here, not an import of scripts.policies: main.py stays out of
+# the engine's import graph (PR 17 isolation) for what is, by design, a
+# frozen list that only ever changes alongside this file.
+POLICIES = [
+    {
+        "id": "external_sharing",
+        "label": "External sharing",
+        "description": (
+            "For sending outside the firm: strips comments, external links, "
+            "embedded objects, and custom XML; accepts all tracked changes; "
+            "flags headers/footers and hidden content for review."
+        ),
+    },
+    {
+        "id": "privacy_only",
+        "label": "Privacy only",
+        "description": (
+            "Minimal, no-visible-change: strips only PII authoring fields "
+            "and GPS location. Keeps comments, tracked changes, and C2PA "
+            "provenance untouched."
+        ),
+    },
+    {
+        "id": "production",
+        "label": "Production",
+        "description": (
+            "Litigation production: most findings require an explicit "
+            "per-finding approve/keep decision instead of an automatic strip."
+        ),
+    },
+    {
+        "id": "evidence_preservation",
+        "label": "Evidence preservation",
+        "description": (
+            "Inspect-only — never produces a derivative. Preserves the "
+            "original for evidentiary integrity."
+        ),
+    },
+]
 
 
 class LoginBody(BaseModel):
@@ -343,6 +385,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     # --- auth ---------------------------------------------------------------
 
+    @app.get("/v1/auth/config")
+    def auth_config():
+        """Public, unauthenticated: tells the login page which flow to
+        render. The static-export web UI has no server at request time to
+        read an env var from, so this is the one thing it fetches before
+        a session exists. No secrets — just the OIDC on/off bit."""
+        return {"oidc_enabled": cfg.oidc_enabled}
+
     @app.post("/v1/auth/login")
     def login(body: LoginBody, request: Request, response: Response):
         if cfg.oidc_enabled:
@@ -457,7 +507,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         response.delete_cookie("cc_session", httponly=True, samesite="strict")
         return {"ok": True}
 
+    @app.get("/v1/policies", dependencies=[Depends(principal)])
+    def list_policies():
+        return {"policies": POLICIES}
+
     # --- matters ------------------------------------------------------------
+
+    @app.get("/v1/matters")
+    def list_matters(user: str = Depends(principal), s: Session = Depends(db_session)):
+        matter_ids = [
+            r[0]
+            for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
+        ]
+        matters = (
+            s.query(Matter).filter(Matter.id.in_(matter_ids)).order_by(Matter.created_utc.desc())
+        )
+        return {"matters": [_matter_dict(m) for m in matters]}
 
     @app.post("/v1/matters")
     def create_matter(body: MatterBody, user: str = Depends(principal), s: Session = Depends(db_session)):
@@ -525,6 +590,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         s.commit()
         return _doc_dict(doc)
+
+    @app.get("/v1/matters/{matter_id}/documents")
+    def list_documents(
+        matter_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        _require(matter_id, "read", s, user)
+        _matter(matter_id, s)
+        docs = (
+            s.query(Document)
+            .filter_by(matter_id=matter_id)
+            .order_by(Document.created_utc.desc())
+            .all()
+        )
+        return {"documents": [_doc_dict(d) for d in docs]}
 
     @app.get("/v1/matters/{matter_id}/documents/{doc_id}")
     def get_document(
@@ -596,6 +677,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         _execute_job(job.id, kind="sanitize")
         s.expire_all()
         return _job_dict(_job(matter_id, job.id, s))
+
+    @app.get("/v1/matters/{matter_id}/jobs")
+    def list_jobs(
+        matter_id: str,
+        document_id: str = "",
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        _require(matter_id, "read", s, user)
+        _matter(matter_id, s)
+        q = s.query(Job).filter_by(matter_id=matter_id)
+        if document_id:
+            q = q.filter_by(document_id=document_id)
+        jobs = q.order_by(Job.created_utc.desc()).all()
+        return {"jobs": [_job_dict(j) for j in jobs]}
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}")
     def get_job(
