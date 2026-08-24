@@ -21,8 +21,25 @@ name: watermarks-remover
 #   docker compose --profile legal run --rm cc-worker \
 #     inspect /data/matter.docx
 # The API never parses untrusted bytes: jobs execute via per-job workers.
-# Production pins both images by digest (repo@sha256:...); the worker
-# refuses to start otherwise (app.runner enforces the pin at run time).
+# Default worker mode is `subprocess` (a plain child process of cc-api,
+# same image — no separate per-job container). This compose file's cc-api
+# runs read-only, non-root, with no docker CLI or socket, so it cannot
+# itself launch `docker run` for per-job containers; getting there would
+# mean mounting the host Docker socket into cc-api (docker-outside-of-
+# docker), which was deliberately rejected — see docs/COUNSELCLEAR_DESIGN.md
+# ("Deliberately not done" under the 2026-08-22 hardening pass) because it
+# hands a full cc-api compromise host-root-equivalent access, defeating the
+# per-job isolation it would nominally provide. For real per-job docker/
+# gVisor container isolation, run cc-api as a native host process instead
+# (see docs/COUNSELCLEAR_PRODUCTION.md §3) — it reaches the host's own
+# Docker daemon the ordinary way, no socket-mounting needed. Only override
+# COUNSELCLEAR_WORKER_MODE=docker on *this* containerized cc-api if you have
+# separately wired a docker CLI + socket into the image yourself. When
+# docker mode is used, both cc-api and the worker image are digest-pinned
+# (repo@sha256:...); the worker refuses to start otherwise (app.runner
+# enforces the pin at run time). subprocess mode has no separate worker
+# image to pin — it forks a plain child OS process (`python -m app.worker`)
+# from the same installed cc-api code, with no container boundary around it.
 services:
   cc-api:
     profiles: [legal]
@@ -41,10 +58,16 @@ services:
       COUNSELCLEAR_OIDC_CLIENT_ID: ${COUNSELCLEAR_OIDC_CLIENT_ID:-}
       COUNSELCLEAR_OIDC_CLIENT_SECRET: ${COUNSELCLEAR_OIDC_CLIENT_SECRET:-}
       COUNSELCLEAR_OIDC_ALLOWED: ${COUNSELCLEAR_OIDC_ALLOWED:-}
-      COUNSELCLEAR_WORKER_MODE: ${COUNSELCLEAR_WORKER_MODE:-docker}
+      # subprocess (default): child process, no per-job container isolation,
+      # but works out of the box in this read-only/non-root/no-docker-CLI
+      # container. Set to docker only if you've separately wired a docker
+      # CLI + socket into this image yourself (not done by this compose
+      # file, deliberately — see the file-header comment above).
+      COUNSELCLEAR_WORKER_MODE: ${COUNSELCLEAR_WORKER_MODE:-subprocess}
       COUNSELCLEAR_WORKER_IMAGE: ${COUNSELCLEAR_WORKER_IMAGE:-}
       # Optional hardened OCI runtime (e.g. runsc/gVisor) for per-job worker
-      # containers; must be registered with Docker on the host first.
+      # containers; only takes effect in docker mode, and must be registered
+      # with Docker on the host first.
       COUNSELCLEAR_WORKER_RUNTIME: ${COUNSELCLEAR_WORKER_RUNTIME:-}
       # Empty = embedded SQLite (single-tenant default). Set to point at an
       # external managed Postgres instead, or bring up the bundled one with
@@ -108,8 +131,11 @@ services:
       - clamav-db:/defs
     restart: unless-stopped
 
-  # One-shot job worker; normally spawned per job by the API's runner with
-  # --network none. This service exists for hand-runs against /data.
+  # One-shot job worker image. With the compose default (subprocess mode),
+  # cc-api never spawns this as a container — jobs run as a child process
+  # inside cc-api itself instead. This service exists for hand-runs against
+  # /data, and for docker mode deployments where cc-api's runner spawns it
+  # per job with --network none (see COUNSELCLEAR_WORKER_MODE above).
   cc-worker:
     profiles: [legal]
     build:

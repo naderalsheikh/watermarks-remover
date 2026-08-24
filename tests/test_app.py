@@ -244,13 +244,15 @@ def test_audit_chain_and_download_original_perm(client):
 
 
 def test_unpinned_docker_worker_fails_the_job_instead_of_500ing(tmp_path, monkeypatch):
-    """compose.yaml's own default is COUNSELCLEAR_WORKER_MODE=docker with
-    COUNSELCLEAR_WORKER_IMAGE unset (${VAR:-}) — build_docker_cmd's
+    """Docker mode with COUNSELCLEAR_WORKER_IMAGE unset — build_docker_cmd's
     ValueError on an unpinned image used to fire after job.status was
     already committed to "running" and outside the runner's try block, so
     it propagated as an unhandled 500 with the job stuck at "running"
     forever. Reproduced against the real HTTP path, not a unit test of the
-    command builder alone."""
+    command builder alone. (compose.yaml's own default is now
+    COUNSELCLEAR_WORKER_MODE=subprocess, but docker mode with an unpinned
+    image is still reachable via manual override — see compose.yaml and
+    docs/COUNSELCLEAR_PRODUCTION.md §3 — so the regression test stays.)"""
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw")
     monkeypatch.setenv("COUNSELCLEAR_WORKER_MODE", "docker")
     monkeypatch.setenv("COUNSELCLEAR_WORKER_IMAGE", "")

@@ -27,15 +27,19 @@ browser ────────────────────────
                                     │ cc-api  (1..N)      │────▶ managed Postgres
                                     │ read_only container │      (COUNSELCLEAR_DATABASE_URL)
                                     └──────────┬──────────┘
-                                               │ per-job: docker run --network none,
-                                               │ digest-pinned worker image
+                                               │ per-job: child process
+                                               │ (subprocess mode, §3)
                                     ┌──────────▼──────────┐
                                     │ custody volume       │  WORM originals + bundles
                                     │ (matters/<id>/...)   │  → S3 + Object Lock (§5)
                                     └─────────────────────┘
 ```
 
-- The API never parses documents; workers do, isolated (`app.runner`).
+- The API never parses documents; workers do (`app.runner`). The default
+  topology above isolates that parsing to a separate OS process
+  (subprocess mode) but not a separate container — see §3 for what it
+  would take to get real per-job container/gVisor isolation, and why that
+  is a different topology from "N containerized cc-api replicas."
 - Multiple API replicas are supported **only** with Postgres
   (`COUNSELCLEAR_DATABASE_URL`); SQLite is single-writer by design.
 - The login throttle and ClamAV-definition cache are per-process; behind
@@ -63,9 +67,46 @@ Worker and API should be **the same digest**: the worker is just the API
 image invoked with an entrypoint that has no DB access. One digest means one
 supply-chain review per release.
 
-## 3. Worker sandboxing: docker mode (+ optional gVisor)
+## 3. Worker sandboxing: subprocess mode (default) vs. docker mode (+ optional gVisor)
 
-Required settings (already the compose defaults):
+**Default: subprocess mode.** The shipped compose `cc-api` container is
+read-only, non-root, and has no docker CLI or socket. `COUNSELCLEAR_WORKER_MODE`
+defaults to `subprocess`: each job runs as a plain child OS process of
+`cc-api` (`python -m app.worker`), isolated from the API's own DB session
+(zero DB imports in `app/worker.py`, per-job scoped directories) but *not*
+inside its own container — a parser exploit in a job can still reach
+anything the `cc-api` container's own filesystem/user can reach, which is
+why the container itself runs read-only and non-root. This is the deployment
+default and works with no further setup.
+
+**Docker mode gets you per-job container isolation, but needs a real Docker
+daemon reachable from wherever the job launcher runs — which the
+containerized `cc-api` above deliberately does not have.** Giving it one
+means mounting the host Docker socket into `cc-api` (docker-outside-of-
+docker) or running a `dind` sidecar reachable from it. Both were considered
+and **rejected** for this deployment: `cc-api` is the one always-on,
+network-facing, upload-handling process — handing it the docker socket
+means a single `cc-api` compromise becomes host-root-equivalent (`docker run
+-v /:/host ...`), which defeats not just per-job isolation but the write-once
+custody guarantees this whole guide exists to make defensible. See
+`docs/COUNSELCLEAR_DESIGN.md` ("Deliberately not done" under the 2026-08-22
+hardening pass, and the PR 21 status note) for the fuller rationale.
+
+**To get real per-job docker/gVisor isolation, run `cc-api` as a native host
+process instead of the containerized compose service** — a host process
+reaches the host's own Docker daemon the ordinary way (its user's normal
+`docker` group membership / socket permissions), no socket-mounting into a
+container required. This is a different topology from "N containerized
+`cc-api` replicas behind a proxy" (§1): it trades that horizontal-scaling
+shape for the isolation property. If you need both — many containerized
+`cc-api` replicas *and* per-job container isolation — that requires a
+privilege-separated launcher (a minimal separate daemon that owns the
+Docker socket and exposes a narrow, schema-validated "launch exactly this
+sandboxed job" RPC to `cc-api`, never the raw socket); that component does
+not exist yet and is unscoped work, not a config flag.
+
+Required settings for docker mode, once `cc-api` (or the launcher above)
+actually has daemon access:
 
 ```yaml
 COUNSELCLEAR_WORKER_MODE: docker
@@ -74,31 +115,28 @@ COUNSELCLEAR_WORKER_TIMEOUT_S: "600"   # upper bound; Caps budgets tighten it pe
 ```
 
 Workers launch with `--network none`, read-only rootfs, capped tmpfs, and
-per-job fresh directories containing exactly one document copy. Two hardening
-upgrades available at deploy time:
+per-job fresh directories containing exactly one document copy. One
+hardening upgrade available on top:
 
-1. **gVisor (runsc)** for the per-job workers: intercepts syscalls in
-   userspace, so a parser 0-day faces a smaller kernel surface. Register
-   the runtime with Docker on the host:
+- **gVisor (runsc)** for the per-job workers: intercepts syscalls in
+  userspace, so a parser 0-day faces a smaller kernel surface. Register
+  the runtime with Docker on the host:
 
-   ```json
-   // /etc/docker/daemon.json
-   { "runtimes": { "runsc": { "path": "runsc" } } }
-   ```
+  ```json
+  // /etc/docker/daemon.json
+  { "runtimes": { "runsc": { "path": "runsc" } } }
+  ```
 
-   then set `COUNSELCLEAR_WORKER_RUNTIME=runsc` — the runner passes
-   `--runtime runsc` to every per-job container. Verify with
-   `docker info | grep runtimes` on the host, and confirm a job's
-   `docker inspect` shows `"Runtime": "runsc"` while it runs.
+  then set `COUNSELCLEAR_WORKER_RUNTIME=runsc` — the runner passes
+  `--runtime runsc` to every per-job container. Verify with
+  `docker info | grep runtimes` on the host, and confirm a job's
+  `docker inspect` shows `"Runtime": "runsc"` while it runs.
 
-2. **gVisor (or Kata) for `cc-api` itself** if your orchestrator supports
-   per-container runtimes. The API parses nothing, so runc is acceptable;
-   gVisor costs little and shrines the whole stack.
-
-Honest limits: docker-mode workers need access to the host Docker daemon via
-the mounted socket or dind sidecar — grant that socket to the API host
-deliberately and audit who can reach it; anyone with it can run any
-container image on that host.
+Separately, if your orchestrator supports per-container runtimes, running
+`cc-api`'s own container under gVisor (or Kata) is still worth doing
+regardless of worker mode — the API parses nothing itself, so plain `runc`
+is acceptable, but gVisor is cheap insurance and shrinks the whole stack's
+kernel exposure, not just the workers'.
 
 ## 4. Database
 

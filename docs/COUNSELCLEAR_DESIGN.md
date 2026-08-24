@@ -851,7 +851,7 @@ Privilege is the threat model. Treat every uploaded file as hostile *and* confid
 
 | Threat | Severity | Mitigation |
 | --- | --- | --- |
-| Parser exploit | Critical | Per-job unprivileged worker (production); rlimits; `MAX_ZIP_DECOMPRESSED_BYTES` 128 MiB in `container_meta`; `MAX_INPUT_BYTES` 256 MiB; gVisor later |
+| Parser exploit | Critical | Per-job unprivileged worker (production); rlimits; `MAX_ZIP_DECOMPRESSED_BYTES` 128 MiB in `container_meta`; `MAX_INPUT_BYTES` 256 MiB; optional gVisor (`COUNSELCLEAR_WORKER_RUNTIME=runsc`, PR 21) |
 | Privilege in logs / support | Critical | Categories only; support-bundle allowlist above; `log_message` stays request-line only |
 | Silent cloud LLM | Critical | No outbound model; Detect not implicit; rewrite URL from env only |
 | Overwrite of evidence | Critical | Write-once original; no product `--in-place`; `evidence_preservation` cannot apply |
@@ -869,8 +869,8 @@ Privilege is the threat model. Treat every uploaded file as hostile *and* confid
 ### Auth and tenancy
 
 - Local: bind `127.0.0.1`; single argon2id hash in `0600` file; session cookie `HttpOnly`, `SameSite=Strict`. Optional “no password” only if bind is loopback **and** a config flag `local_open=true` (default false once FastAPI exists). Prototype `WATERMARKS_SERVER_API_KEY` remains for `server.py`.
-- Firm: OIDC; auditors see manifests/findings, not originals, unless granted.
-- CMK in production; local uses OS keychain or a 0600 volume key.
+- Firm: OIDC — **implemented (PR 21, 2026-08-23)**, see below; auditors see manifests/findings, not originals, unless granted.
+- CMK in production; local uses OS keychain or a 0600 volume key. **Not yet implemented** — production custody objects are filesystem + optional S3, with no customer-managed-key wrapping yet.
 
 ### Malware
 
@@ -957,7 +957,9 @@ PRs 15–18 landed with a real gap: the isolated-worker design's own trust bound
 - **Zero operational visibility.** No logging existed anywhere in `service/app/`, so an operator running outside `docker compose` (unisolated `subprocess` worker mode) or without ClamAV installed had no way to notice short of reading source. Fixed: a startup log line states the resolved `worker_mode` and warns explicitly when jobs are not isolated or when `clamscan` isn't on `PATH`. Also added: unauthenticated `GET /health`; `COUNSELCLEAR_DISABLE_DOCS=1` to turn off unauthenticated `/docs`+`/openapi.json` for any deployment reachable beyond loopback; the session cookie's `secure` flag now reflects the request's actual scheme instead of being silently absent.
 - Closed named test gaps: cross-matter document/job access (`test_acl_audit.py`), a genuine (non-mocked) `subprocess.TimeoutExpired` through the real runner path (`test_worker_isolation.py`), oversized upload at the HTTP layer (`test_app.py`).
 
-Deliberately **not** done in this pass (flagged, not silently deferred): defaulting `COUNSELCLEAR_WORKER_MODE` to `docker` — compose's `legal` profile already defaults it that way (`compose.yaml`), and flipping the bare-Python default would just break local dev/tests for no isolation gain, since a bare `docker run` of this image has no `docker` CLI or host socket access to actually execute docker-mode jobs anyway. Wiring up docker-outside-of-docker (installing the docker CLI + mounting `/var/run/docker.sock` into `cc-api`) is a distinct architecture decision — it trades "isolate the worker" for "give the long-lived API container host-root-equivalent socket access" — and deserves its own explicit sign-off rather than riding in as part of a bug-fix pass.
+Deliberately **not** done in this pass (flagged, not silently deferred): defaulting `COUNSELCLEAR_WORKER_MODE` to `docker` — compose's `legal` profile defaulted it that way at the time this was written (`compose.yaml`), and flipping the bare-Python default would just break local dev/tests for no isolation gain, since a bare `docker run` of this image has no `docker` CLI or host socket access to actually execute docker-mode jobs anyway. Wiring up docker-outside-of-docker (installing the docker CLI + mounting `/var/run/docker.sock` into `cc-api`) is a distinct architecture decision — it trades "isolate the worker" for "give the long-lived API container host-root-equivalent socket access" — and deserves its own explicit sign-off rather than riding in as part of a bug-fix pass.
+
+**Resolved — DooD rejected (operator decision, 2026-08-23):** docker-outside-of-docker was not implemented. `compose.yaml`'s `legal` profile default changed from `docker` to `subprocess` — the containerized `cc-api` never had a docker CLI/socket to begin with, so the old default was silently non-functional (every job would have failed trying to exec a missing `docker` binary). Real per-job docker/gVisor container isolation now requires running `cc-api` as a native host process instead of the containerized compose service, so it reaches the host's own Docker daemon without any socket-mounting trade-off; see `docs/COUNSELCLEAR_PRODUCTION.md` §3. A privilege-separated launcher (a minimal daemon that owns the docker socket and exposes a narrow job-launch RPC, never the raw socket, to containerized `cc-api` replicas) would recover both properties at once but is unscoped future work, not implemented here.
 
 #### Production-readiness pass (2026-08-23) — single-tenant hardening
 
@@ -975,7 +977,7 @@ Deliberately **not** done in this pass (flagged, not silently deferred): default
 
 ### Phase 3 — Production (PR 21)
 
-Postgres, OIDC, CMK, residency, Object Lock, gVisor.
+Postgres, OIDC, gVisor, CMK, residency, Object Lock. **Partially landed (2026-08-23):** Postgres backend and OIDC SSO are implemented and tested (see PR 21 below); gVisor worker isolation is wired (`COUNSELCLEAR_WORKER_RUNTIME=runsc`) and documented in `docs/COUNSELCLEAR_PRODUCTION.md`. CMK, region residency, and S3 Object Lock remain undone — production custody storage is still filesystem/plain-S3 with no key-wrapping or retention lock.
 
 ### Phase 4 — Advanced
 
@@ -1090,9 +1092,10 @@ Resolved and promoted to Key Decisions: header/footer default (flag); hidden she
   - Meaning lock: `service/scripts/rewrite_text.py` (`meaning_lock_violations`, `mode: "unchanged"`, strength `code`)
   - Caps: `service/scripts/common.py` (`MAX_INPUT_BYTES`, rlimits — not zip budget)
   - Core image: `service/Dockerfile`, `compose.yaml`
-- Tests: 42 modules, ~575 tests; especially `tests/test_pdf_structural_rewrite.py`, `tests/test_ooxml_xlsx_pptx.py`, `tests/test_security_hardening.py`, `tests/test_rewrite_text.py` (`test_preserve_returns_original_when_lock_fails`, `test_parser_default_strength_is_preserve`)
+- Tests: 65 modules (incl. `tests/test_postgres_support.py`, `tests/test_oidc.py`, `tests/test_prod_hardening.py`, `tests/test_worker_isolation.py`); especially `tests/test_pdf_structural_rewrite.py`, `tests/test_ooxml_xlsx_pptx.py`, `tests/test_security_hardening.py`, `tests/test_rewrite_text.py` (`test_preserve_returns_original_when_lock_fails`, `test_parser_default_strength_is_preserve`)
 - Upstream idea (partially superseded): `docs/plans/ideas/deployment-docker-cli-api.md` — keep Phase 0 extraction; do **not** adopt “all capabilities in v1”
 - Ethics: `skills/remove-ai-marks/references/ethics.md`
+- Production deployment: `docs/COUNSELCLEAR_PRODUCTION.md` — topology, digest pinning, gVisor worker sandboxing, managed Postgres, OIDC setup, S3 Object Lock + CMK + residency guidance, operations checklist
 - Semantics source (not a vendor dependency): Microsoft Word Inspect Document / Accept All; Workshare Protect; DocsCorp cleanse
 - Tools: [qpdf](https://qpdf.sourceforge.io/), [exiftool](https://exiftool.org/), [c2patool](https://github.com/contentauth/c2pa-rs)
 
@@ -1233,6 +1236,7 @@ PR 14 (PDF raster warn) is optional-parallel after 13 and is **not** required to
 - **Files/components:** app config, IAM, bucket object-lock
 - **Depends on:** PR 16, PR 17, PR 18
 - **Changes:** Multi-tenant schema, OIDC, customer key, region pin, legal hold. No engine changes.
+- **Status (2026-08-23):** Postgres backend, OIDC SSO, and gVisor worker isolation shipped and tested. Customer-managed keys, region residency, and S3 Object Lock/retention are not started.
 
 Each engine PR merges if its tests pass without the next PR. After PR 13 the local service is usable for the operator’s own matters. Shell PRs 15–21 do not rewrite `container_meta.py`.
 
@@ -1258,3 +1262,7 @@ Setting `COUNSELCLEAR_OIDC_ISSUER` + `CLIENT_ID` + `CLIENT_SECRET` switches auth
 - **Local password retired when SSO is on**: `/v1/auth/login` answers 403, no hash file is created or required (compose's `:?required` guard moved into the app, which enforces it only when actually using password auth).
 - Session subjects are now validated against `[A-Za-z0-9][A-Za-z0-9._:@-]{0,62}` before issuance and on every request — they populate ACL `user_id` (String(64)) and audit rows, so they're treated as data with a schema.
 - Tests (`tests/test_oidc.py`) stub exactly the three IdP-boundary functions (`discover`, `exchange_code`, `validated_claims`) — main.py calls them through the module object so stubbing works — and separately exercise real RS256 verification with an in-process RSA keypair (signature, wrong-key, wrong-audience, wrong-nonce and expired tokens).
+
+#### gVisor worker isolation — implemented (2026-08-23)
+
+`COUNSELCLEAR_WORKER_RUNTIME` (empty = default runc, unchanged) passes `--runtime <value>` to every per-job `docker run` in `runner.py`'s `build_docker_cmd` — e.g. `runsc` puts gVisor's userspace kernel between a hostile parser and the host, on top of the existing `--network none` / scoped-mount isolation from the hardening pass. Purely additive to PR 17's container invocation; `subprocess` mode is unaffected (no container, no runtime to select). Requires the runtime registered in the Docker daemon (`docs/COUNSELCLEAR_PRODUCTION.md` §3 has the `daemon.json` snippet and a `docker inspect` verification step) — nothing in the app validates the runtime name exists before use, so a typo surfaces as a container-start failure on the first job, not at boot. Test: `tests/test_worker_isolation.py::test_docker_cmd_selects_hardened_runtime_when_configured`.
