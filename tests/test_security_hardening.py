@@ -387,6 +387,7 @@ for _p in (str(SCRIPTS), str(_APP)):
 
 from app.malware import Verdict, archive_depth, set_scanner
 from app.runner import job_budget_s
+from app.security import LoginThrottle
 
 
 def _nested_zip(depth: int) -> bytes:
@@ -552,3 +553,71 @@ def test_deeply_nested_archive_upload_is_refused(tmp_path, monkeypatch):
     )
     assert r.status_code == 422
     assert "archive-depth" in r.json()["detail"]
+
+
+# --- LoginThrottle: bounded memory under low-and-slow scans ------------------
+# A distributed scan hitting /v1/auth/login from many distinct addresses, each
+# failing once or twice (below max_failures) and never returning, must not
+# leave one permanent dict entry per address. Cold keys are swept
+# opportunistically; live state (failures inside window_s, active lockout)
+# is never evicted.
+
+
+def test_login_throttle_sweeps_cold_keys(monkeypatch):
+    """A low-and-slow scan from many distinct addresses must not leave one
+    permanent dict entry per address: keys with no failures inside window_s
+    and no active lockout are swept out."""
+    import app.security as security_mod
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(security_mod.time, "time", lambda: now[0])
+
+    t = LoginThrottle(max_failures=5, window_s=300, lockout_s=300)
+    for i in range(1000):
+        key = f"10.0.{i // 256}.{i % 256}"
+        t.record_failure(key)
+        if i % 2:
+            t.record_failure(key)  # 1-2 failures, always below max_failures
+
+    assert len(t._failures) == 1000
+
+    now[0] += 301  # every failure is now outside window_s
+    t.allow("fresh-peer")  # any touch triggers the opportunistic sweep
+
+    assert t._failures == {}
+    assert t._locked_until == {}
+
+
+def test_login_throttle_sweep_keeps_live_state(monkeypatch):
+    """The opportunistic sweep must not evict addresses still inside their
+    failure window or lockout — only truly cold entries."""
+    import app.security as security_mod
+
+    now = [2_000_000.0]
+    monkeypatch.setattr(security_mod.time, "time", lambda: now[0])
+
+    t = LoginThrottle(max_failures=3, window_s=300, lockout_s=600)
+    t.record_failure("active")  # 1 failure, inside window
+    for _ in range(3):
+        t.record_failure("locked")  # hits max_failures -> locked out
+    assert not t.allow("locked")
+
+    now[0] += 100  # everything still live
+    t.record_failure("other")
+    assert "active" in t._failures
+    assert "locked" in t._failures
+    assert t._locked_until["locked"] > now[0]
+    assert t.retry_after_s("locked") >= 1
+
+    now[0] += 250  # window expired for "active" & "other"; "locked" still locked
+    t.allow("other2")  # this touch crosses the sweep gate
+    assert "active" not in t._failures
+    assert "other" in t._failures  # failure at now-250 is inside window_s
+    assert "locked" in t._locked_until  # lockout is live state, never evicted
+    assert not t.allow("locked")
+
+    now[0] += 400  # lockout expired too
+    t.record_failure("other3")
+    assert "locked" not in t._failures
+    assert "locked" not in t._locked_until
+    assert t.allow("locked")

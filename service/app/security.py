@@ -126,6 +126,7 @@ class LoginThrottle:
         self._failures: dict[str, deque[float]] = {}
         self._locked_until: dict[str, float] = {}
         self._lock = threading.Lock()
+        self._last_sweep = 0.0
 
     def _prune(self, key: str, now: float) -> None:
         wins = self._failures.get(key)
@@ -136,9 +137,37 @@ class LoginThrottle:
             if not wins:
                 self._failures.pop(key, None)
 
+    def _maybe_sweep(self, now: float) -> None:
+        """Opportunistic full sweep, at most once per ``window_s``.
+
+        ``_failures`` / ``_locked_until`` are otherwise only pruned when the
+        same key is touched again, so a low-and-slow scan from many distinct
+        addresses — each failing once or twice and never returning — would
+        otherwise leave one permanent entry per address. This walk drops every
+        key with no live state (no failure inside ``window_s``, no active
+        lockout) under the same lock as the rest of the class; an address that
+        is still within its window or lockout is never evicted.
+        """
+        if now - self._last_sweep < self.window_s:
+            return
+        self._last_sweep = now
+        cutoff = now - self.window_s
+        # Expired lockouts: same cleanup allow() performs on touch.
+        for key, until in list(self._locked_until.items()):
+            if until <= now:
+                del self._locked_until[key]
+                self._failures.pop(key, None)
+        # Cold keys: prune every deque like _prune() would for the touched key.
+        for key, wins in list(self._failures.items()):
+            while wins and wins[0] < cutoff:
+                wins.popleft()
+            if not wins:
+                del self._failures[key]
+
     def allow(self, key: str) -> bool:
         with self._lock:
             now = time.time()
+            self._maybe_sweep(now)
             until = self._locked_until.get(key)
             if until is not None:
                 if now < until:
@@ -155,6 +184,7 @@ class LoginThrottle:
     def record_failure(self, key: str) -> None:
         with self._lock:
             now = time.time()
+            self._maybe_sweep(now)
             self._prune(key, now)
             self._failures.setdefault(key, deque()).append(now)
             if len(self._failures[key]) >= self.max_failures:
