@@ -287,3 +287,42 @@ Stated so reviewers don't assume otherwise:
 - The audit chain proves integrity after the fact; it cannot prevent a
   database administrator with raw SQL access from rewriting rows and
   recomputing hashes — restrict DB admin access accordingly.
+
+## 9. Layer B (statistical watermark) rewrite — operations notes
+
+PR 20 shipped the capability **off by default**; this section is for the
+operator who has completed the license/ToS review and intends to enable it.
+
+- **The gate is two-part:** `COUNSELCLEAR_WATERMARK_TOOLS=1` (org flag) AND
+  a signed per-document attestation (`POST /v1/attestations`, server-HMAC-
+  signed, doc-bound to the upload's sha256, 10-minute TTL, single-use).
+  Without either, the attestation route 403s and `layer_b` sanitize jobs
+  are refused — including at dispatch time (`run_job` re-checks the flag,
+  so disabling it mid-flight fails queued Layer B jobs rather than running
+  them).
+- **Only two strengths are reachable from the product:** `preserve` and
+  `paraphrase` (design doc KD 10). The aggressive `code`/`backtranslate`
+  modes exist only in the CLI.
+- **Failure semantics are hard by design:** a meaning-lock miss, a rewrite
+  that produces no change, an unreachable provider, or a refused non-
+  loopback endpoint all fail the job with a labeled error. There is no
+  silent fallback to the original text in the product path — the manifest
+  either records a verified rewrite (with `layer_b` block) or the job
+  fails and no derivative is produced.
+- **Rewrite endpoint:** subprocess workers inherit `WATERMARKS_REWRITE_*`
+  from the API process env. Docker workers receive only that env namespace
+  and join `COUNSELCLEAR_REWRITE_NETWORK` (default `counselclear-rewrite`)
+  — a dedicated proxy-only network whose only peer should be the rewrite
+  proxy. Non-Layer-B jobs keep `--network none`. If the proxy is addressed
+  by hostname rather than loopback, set `WATERMARKS_REWRITE_ALLOW_REMOTE=1`
+  (same opt-in the CLI requires).
+- **Audit trail:** every attestation issues an `attest.issued` event and,
+  on use, an `attest.used` event carrying the jti and job id; the job row
+  stores `layer_b {strength, label, subject, jti}` and the manifest embeds
+  the rewrite record. A post-hoc reviewer can prove exactly which
+  authorization produced which rewritten derivative.
+- **Known limits:** single-use enforcement is in-memory plus a DB jti check
+  on the job row — adequate for single-process deployments; multi-worker
+  (Postgres) deployments should add a DB expression index on the jti before
+  relying on replay resistance across replicas (tracked in the PR 21
+  tenancy pass).

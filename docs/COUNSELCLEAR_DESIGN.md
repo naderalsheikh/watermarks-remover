@@ -1249,6 +1249,7 @@ PR 14 (PDF raster warn) is optional-parallel after 13 and is **not** required to
 - **Files/components:** `rewrite_text.py`; attestation API (signed); org flag
 - **Depends on:** PR 16, PR 17, PR 14
 - **Changes:** 403 unless flag + **signed** attestation + content-altering label. Job **fails** on meaning-lock miss (new). License/security review in the PR. Heavy images stay out of the legal worker.
+- **Status (2026-08-24):** implemented and merged (`da0d78b`). `COUNSELCLEAR_WATERMARK_TOOLS` (default off) gates `POST /v1/attestations` (server-HMAC-signed, doc-bound sha256, 10-min TTL, single-use jti, strengths product-pinned to preserve/paraphrase per KD 10) and the `layer_b` sanitize-job body. The worker runs the rewrite between apply_actions and verify_derivative with product-hard semantics: meaning-lock miss / no-op / provider failure / refused non-loopback endpoint → CustodyError → failed job (never the CLI's best-effort fallback). `Job.layer_b` JSON column (alembic 0004), `attest.issued`/`attest.used` audit events, manifest `layer_b` block. Docker Layer B jobs join `COUNSELCLEAR_REWRITE_NETWORK` and receive only the `WATERMARKS_REWRITE_*` env. **Deferred:** license/ToS sign-off (control is the default-off flag + signed single-use doc-bound attestation in the hash-chained audit trail); multi-worker jti TOCTOU hardening (DB expression index) for the PR 21 tenancy pass. Tests: 986+ passing incl. restart-replay and docker-argv regressions.
 
 ### PR 21 — Production tenancy: Postgres, OIDC, CMK, residency, Object Lock, retention
 
