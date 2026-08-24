@@ -207,7 +207,10 @@ def test_callback_issues_session_for_allowed_email(tmp_path, monkeypatch):
         params={"code": "good-code", "state": state},
         follow_redirects=False,
     )
-    assert r2.status_code == 200
+    # Top-level browser navigation back to the web app's root, not JSON —
+    # the IdP redirected the user here, so this must land them in the UI.
+    assert r2.status_code == 303
+    assert r2.headers["location"] == "/"
     assert "cc_session" in r2.cookies
 
     # The session works, and the principal is the OIDC identity, not operator.

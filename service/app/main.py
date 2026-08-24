@@ -470,14 +470,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 raise HTTPException(403, "principal not permitted")
             throttle.record_success(peer)
             sub = str(claims["sub"])
-            response.set_cookie(
+            redirect = RedirectResponse("/", status_code=303)
+            redirect.set_cookie(
                 "cc_session",
                 issue_session(cfg, oidc_mod.principal_for(sub)),
                 httponly=True,
                 samesite="strict",
                 secure=request.url.scheme == "https",
             )
-            return {"ok": True, "subject": oidc_mod.principal_for(sub)}
+            # This is a top-level browser navigation (the IdP redirected the
+            # user here), not a fetch() call from the web app — returning
+            # JSON would leave the user staring at a JSON blob instead of
+            # landing back in the UI. "/" is the web app's root in the
+            # deployed topology (nginx serves it; see next.config.ts); this
+            # route has no opinion on what's there in a bare API-only test.
+            return redirect
 
     @app.post("/v1/auth/logout", dependencies=[Depends(principal)])
     def logout(response: Response):
