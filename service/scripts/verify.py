@@ -13,8 +13,10 @@ re-inspects the derivative and gates on:
 4. body diff: under privacy_only the visible-text projection must be
    unchanged (Layer A only touches invisible codepoints)
 
-The result dict matches schemas/verify_result.schema.json. PDF pixel
-render-compare is deliberately absent in v1 (warn-only future work).
+The result dict matches schemas/verify_result.schema.json. PDF derivatives get
+``qpdf --check`` structural validation as part of format validation. PDF pixel
+render-compare lives in verify_render.py (PR 14): warn-only, wired into
+clean_to_bundle behind COUNSELCLEAR_VISUAL_COMPARE, never part of ``pass``.
 """
 
 from __future__ import annotations

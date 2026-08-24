@@ -937,14 +937,14 @@ All thirteen PRs are implemented and gated by the full suite (`775` tests). Actu
 Deviations worth knowing:
 
 - `verify_derivative` lives in its own module (spec sketch said `engine_api.verify_derivative`); `clean_to_bundle` runs plan → apply → **verify** → write-once, so a failed gate leaves the bundle untouched.
-- Format validation is magic-byte + zip-integrity + `[Content_Types].xml` presence + header-parsed image dimensions; `qpdf --check` and PDF raster compare remain future work (PR 14).
+- Format validation is magic-byte + zip-integrity + `[Content_Types].xml` presence + header-parsed image dimensions — **plus `qpdf --check` for every PDF derivative** (`verify._qpdf_check`: exit 0/3 passes, 2 fails, degrades to magic-byte-only when qpdf is absent so a bare host doesn't fail every job). PDF render-and-compare also landed (PR 14, below) but stays warn-only and flag-off.
 - Unimplemented PDF content strips (JS actions, annots, attachments, AcroForm fields) raise `PolicyError` instead of shipping a silently partial derivative.
 - Product bundling has no `--in-place`; prototype `clean_file.py` keeps it for legacy tests, per the migration rule above.
 
 
 ### Phase 2 — Product MVP (PRs 15–18)
 
-FastAPI, local auth, matter ACL, workers, malware, bundle download. Visual compare warn (PR 14) may land in parallel but stays flag-off.
+FastAPI, local auth, matter ACL, workers, malware, bundle download. Visual compare warn (PR 14) may land in parallel but stays flag-off — **it has landed (2026-08-23), still flag-off**; see the PR 14 status note.
 
 #### Hardening pass (2026-08-22) — single-operator production-readiness
 
@@ -987,6 +987,7 @@ DMS, e-discovery, desktop agent, watermark gate (PR 20). **Signed Mac app** (if 
 
 ```
 ff.visual_compare_gate      default off; PDF-only even when on
+                            (env: COUNSELCLEAR_VISUAL_COMPARE, verify_render.feature_enabled)
 ff.watermark_tools          default off
 ff.layer_b_rewrite          default off
 ff.include_original_in_zip  default off (ACL-gated)
@@ -1105,7 +1106,7 @@ Resolved and promoted to Key Decisions: header/footer default (flag); hidden she
 
 Engine PRs (1–13) are the **small-team metadata-hygiene MVP**, independently mergeable, in-tree, `make test` green. Product-shell PRs (15–21) may live in a sibling tree that depends on the engine package. **Cut line: after PR 13 the operator has inspect/policy/custody/re-inspect without Next.js, OIDC, CMK, or a visual gate.**
 
-PR 14 (PDF raster warn) is optional-parallel after 13 and is **not** required to call the engine MVP done.
+PR 14 (PDF raster warn) is optional-parallel after 13 and is **not** required to call the engine MVP done. **Status: landed (2026-08-23)** — see the PR 14 section below.
 
 ### PR 1 — Extract a pure engine library without behavior change
 
@@ -1190,6 +1191,8 @@ PR 14 (PDF raster warn) is optional-parallel after 13 and is **not** required to
 - **Files/components:** `service/scripts/verify_render.py`; poppler; tests with tiny PDFs
 - **Depends on:** PR 13, PR 5 (bboxes for annots)
 - **Changes:** `pdftoppm`/pdfium; mean-abs delta after 1px blur; ignore annot bboxes; page cap; JPEG thumbnails on demand. `ff.visual_compare_gate` off. No LibreOffice. No Office compare.
+
+**Status — landed (2026-08-23).** `verify_render.py` rasterizes original and derivative page-by-page with `pdftoppm` at 150 dpi, applies a separable 1px box blur (anti-aliasing tolerance), and computes mean absolute per-channel delta plus fraction-over-threshold on the unmasked pixel population (annot/acroform bboxes from the original report are masked with a 2px blur-spread pad; pure-stdlib PPM math — no numpy/Pillow). Page selection: first 10 + last 5 + uniform middle sample, cap 30 (`Caps.max_verify_pages` shape). Thresholds: warn when mean-abs > 3/255 on >0.5% of compared pixels. Renderer absence degrades to `{"available": false}`; a page-count mismatch or render error warns but never fails the job. Wired into `clean_to_bundle` (engine_api) behind `COUNSELCLEAR_VISUAL_COMPARE` (default off); the result lands in the manifest under `verification.visual_compare` for operator review. Tests: `tests/test_verify_render.py` (parser round-trip, blur identity/spread, mask denominator semantics, page caps, flag default-off, live-poppler end-to-end asserting no visual warn on an incremental-update clean). JPEG thumbnail storage was dropped from scope — the manifest carries metrics only, previews stay on-demand elsewhere.
 
 ---
 
