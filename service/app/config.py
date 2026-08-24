@@ -41,6 +41,18 @@ class Config:
         # e.g. "runsc" (gVisor) adds a userspace kernel between the hostile
         # parser and the host kernel. Empty = Docker's default runtime.
         self.worker_runtime = os.environ.get("COUNSELCLEAR_WORKER_RUNTIME", "").strip()
+
+        # --- PR 20: Layer B watermark rewrite gate ----------------------------
+        # Off by default. When off, every Layer B path refuses (403 at the
+        # attestation route, job refusal in the runner). This is the product
+        # control the license/ToS review signs off on: the capability exists
+        # in the engine (service/scripts/rewrite_text.py) but is unreachable
+        # through the product unless the operator explicitly flips it on and
+        # the per-document signed attestation is presented.
+        self.watermark_tools_enabled = os.environ.get(
+            "COUNSELCLEAR_WATERMARK_TOOLS", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.attest_secret_file = self.auth_dir / "attest.secret"
         raw_timeout = os.environ.get("COUNSELCLEAR_WORKER_TIMEOUT_S", "600")
         try:
             self.worker_timeout_s = max(1, int(raw_timeout))
@@ -74,6 +86,10 @@ class Config:
         self.login_max_failures = self._int_env("COUNSELCLEAR_LOGIN_MAX_FAILURES", 5, 1)
         self.login_window_s = self._int_env("COUNSELCLEAR_LOGIN_WINDOW_S", 300, 1)
         self.login_lockout_s = self._int_env("COUNSELCLEAR_LOGIN_LOCKOUT_S", 300, 1)
+        # Session-cookie Secure flag: "auto" (default) follows the request
+        # scheme (correct with uvicorn --proxy-headers behind a TLS-terminating
+        # proxy); "true" always sets Secure; "false" never does (loopback dev).
+        self.cookie_secure = os.environ.get("COUNSELCLEAR_COOKIE_SECURE", "auto").strip().lower()
 
         # --- Phase 3: optional OIDC SSO ---------------------------------------
         # All three of ISSUER/CLIENT_ID/CLIENT_SECRET must be set to switch
@@ -126,6 +142,17 @@ class Config:
             self.secret_file.write_bytes(secrets.token_bytes(32))
             self.secret_file.chmod(0o600)
         return self.secret_file.read_bytes()
+
+    def ensure_attest_secret(self) -> bytes:
+        """Key material for Layer B attestation tokens (0600, provisioned
+        idempotently like the cookie secret). Distinct from the cookie
+        secret so a session-rotation can never invalidate outstanding
+        attestations mid-flight, and vice versa."""
+        self.ensure_dirs()
+        if not self.attest_secret_file.exists():
+            self.attest_secret_file.write_bytes(secrets.token_bytes(32))
+            self.attest_secret_file.chmod(0o600)
+        return self.attest_secret_file.read_bytes()
 
     def rotate_cookie_secret(self) -> bytes:
         """Replace the cookie secret with a fresh one, atomically.

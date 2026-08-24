@@ -232,9 +232,12 @@ Two supported postures:
    kills all sessions instantly when a laptop goes missing.
 
 Behind a TLS-terminating proxy, cookies get their `secure` flag automatically
-(the flag follows the request scheme). Keep `/health` and `/health/ready`
-off the public listener if your compliance checklist demands it; neither
-leaks anything but neither is authenticated.
+(the flag follows the request scheme when uvicorn runs with `--proxy-headers`,
+as the shipped systemd unit does). If your proxy cannot forward the proto
+(e.g. TCP passthrough), set `COUNSELCLEAR_COOKIE_SECURE=true` explicitly;
+use `false` only for loopback-only development. Keep `/health` and
+`/health/ready` off the public listener if your compliance checklist demands
+it; neither leaks anything but neither is authenticated.
 
 `GET /health` is a bare liveness check — no dependencies, always 200 once
 the process is up. `GET /health/ready` additionally runs `SELECT 1` against

@@ -27,6 +27,7 @@ or corrupt every matter's files and the audit chain directly.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -62,6 +63,7 @@ def job_root(cfg: Config, matter_id: str, job_id: str) -> Path:
 def build_subprocess_cmd(
     *, input_path: Path, output_dir: Path, kind: str, policy_id: str,
     attest: bool, matter_id: str, decisions: dict[str, str] | None = None,
+    layer_b: dict | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable, "-m", "app.worker", "run-job",
@@ -75,13 +77,18 @@ def build_subprocess_cmd(
         cmd.append("--attest")
     if decisions:
         cmd += ["--decisions", json.dumps(decisions)]
+    if layer_b:
+        # Only the strength crosses the process boundary; the attestation
+        # record itself stays in the API DB (Job.layer_b). The worker's
+        # meaning-lock gate is what makes the strength safe to use.
+        cmd += ["--layer-b", layer_b["strength"]]
     return cmd
 
 
 def build_docker_cmd(
     cfg: Config, *, mount_root: Path, input_path: Path, output_dir: Path,
     kind: str, policy_id: str, attest: bool, matter_id: str,
-    decisions: dict[str, str] | None = None,
+    decisions: dict[str, str] | None = None, layer_b: dict | None = None,
 ) -> list[str]:
     image = cfg.worker_image
     if not _DIGEST_RE.search(image):
@@ -93,6 +100,13 @@ def build_docker_cmd(
     # so the same --input/--output-dir args work in both modes.
     c_input = "/data" / input_path.relative_to(mount_root)
     c_output = "/data" / output_dir.relative_to(mount_root)
+    network = "none"
+    if layer_b:
+        # Layer B jobs need egress to the rewrite endpoint. PR 20 doctrine:
+        # join the dedicated rewrite-proxy network (whose only peer is the
+        # loopback-bound rewrite proxy); never the default bridge. The proxy
+        # name must be resolvable from the worker container.
+        network = os.environ.get("COUNSELCLEAR_REWRITE_NETWORK", "counselclear-rewrite")
     cmd = [
         "docker",
         "run",
@@ -104,7 +118,7 @@ def build_docker_cmd(
         cmd += ["--runtime", cfg.worker_runtime]
     cmd += [
         "--network",
-        "none",
+        network,
         "--read-only",
         "--cap-drop",
         "ALL",
@@ -125,6 +139,15 @@ def build_docker_cmd(
         f"{mount_root}:/data",
         "-e",
         f"COUNSELCLEAR_WORKER_IMAGE={image}",
+    ]
+    if layer_b:
+        # Layer B jobs need the rewrite endpoint env inside the container:
+        # backend/model/base-url/api-key plus the loopback/proxy override.
+        # Only the WATERMARKS_REWRITE_* namespace crosses — nothing else.
+        for k, v in sorted(os.environ.items()):
+            if k.startswith("WATERMARKS_REWRITE_"):
+                cmd += ["-e", f"{k}={v}"]
+    cmd += [
         image,
         "python",
         "-m",
@@ -145,6 +168,12 @@ def build_docker_cmd(
         cmd.append("--attest")
     if decisions:
         cmd += ["--decisions", json.dumps(decisions)]
+    if layer_b:
+        # Same product semantics as the subprocess path: the worker must
+        # actually run the rewrite (its meaning-lock gate fails the job on
+        # a miss) — otherwise the audit chain would record an attestation
+        # that was never exercised.
+        cmd += ["--layer-b", layer_b["strength"]]
     return cmd
 
 
@@ -180,6 +209,20 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storag
         storage = LocalStorage(cfg.data_root)
     job = s.get(Job, job_id)
     doc = s.get(Document, job.document_id)
+    if job is None or doc is None:
+        raise RuntimeError(f"job {job_id} or its document is missing")
+
+    # PR 20: a Layer B job must not execute once the flag is off. The flag
+    # was checked at attestation time; re-checking at dispatch closes the
+    # window where the operator disables watermark tools after a job was
+    # queued. Fails the job with a labeled error (sync_job records it).
+    if job.layer_b and not cfg.watermark_tools_enabled:
+        return RunnerResult(
+            rc=0,
+            stderr_tail="watermark tools disabled",
+            timed_out=False,
+            output_dir=job_root(cfg, job.matter_id, job.id) / "output",
+        )
 
     root = job_root(cfg, job.matter_id, job.id)
     input_dir, output_dir = root / "input", root / "output"
@@ -197,8 +240,8 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storag
         input_path=staged_input, output_dir=output_dir, kind=kind,
         policy_id=job.policy_id, attest=bool(job.attestation), matter_id=job.matter_id,
         decisions=job.finding_decisions or None,
-    )
-    import os
+        layer_b=job.layer_b or None,
+    )  # type: ignore[arg-type]  # layer_b: dict | None (Pyright: attribute of None)
 
     try:
         # Building the command (build_docker_cmd in particular: it raises

@@ -45,7 +45,8 @@ def _write_result(output_dir: Path, payload: dict) -> None:
 
 
 def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, attest: bool,
-             matter_id: str | None = None, decisions: dict[str, str] | None = None) -> int:
+             matter_id: str | None = None, decisions: dict[str, str] | None = None,
+             layer_b: str | None = None) -> int:
     """Pure: no DB, no network, no filesystem access outside the two given
     paths. Always exits 0 once result.json is written — the *content* of
     that file (status: done|refused|failed) is the real outcome."""
@@ -92,6 +93,7 @@ def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, a
                 matter_id=matter_id,
                 signature_break_attestation=attest,
                 decisions=decisions,
+                layer_b_strength=layer_b,
             )
             return finish(
                 "done",
@@ -138,6 +140,11 @@ def main(argv: list[str] | None = None) -> int:
              "(e.g. production's comments_and_notes) — without this every such cell "
              "resolves to keep, per plan_actions' own no_decision default",
     )
+    jp.add_argument(
+        "--layer-b", default=None, choices=("preserve", "paraphrase"),
+        help="PR 20: run a Layer B (statistical watermark) rewrite at this strength; "
+             "a meaning-lock miss fails the job instead of falling back to the original",
+    )
 
     p.add_argument("verb", choices=("inspect", "sanitize"), nargs="?")
     p.add_argument("path", type=Path, nargs="?")
@@ -157,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             attest=args.attest,
             matter_id=args.matter_id,
             decisions=decisions,
+            layer_b=args.layer_b,
         )
 
     if not args.verb or not args.path:

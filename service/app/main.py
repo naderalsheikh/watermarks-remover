@@ -37,12 +37,16 @@ from .models import AuditEvent, Document, Job, Matter, MatterAcl, _now, _uuid
 from .oidc import OidcError
 from .runner import run_job, sync_job
 from .security import (
+    ATTEST_STRENGTHS,
     LOCAL_SUBJECT,
     LoginThrottle,
+    consume_attestation,
     ensure_local_password,
+    issue_attestation,
     issue_session,
     revoke_all_sessions,
     session_subject,
+    verify_attestation,
     verify_password,
 )
 from .storage import StorageError as StorageError_
@@ -109,6 +113,22 @@ class SanitizeBody(BaseModel):
     # failed job with a clear PolicyError message) — the same place
     # policy_id's own validity is checked, not pre-validated here.
     finding_decisions: dict[str, str] = {}
+    # PR 20: Layer B (statistical watermark) rewrite, gated by the signed
+    # attestation token issued by POST /v1/attestations. Absent = Layer A
+    # only. The token is verified server-side before the job is created.
+    layer_b: LayerBBody | None = None
+
+
+class LayerBBody(BaseModel):
+    strength: str
+    token: str
+
+
+class AttestationBody(BaseModel):
+    matter_id: str
+    document_id: str
+    strength: str
+    reason: str = ""
 
 
 class AclBody(BaseModel):
@@ -383,6 +403,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if not has_perm(s, matter_id, user, perm):
             raise HTTPException(403, f"missing permission: {perm}")
 
+    def _cookie_secure(request: Request) -> bool:
+        """Session-cookie Secure flag per COUNSELCLEAR_COOKIE_SECURE.
+
+        auto (default): follow the request scheme — correct when uvicorn runs
+        with --proxy-headers behind a TLS-terminating proxy (the documented
+        topology; it then reflects X-Forwarded-Proto from the trusted proxy).
+        true/false: explicit override for deployments where the proxy cannot
+        forward the proto (e.g. TCP passthrough) or for loopback dev.
+        """
+        mode = cfg.cookie_secure
+        if mode == "true":
+            return True
+        if mode == "false":
+            return False
+        return request.url.scheme == "https"
+
     # --- auth ---------------------------------------------------------------
 
     @app.get("/v1/auth/config")
@@ -414,14 +450,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             throttle.record_failure(peer)
             raise HTTPException(403, "invalid credentials")
         throttle.record_success(peer)
-        # secure=True whenever the request actually arrived over TLS; not
-        # hardcoded True because this app has no TLS termination of its own
-        # today (loopback-bound plain HTTP is the documented v1 deployment)
-        # and a hardcoded secure flag would just make the cookie never get
-        # sent at all rather than add any real protection.
+        # Secure flag policy lives in _cookie_secure: "auto" follows the
+        # request scheme (this app has no TLS termination of its own today —
+        # loopback-bound plain HTTP is the documented v1 deployment — and a
+        # hardcoded secure flag would just make the cookie never get sent at
+        # all rather than add any real protection), with explicit
+        # COUNSELCLEAR_COOKIE_SECURE=true/false overrides for proxy
+        # deployments that cannot forward the proto.
         response.set_cookie(
             "cc_session", issue_session(cfg),
-            httponly=True, samesite="strict", secure=request.url.scheme == "https",
+            httponly=True, samesite="strict", secure=_cookie_secure(request),
         )
         return {"ok": True}
 
@@ -434,10 +472,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     oidc_mod.authorization_redirect(cfg, request), status_code=303
                 )
             except OidcError as e:
-                raise HTTPException(502, f"identity provider unavailable: {e}") from e
+                log.warning("oidc discovery failed for peer %s: %s", _client_host(request), e)
+                raise HTTPException(502, "identity provider unavailable") from e
 
         @app.get("/v1/auth/oidc/callback")
-        def oidc_callback(request: Request, response: Response, code: str = "", state: str = ""):
+        def oidc_callback(request: Request, code: str = "", state: str = ""):
             # Same per-peer sliding-window guard as local-password login:
             # this is the credential-establishing step (state/code/id_token
             # validation), so it deserves the same brute-force/DoS backstop
@@ -462,7 +501,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 claims = oidc_mod.validated_claims(cfg, id_token, nonce)
             except OidcError as e:
                 throttle.record_failure(peer)
-                raise HTTPException(401, f"SSO sign-in refused: {e}") from e
+                # Never echo IdP/validation internals to the client — the
+                # exception text can carry token endpoints, audience values,
+                # and PyJWT internals. Log it server-side for the operator.
+                log.warning("oidc sign-in refused for peer %s: %s", peer, e)
+                raise HTTPException(401, "SSO sign-in failed") from e
             if not oidc_mod.allowed_principal(cfg, claims):
                 # Fail closed: not on the allowlist. Same message shape for
                 # all denials; no enumeration help.
@@ -476,7 +519,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 issue_session(cfg, oidc_mod.principal_for(sub)),
                 httponly=True,
                 samesite="strict",
-                secure=request.url.scheme == "https",
+                secure=_cookie_secure(request),
             )
             # This is a top-level browser navigation (the IdP redirected the
             # user here), not a fetch() call from the web app — returning
@@ -514,6 +557,48 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         response.delete_cookie("cc_session", httponly=True, samesite="strict")
         return {"ok": True}
 
+    @app.post("/v1/attestations")
+    def create_attestation(
+        body: AttestationBody,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """PR 20: sign a Layer B (content-altering) attestation token for one
+        document. The product gate: 403 unless watermark tools are enabled,
+        the caller holds the sanitize permission, and the strength is one the
+        product allows (KD 10 — code/backtranslate stay CLI-only). The token
+        is HMAC-signed, doc-bound (sha256), 10-minute TTL, single-use; the
+        resulting job records the jti so the audit chain can tie the rewrite
+        back to this exact authorization."""
+        if not cfg.watermark_tools_enabled:
+            raise HTTPException(403, "watermark tools are disabled")
+        if body.strength not in ATTEST_STRENGTHS:
+            raise HTTPException(400, f"strength not product-allowed: {body.strength!r}")
+        _require(body.matter_id, "sanitize", s, user)
+        doc = _document(body.matter_id, body.document_id, s)
+        token, jti, expires_utc = issue_attestation(
+            cfg,
+            subject=user,
+            matter_id=body.matter_id,
+            doc_sha256=doc.sha256,
+            strength=body.strength,
+        )
+        append_event(
+            s,
+            matter_id=body.matter_id,
+            actor_id=user,
+            action="attest.issued",
+            payload={
+                "jti": jti,
+                "document_id": doc.id,
+                "sha256": doc.sha256,
+                "strength": body.strength,
+                "reason": body.reason[:500],
+            },
+        )
+        s.commit()
+        return {"token": token, "jti": jti, "expires_utc": expires_utc}
+
     @app.get("/v1/policies", dependencies=[Depends(principal)])
     def list_policies():
         return {"policies": POLICIES}
@@ -521,13 +606,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     # --- matters ------------------------------------------------------------
 
     @app.get("/v1/matters")
-    def list_matters(user: str = Depends(principal), s: Session = Depends(db_session)):
+    def list_matters(
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+        limit: int = 100,
+    ):
+        limit = min(max(1, limit), 500)  # server-capped, never unbounded
         matter_ids = [
             r[0]
             for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
         ]
         matters = (
-            s.query(Matter).filter(Matter.id.in_(matter_ids)).order_by(Matter.created_utc.desc())
+            s.query(Matter)
+            .filter(Matter.id.in_(matter_ids))
+            .order_by(Matter.created_utc.desc())
+            .limit(limit)
         )
         return {"matters": [_matter_dict(m) for m in matters]}
 
@@ -554,9 +647,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     def get_matter(
         matter_id: str, user: str = Depends(principal), s: Session = Depends(db_session)
     ):
-        matter = _matter(matter_id, s)
+        # Permission check first (uniform 403 for both nonexistent and
+        # unauthorized), matching every other matter-scoped route — the
+        # old existence-first order leaked an ID-existence oracle.
         _require(matter_id, "read", s, user)
-        return _matter_dict(matter)
+        return _matter_dict(_matter(matter_id, s))
 
     # --- documents ----------------------------------------------------------
 
@@ -603,14 +698,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         matter_id: str,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        limit: int = 100,
     ):
+        limit = min(max(1, limit), 500)  # server-capped, never unbounded
         _require(matter_id, "read", s, user)
         _matter(matter_id, s)
         docs = (
             s.query(Document)
             .filter_by(matter_id=matter_id)
             .order_by(Document.created_utc.desc())
-            .all()
+            .limit(limit)
         )
         return {"documents": [_doc_dict(d) for d in docs]}
 
@@ -671,6 +768,44 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         _require(matter_id, "sanitize", s, user)
         doc = _document(matter_id, doc_id, s)
         body = body or SanitizeBody()
+        layer_b: dict | None = None
+        attest_claims: dict | None = None
+        if body.layer_b is not None:
+            if not cfg.watermark_tools_enabled:
+                raise HTTPException(403, "watermark tools are disabled")
+            claims = verify_attestation(
+                cfg,
+                body.layer_b.token,
+                matter_id=matter_id,
+                doc_sha256=doc.sha256,
+            )
+            if claims is None:
+                raise HTTPException(403, "invalid or expired attestation token")
+            # The token binds a specific principal; only that principal may
+            # consume it (otherwise any sanitize-perm holder could spend
+            # someone else's authorization).
+            if claims.get("sub") != user:
+                raise HTTPException(403, "attestation token was issued to another principal")
+            jti = claims["jti"]
+            # Single-use: an issued jti that already backs a job is refused.
+            # The in-memory set covers this process; the DB row below is the
+            # durable record. .as_string() renders an UNQUOTED extraction on
+            # both dialects (Postgres ->, SQLite JSON_EXTRACT) — cast(...)
+            # quotes the scalar on both, so the comparison would never match.
+            prior = (
+                s.query(Job)
+                .filter(Job.layer_b["jti"].as_string() == jti)
+                .first()
+            )
+            if prior is not None:
+                raise HTTPException(403, "attestation token already used")
+            layer_b = {
+                "strength": claims["strength"],
+                "label": claims["label"],
+                "subject": claims["sub"],
+                "jti": jti,
+            }
+            attest_claims = claims
         job = _create_job(
             matter_id,
             doc.id,
@@ -680,7 +815,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             reason=body.reason[:500],
             attestation=bool(body.signature_break_attestation),
             finding_decisions=dict(body.finding_decisions),
+            layer_b=layer_b,
         )
+        if layer_b is not None and attest_claims is not None:
+            # Consume only after the job row committed: a failed creation
+            # must not burn the token in-memory with no durable record.
+            consume_attestation(attest_claims)
+        if layer_b is not None:
+            append_event(
+                s,
+                matter_id=matter_id,
+                actor_id=user,
+                action="attest.used",
+                payload={"jti": layer_b["jti"], "job_id": job.id, "strength": layer_b["strength"]},
+            )
+            s.commit()
         _execute_job(job.id, kind="sanitize")
         s.expire_all()
         return _job_dict(_job(matter_id, job.id, s))
@@ -691,14 +840,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         document_id: str = "",
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        limit: int = 100,
     ):
+        limit = min(max(1, limit), 500)  # server-capped, never unbounded
         _require(matter_id, "read", s, user)
         _matter(matter_id, s)
         q = s.query(Job).filter_by(matter_id=matter_id)
         if document_id:
             q = q.filter_by(document_id=document_id)
-        jobs = q.order_by(Job.created_utc.desc()).all()
-        return {"jobs": [_job_dict(j) for j in jobs]}
+        jobs = (
+            q.order_by(Job.created_utc.desc())
+            .limit(limit)
+            .all()
+        )
+        # List view omits the full result payload (it can be large for
+        # inspect jobs); the detail route carries it.
+        return {"jobs": [_job_dict(j, include_result=False) for j in jobs]}
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}")
     def get_job(
@@ -887,7 +1044,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "created_utc": d.created_utc,
         }
 
-    def _job_dict(j: Job) -> dict:
+    def _job_dict(j: Job, *, include_result: bool = True) -> dict:
         out = {
             "id": j.id,
             "matter_id": j.matter_id,
@@ -897,11 +1054,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "status": j.status,
             "error": j.error,
             "attestation": j.attestation,
+            "layer_b": j.layer_b,
             "worker_image": j.worker_image,
             "created_utc": j.created_utc,
             "finished_utc": j.finished_utc,
         }
-        if j.result_json:
+        if include_result and j.result_json:
             out["result"] = j.result_json
         return out
 

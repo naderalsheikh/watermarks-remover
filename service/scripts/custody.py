@@ -123,6 +123,7 @@ def emit_manifest(
     operator_id: str | None = None,
     matter_id: str | None = None,
     attestation_kind: str = "checkbox",
+    layer_b: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the manifest dict. Downloaded manifests must omit matter names,
     so only ids ever appear here."""
@@ -149,6 +150,8 @@ def emit_manifest(
         },
         "attestation_kind": attestation_kind,
     }
+    if layer_b is not None:
+        manifest["layer_b"] = dict(layer_b)
     if operator_id is not None:
         manifest["operator"] = {"id": str(operator_id)}
     if matter_id is not None:

@@ -113,6 +113,12 @@ class Job(Base):
     # unreachable through the API and production sanitize was effectively
     # a no-op strip.
     finding_decisions: Mapped[dict] = mapped_column(JSONColumn, default=dict)
+    # PR 20: set only when the sanitize job ran a Layer B (statistical
+    # watermark) rewrite under a signed attestation. {strength, label,
+    # subject, jti} — the jti is the single-use attestation token id so
+    # the audit chain can tie the job back to the exact authorization.
+    # None for ordinary (Layer A only) jobs.
+    layer_b: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
     # queued | running | done | refused | failed
     status: Mapped[str] = mapped_column(String(12), default="queued", index=True)
     error: Mapped[str] = mapped_column(String(1000), default="")

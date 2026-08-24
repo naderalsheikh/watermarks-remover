@@ -9,13 +9,17 @@ a strict charset so it can safely key matter ACLs and audit actor_ids.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import os
 import re
 import threading
 import time
+import uuid
 from collections import deque
+from datetime import UTC, datetime
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -110,6 +114,106 @@ def revoke_all_sessions(cfg: Config) -> None:
     reintroduce shared mutable session state this profile deliberately does
     not have. Use when an operator suspects a leaked cookie."""
     cfg.rotate_cookie_secret()
+
+
+# --- PR 20: Layer B attestation tokens -------------------------------------
+# A signed, short-lived, doc-bound authorization to run a content-altering
+# (Layer B / statistical watermark) rewrite on one specific document. The
+# server signs it because the value being bound is "this authenticated
+# principal authorized this content-altering act on this exact document" —
+# a client self-attestation proves nothing for the audit chain.
+
+ATTEST_TTL_S = 600  # 10 minutes: bearer token, keep the replay window small
+ATTEST_LABEL = "content_altering"
+# Product-pinned strengths (design doc KD 10: the product refuses the
+# aggressive CLI-only strengths). code/backtranslate stay CLI-only.
+ATTEST_STRENGTHS = ("preserve", "paraphrase")
+
+# Single-use jti tracking. In-memory: like LoginThrottle, this process owns
+# the fast path; the durable single-use record is the Job.layer_b.jti column
+# (an issued jti that already backs a job is refused at the route) and the
+# audit chain. A process restart clears the set — the DB record remains.
+_consumed_jtis: set[str] = set()
+
+
+def _fmt_utc(ts: int) -> str:
+    return datetime.fromtimestamp(ts, UTC).isoformat(timespec="seconds")
+
+
+def issue_attestation(
+    cfg: Config,
+    *,
+    subject: str,
+    matter_id: str,
+    doc_sha256: str,
+    strength: str,
+    label: str = ATTEST_LABEL,
+) -> tuple[str, str, str]:
+    """Sign a Layer B attestation token. Returns (token, jti, expires_utc)."""
+    if not valid_subject(subject):
+        raise ValueError(f"invalid attestation subject: {subject!r}")
+    if strength not in ATTEST_STRENGTHS:
+        raise ValueError(f"strength not product-allowed: {strength!r}")
+    if label != ATTEST_LABEL:
+        raise ValueError(f"label not product-allowed: {label!r}")
+    secret = cfg.ensure_attest_secret()
+    now = int(time.time())
+    jti = uuid.uuid4().hex
+    payload = {
+        "v": 1,
+        "sub": subject,
+        "matter_id": matter_id,
+        "doc_sha256": doc_sha256,
+        "strength": strength,
+        "label": label,
+        "iat": now,
+        "exp": now + ATTEST_TTL_S,
+        "jti": jti,
+    }
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    token = f"{base64.urlsafe_b64encode(body).decode().rstrip('=')}.{_sign(secret, body)}"
+    return token, jti, _fmt_utc(now + ATTEST_TTL_S)
+
+
+def verify_attestation(
+    cfg: Config,
+    token: str | None,
+    *,
+    matter_id: str,
+    doc_sha256: str,
+) -> dict | None:
+    """Validate an attestation token against a document. Returns the claims
+    dict on success, None on any miss (bad shape, bad signature, expired,
+    wrong matter/doc, already consumed)."""
+    if not token or token.count(".") != 1:
+        return None
+    body_b64, sig = token.split(".")
+    try:
+        body = base64.urlsafe_b64decode(body_b64 + "=" * (-len(body_b64) % 4))
+        claims = json.loads(body)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    secret = cfg.ensure_attest_secret()
+    if not hmac.compare_digest(sig, _sign(secret, body)):
+        return None
+    now = int(time.time())
+    if claims.get("v") != 1 or claims.get("label") != ATTEST_LABEL:
+        return None
+    if claims.get("matter_id") != matter_id or claims.get("doc_sha256") != doc_sha256:
+        return None
+    if not isinstance(claims.get("exp"), int) or now >= claims["exp"]:
+        return None
+    jti = claims.get("jti")
+    if not isinstance(jti, str) or jti in _consumed_jtis:
+        return None
+    return claims
+
+
+def consume_attestation(token_claims: dict) -> None:
+    """Mark an attestation token single-used (called when the job commits)."""
+    jti = token_claims.get("jti")
+    if isinstance(jti, str):
+        _consumed_jtis.add(jti)
 
 
 class LoginThrottle:
