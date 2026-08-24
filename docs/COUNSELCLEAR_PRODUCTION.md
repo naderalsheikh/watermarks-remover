@@ -17,6 +17,11 @@ be protected accordingly.
 
 ## 1. Topology
 
+A worked nginx TLS-terminating proxy config (upload-size cap matching the
+engine's 256 MiB limit, login rate-limit zone, docs endpoints 404'd at the
+edge, `X-Forwarded-Proto` for cookie `secure`) ships as
+`deploy/nginx-counselclear.conf.example`.
+
 ```
             TLS terminate            ┌─────────────────────────────┐
 browser ───────────────────────────▶│ reverse proxy (nginx/ALB)   │
@@ -96,7 +101,11 @@ hardening pass, and the PR 21 status note) for the fuller rationale.
 process instead of the containerized compose service** — a host process
 reaches the host's own Docker daemon the ordinary way (its user's normal
 `docker` group membership / socket permissions), no socket-mounting into a
-container required. This is a different topology from "N containerized
+container required. A hardened systemd unit for exactly this shape ships as
+`deploy/counselclear-api.service.example` (non-root user, `ProtectSystem=strict`
+with the data root as the only writable path, `--proxy-headers` so cookies
+keep their `secure` flag behind TLS, docker group commented in only when
+`WORKER_MODE=docker`). This is a different topology from "N containerized
 `cc-api` replicas behind a proxy" (§1): it trades that horizontal-scaling
 shape for the isolation property. If you need both — many containerized
 `cc-api` replicas *and* per-job container isolation — that requires a
@@ -120,7 +129,8 @@ hardening upgrade available on top:
 
 - **gVisor (runsc)** for the per-job workers: intercepts syscalls in
   userspace, so a parser 0-day faces a smaller kernel surface. Register
-  the runtime with Docker on the host:
+  the runtime with Docker on the host (`deploy/docker-daemon-gvisor.json.example`
+  — merge the `runtimes` key into your existing `/etc/docker/daemon.json`):
 
   ```json
   // /etc/docker/daemon.json
@@ -228,6 +238,11 @@ not authenticated.
 
 ## 7. Operations checklist
 
+- [ ] Deploy artifacts match what's running: proxy config derived from
+      `deploy/nginx-counselclear.conf.example` (rate-limit zones, 256m body
+      cap, docs endpoints 404'd), service unit from
+      `deploy/counselclear-api.service.example` (hardening intact, docker
+      group only if `WORKER_MODE=docker`)
 - [ ] `cc-api` healthcheck green (`GET /health` exercises the DB)
 - [ ] Startup posture log reviewed: `worker_mode`, `auth_mode`, `db_backend`,
       no warnings about subprocess mode / missing clamscan / empty allowlist
