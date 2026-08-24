@@ -1,0 +1,83 @@
+# CounselClear API — native host process (systemd unit example).
+#
+# This is the topology from docs/COUNSELCLEAR_PRODUCTION.md §3 that gets REAL
+# per-job container isolation: a host process reaches the host's own Docker
+# daemon the ordinary way (its user's docker group membership), so
+# COUNSELCLEAR_WORKER_MODE=docker launches per-job containers without ever
+# mounting /var/run/docker.sock into a long-lived container. The compose
+# `legal` cc-api deliberately cannot do this (DooD rejected — see
+# docs/COUNSELCLEAR_DESIGN.md); this unit is how you deploy instead when
+# per-job isolation matters.
+#
+# Install shape assumed (adjust paths to yours):
+#   /opt/counselclear          — this repo (git checkout, pinned tag/digest)
+#   /opt/counselclear/.venv    — venv with service/requirements-app.txt
+#                                PLUS native tools: qpdf, exiftool, poppler
+#                                (pdftoppm), and clamav/freshclam if you want
+#                                the real malware-scan path
+#   /etc/counselclear/counselclear.env — env vars, root:root 0600. Copy the
+#                                relevant COUNSELCLEAR_* blocks from the
+#                                repo's .env.example (DATABASE_URL or local
+#                                password, OIDC_*, WORKER_MODE=docker,
+#                                digest-pinned WORKER_IMAGE, VISUAL_COMPARE…)
+#
+# Copy to /etc/systemd/system/counselclear-api.service, then:
+#   systemctl daemon-reload && systemctl enable --now counselclear-api
+
+[Unit]
+Description=CounselClear control plane (native host process)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=counselclear
+Group=counselclear
+# ONLY needed for COUNSELCLEAR_WORKER_MODE=docker (per-job containers). It
+# grants root-equivalent Docker access to this service — that is precisely
+# the point of this topology (a dedicated OS user owning that access, no
+# container hop), so keep the rest of the unit's hardening intact. Leave it
+# commented out for subprocess mode; don't grant what you don't use.
+#SupplementaryGroups=docker
+
+Environment=COUNSELCLEAR_DATA_ROOT=/var/lib/counselclear
+EnvironmentFile=/etc/counselclear/counselclear.env
+WorkingDirectory=/opt/counselclear/service
+ExecStart=/opt/counselclear/.venv/bin/python -m uvicorn app.asgi:app \
+    --host 127.0.0.1 --port 8443 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
+# --proxy-headers/--forwarded-allow-ips: behind the TLS proxy, session
+# cookies must see scheme=https or they lose their `secure` flag. The app's
+# brute-force throttle keys on the socket peer, never X-Forwarded-For, so
+# forwarding headers cannot weaken it.
+
+# Crash mid-job is survivable by design: create_app sweeps orphaned
+# queued/running jobs to failed on boot before serving.
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# --- sandboxing ------------------------------------------------------------
+# Strong baseline that coexists with both worker modes. ReadWritePaths is the
+# data root only; everything else on disk is read-only to the process.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/counselclear
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

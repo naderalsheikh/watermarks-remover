@@ -1,0 +1,8 @@
+{
+  "_comment": "CounselClear helper: register gVisor (runsc) as a Docker runtime so per-job workers can launch with --runtime runsc (COUNSELCLEAR_WORKER_RUNTIME=runsc). Example file only — merge the 'runtimes' key into your existing /etc/docker/daemon.json rather than replacing it, then `systemctl reload docker` and verify with `docker info | grep runtimes`. Install gVisor first: https://gvisor.dev/docs/user_guide/install/. While a job runs, confirm it actually got the hardened runtime: `docker inspect <job-container> | grep Runtime` must show runsc.",
+  "runtimes": {
+    "runsc": {
+      "path": "runsc"
+    }
+  }
+}

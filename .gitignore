@@ -8,6 +8,8 @@
 !/benchmarks/**
 !/docs/
 !/docs/**
+!/deploy/
+!/deploy/**
 !/engine/
 !/engine/__init__.py
 !/engine/schemas/

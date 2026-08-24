@@ -1,0 +1,84 @@
+# CounselClear TLS-terminating reverse proxy (nginx example).
+#
+# Matches docs/COUNSELCLEAR_PRODUCTION.md §1: the proxy terminates TLS and
+# talks plain HTTP to cc-api over loopback/private network only. Copy to
+# /etc/nginx/sites-available/counselclear.conf, fill in your names/certs,
+# and symlink into sites-enabled/. This file is an example, not provisioned
+# by anything in this repo.
+#
+# What each directive is FOR (don't delete blindly):
+#   client_max_body_size 256m   — matches the engine's MAX_INPUT_BYTES cap;
+#                                 nginx's default 1m would 413 real matters
+#                                 before the app ever sees them.
+#   limit_req login zone        — connection-level brute-force backstop for
+#                                 /v1/auth/*; the app's own throttle is
+#                                 per-process memory and resets on restart.
+#   /docs|/redoc|/openapi.json  — the app already serves these only with
+#                                 COUNSELCLEAR_ENABLE_DOCS=1; refusing them
+#                                 here too means a misconfigured env var
+#                                 still doesn't publish them publicly.
+#   X-Forwarded-Proto           — cc-api must run uvicorn with
+#                                 --proxy-headers --forwarded-allow-ips=<proxy ip>
+#                                 (see deploy/counselclear-api.service) or it
+#                                 will not see https and session cookies lose
+#                                 their `secure` flag.
+
+limit_req_zone $binary_remote_addr zone=ccl_login:10m rate=30r/m;
+limit_req_zone $binary_remote_addr zone=ccl_api:10m rate=600r/m;
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name counselclear.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/counselclear.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/counselclear.example.com/privkey.pem;
+    # TLS 1.2+ only; no client-cert gate here — auth is OIDC/local in the app.
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Uploads are capped by the engine at 256 MiB; allow exactly that much
+    # request body, plus modest header headroom.
+    client_max_body_size 256m;
+    client_body_timeout 120s;
+
+    # Fail-closed API docs at the edge as well as in the app (returns 404).
+    location ~ ^/(docs|redoc|openapi\.json) {
+        return 404;
+    }
+
+    # Brute-force backstop: stricter than the app's per-peer throttle so a
+    # distributed guess still burns proxy-side tokens first. burst allows
+    # small browser races; nodelay keeps UX sane under the burst ceiling.
+    location = /v1/auth/login {
+        limit_req zone=ccl_login burst=5 nodelay;
+        proxy_pass http://127.0.0.1:8443;
+        include /etc/nginx/counselclear-proxy-headers.conf;
+    }
+    location = /v1/auth/logout {
+        proxy_pass http://127.0.0.1:8443;
+        include /etc/nginx/counselclear-proxy-headers.conf;
+    }
+
+    location / {
+        limit_req zone=ccl_api burst=40 nodelay;
+        proxy_pass http://127.0.0.1:8443;
+        include /etc/nginx/counselclear-proxy-headers.conf;
+    }
+}
+
+# /etc/nginx/counselclear-proxy-headers.conf — kept beside this file's real
+# installed copy:
+#   proxy_http_version 1.1;
+#   proxy_set_header Host              $host;
+#   proxy_set_header X-Forwarded-Proto https;   # cookie `secure` flag depends on this
+#   proxy_set_header X-Forwarded-For   $remote_addr;  # informational only; app never trusts it for throttling
+#   proxy_read_timeout 900s;                     # long jobs stream status via polling, but be generous
+#   proxy_pass_request_headers on;
+
+server {
+    listen 80;
+    server_name counselclear.example.com;
+    # ACME challenges only; everything else upgrades.
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
