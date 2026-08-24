@@ -37,6 +37,7 @@ from .models import AuditEvent, Document, Job, Matter, _now, _uuid
 from .oidc import OidcError
 from .runner import run_job, sync_job
 from .security import (
+    LOCAL_SUBJECT,
     LoginThrottle,
     ensure_local_password,
     issue_session,
@@ -363,10 +364,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         response.delete_cookie("cc_session", httponly=True, samesite="strict")
         return {"ok": True}
 
-    @app.post("/v1/auth/revoke-sessions", dependencies=[Depends(principal)])
-    def revoke_sessions(response: Response):
+    @app.post("/v1/auth/revoke-sessions")
+    def revoke_sessions(response: Response, user: str = Depends(principal)):
         """Rotate the cookie secret: every issued session token fails
-        signature verification from now on (including this caller's)."""
+        signature verification from now on (including this caller's).
+
+        Restricted to the local operator identity. This product has no
+        global-admin concept — permissions are per-matter ACL rows — so
+        `Depends(principal)` alone (any authenticated session, including an
+        OIDC principal scoped to a single matter) is not authorization for a
+        deployment-wide action. Under OIDC, local login is disabled and no
+        session can ever carry the operator subject, so this route is
+        unreachable there by design; the equivalent action is deleting
+        `{data_root}/auth/cookie.secret` on the host, which any operator with
+        host access already has."""
+        if user != LOCAL_SUBJECT:
+            raise HTTPException(403, "session revocation is restricted to the local operator")
         revoke_all_sessions(cfg)
         response.delete_cookie("cc_session", httponly=True, samesite="strict")
         return {"ok": True}

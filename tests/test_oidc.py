@@ -220,6 +220,26 @@ def test_callback_issues_session_for_allowed_email(tmp_path, monkeypatch):
     assert audit["chain_ok"]
 
 
+def test_oidc_principal_cannot_revoke_all_sessions(tmp_path, monkeypatch):
+    """revoke-sessions is a deployment-wide action gated on the local
+    operator subject, not on being merely authenticated. An OIDC principal
+    is a real, matter-scoped identity — full login, valid cookie, even
+    OWNER perms on a matter it created — but must still be refused here;
+    Depends(principal) alone is authentication, not this authorization."""
+    _stub_idp(monkeypatch, {"good-code": {"sub": "sub-alice", "email": "alice@example.com"}})
+    c = _make_app(tmp_path, monkeypatch)
+    r = c.get("/v1/auth/oidc/login", follow_redirects=False)
+    state = r.headers["location"].split("state=")[1].split("&")[0]
+    c.get("/v1/auth/oidc/callback", params={"code": "good-code", "state": state})
+
+    assert c.post("/v1/matters", json={"name": "m"}).status_code == 200
+
+    r2 = c.post("/v1/auth/revoke-sessions")
+    assert r2.status_code == 403
+    # And the session is still intact — nothing was revoked.
+    assert c.post("/v1/matters", json={"name": "m2"}).status_code == 200
+
+
 def test_callback_denies_non_allowlisted_principal(tmp_path, monkeypatch):
     _stub_idp(monkeypatch, {"eve-code": {"sub": "sub-eve", "email": "eve@example.com"}})
     c = _make_app(tmp_path, monkeypatch)
