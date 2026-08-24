@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "service" / "scripts"
 APP_DIR = Path(__file__).resolve().parents[1] / "service" / "app"
@@ -198,6 +199,38 @@ def test_logout_and_revoke_require_auth(tmp_path, monkeypatch):
     c = TestClient(create_app(tmp_path / "d"))
     assert c.post("/v1/auth/logout").status_code == 401
     assert c.post("/v1/auth/revoke-sessions").status_code == 401
+
+
+# --- liveness vs readiness ----------------------------------------------------
+
+
+def test_health_is_liveness_only_and_ignores_db(tmp_path, monkeypatch):
+    """/health must stay 200 even when the database is unreachable — an
+    orchestrator's liveness probe must not restart the process over a
+    transient DB outage; that's what /health/ready is for."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    c = TestClient(create_app(tmp_path / "d"))
+
+    def boom(self, *_a, **_kw):
+        raise RuntimeError("db is down")
+
+    monkeypatch.setattr(Session, "execute", boom)
+    assert c.get("/health").status_code == 200
+
+
+def test_health_ready_503s_when_db_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    c = TestClient(create_app(tmp_path / "d"))
+    assert c.get("/health/ready").status_code == 200
+
+    def boom(self, *_a, **_kw):
+        raise RuntimeError("db is down")
+
+    monkeypatch.setattr(Session, "execute", boom)
+    r = c.get("/health/ready")
+    assert r.status_code == 503
+    # /health stays unaffected by the same fault.
+    assert c.get("/health").status_code == 200
 
 
 # --- deep health + request logging -------------------------------------------

@@ -232,9 +232,21 @@ Two supported postures:
    kills all sessions instantly when a laptop goes missing.
 
 Behind a TLS-terminating proxy, cookies get their `secure` flag automatically
-(the flag follows the request scheme). Keep `/health` off the public
-listener if your compliance checklist demands it; it leaks nothing but is
-not authenticated.
+(the flag follows the request scheme). Keep `/health` and `/health/ready`
+off the public listener if your compliance checklist demands it; neither
+leaks anything but neither is authenticated.
+
+`GET /health` is a bare liveness check — no dependencies, always 200 once
+the process is up. `GET /health/ready` additionally runs `SELECT 1` against
+the database and returns 503 if it's unreachable. Wire an orchestrator's
+**liveness** probe (the one that restarts the container) to `/health` and
+its **readiness** probe (the one that stops routing traffic) to
+`/health/ready` — a liveness probe on the DB-checking endpoint would
+restart `cc-api` over a transient database outage that a restart can't fix
+anyway, and would keep restarting it for as long as the outage lasts.
+Compose's own `healthcheck:` (below) uses `/health/ready`, since compose
+doesn't auto-restart on an unhealthy container by default — there the DB
+check is purely informational, surfaced in `docker ps`.
 
 ## 7. Operations checklist
 
@@ -243,7 +255,9 @@ not authenticated.
       cap, docs endpoints 404'd), service unit from
       `deploy/counselclear-api.service.example` (hardening intact, docker
       group only if `WORKER_MODE=docker`)
-- [ ] `cc-api` healthcheck green (`GET /health` exercises the DB)
+- [ ] `cc-api` healthcheck green (`GET /health/ready` exercises the DB);
+      any orchestrator livenessProbe points at `/health` instead, not
+      `/health/ready`
 - [ ] Startup posture log reviewed: `worker_mode`, `auth_mode`, `db_backend`,
       no warnings about subprocess mode / missing clamscan / empty allowlist
 - [ ] JSON request logs shipped somewhere durable; `X-Request-ID` echoed to

@@ -16,7 +16,6 @@ import re
 import threading
 import time
 from collections import deque
-from contextlib import suppress
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -63,8 +62,15 @@ def verify_password(cfg: Config, password: str) -> bool:
         return False
 
 
-def _sign(secret: bytes, payload: bytes) -> str:
+def sign_hmac_sha256(secret: bytes, payload: bytes) -> str:
+    """The one HMAC-SHA256-hexdigest construction for every signed token in
+    this app (session cookies here, OIDC CSRF state in app.oidc) — a single
+    implementation so a future digest/encoding change can't silently drift
+    between the two call sites."""
     return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+
+_sign = sign_hmac_sha256
 
 
 def issue_session(cfg: Config, subject: str = LOCAL_SUBJECT) -> str:
@@ -103,9 +109,7 @@ def revoke_all_sessions(cfg: Config) -> None:
     revocation story for stateless HMAC tokens — per-token blacklists would
     reintroduce shared mutable session state this profile deliberately does
     not have. Use when an operator suspects a leaked cookie."""
-    with suppress(FileNotFoundError):
-        cfg.secret_file.unlink()
-    cfg.ensure_cookie_secret()
+    cfg.rotate_cookie_secret()
 
 
 class LoginThrottle:

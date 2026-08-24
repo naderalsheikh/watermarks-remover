@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import secrets
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 
@@ -86,11 +88,14 @@ class Config:
         self.oidc_client_secret = os.environ.get("COUNSELCLEAR_OIDC_CLIENT_SECRET", "").strip()
         self.oidc_scopes = os.environ.get("COUNSELCLEAR_OIDC_SCOPES", "openid profile email")
         # Comma-separated emails (case-insensitive) or raw `sub` values that
-        # may sign in. Empty list = deny all.
+        # may sign in. Empty list = deny all. `sub` is an opaque IdP
+        # identifier and the OIDC spec treats it as case-sensitive, so it
+        # keeps its original case here; oidc_allowed_lower exists only for
+        # matching the email claim, which is conventionally
+        # case-insensitive.
         raw_allowed = os.environ.get("COUNSELCLEAR_OIDC_ALLOWED", "")
-        self.oidc_allowed = {
-            item.strip().lower() for item in raw_allowed.split(",") if item.strip()
-        }
+        self.oidc_allowed = {item.strip() for item in raw_allowed.split(",") if item.strip()}
+        self.oidc_allowed_lower = {item.lower() for item in self.oidc_allowed}
         # Override only when the app sits behind a proxy/Path-based route so
         # the redirect_uri seen by the IdP differs from the request's own
         # scheme://host/v1/auth/oidc/callback.
@@ -120,4 +125,32 @@ class Config:
         if not self.secret_file.exists():
             self.secret_file.write_bytes(secrets.token_bytes(32))
             self.secret_file.chmod(0o600)
+        return self.secret_file.read_bytes()
+
+    def rotate_cookie_secret(self) -> bytes:
+        """Replace the cookie secret with a fresh one, atomically.
+
+        The old revoke path did unlink() then ensure_cookie_secret(),
+        leaving a window with no secret file at all. Anything racing that
+        window (another thread issuing a session, or a second concurrent
+        revoke) would call ensure_cookie_secret() itself, see the file
+        missing, and create its own — so whichever caller wrote last could
+        silently overwrite a secret another caller had just handed out to a
+        client, invalidating a session before its cookie ever reached the
+        browser. Writing to a temp file and os.replace()-ing it into place
+        means the secret file always exists and always holds one complete,
+        valid value — every concurrent reader sees either the pre- or
+        post-rotation secret, never a missing file or a torn write.
+        """
+        self.ensure_dirs()
+        fd, tmp_name = tempfile.mkstemp(dir=self.auth_dir, prefix=".cookie.secret.")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(secrets.token_bytes(32))
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, self.secret_file)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                os.unlink(tmp_name)
+            raise
         return self.secret_file.read_bytes()

@@ -80,8 +80,12 @@ def test_allowed_list_parsing(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
     cfg = Config(tmp_path)
     assert cfg.oidc_allowed == {"alice@example.com"}
-    monkeypatch.setenv("COUNSELCLEAR_OIDC_ALLOWED", " Alice@Example.com , sub-123 ,")
-    assert Config(tmp_path).oidc_allowed == {"alice@example.com", "sub-123"}
+    # `sub` is case-sensitive per spec and keeps its configured case in
+    # oidc_allowed; oidc_allowed_lower exists only for the email match.
+    monkeypatch.setenv("COUNSELCLEAR_OIDC_ALLOWED", " Alice@Example.com , Sub-123 ,")
+    cfg2 = Config(tmp_path)
+    assert cfg2.oidc_allowed == {"Alice@Example.com", "Sub-123"}
+    assert cfg2.oidc_allowed_lower == {"alice@example.com", "sub-123"}
     monkeypatch.setenv("COUNSELCLEAR_OIDC_ALLOWED", "")
     assert Config(tmp_path).oidc_allowed == set()
 
@@ -240,6 +244,22 @@ def test_oidc_principal_cannot_revoke_all_sessions(tmp_path, monkeypatch):
     assert c.post("/v1/matters", json={"name": "m2"}).status_code == 200
 
 
+def test_sub_allowlist_match_is_case_sensitive(tmp_path, monkeypatch):
+    """The email claim matches case-insensitively (conventional), but `sub`
+    is the IdP's opaque, case-sensitive identifier per the OIDC spec — an
+    allowlist entry differing only in case from the real sub must not
+    match, since a same-case-insensitive-but-different sub could belong to
+    a different principal at some IdPs."""
+    from app.config import Config
+    from app.oidc import allowed_principal
+
+    monkeypatch.setenv("COUNSELCLEAR_OIDC_ALLOWED", "Sub-ABC123")
+    cfg = Config(tmp_path)
+    assert allowed_principal(cfg, {"sub": "Sub-ABC123"})
+    assert not allowed_principal(cfg, {"sub": "sub-abc123"})
+    assert not allowed_principal(cfg, {"sub": "SUB-ABC123"})
+
+
 def test_callback_denies_non_allowlisted_principal(tmp_path, monkeypatch):
     _stub_idp(monkeypatch, {"eve-code": {"sub": "sub-eve", "email": "eve@example.com"}})
     c = _make_app(tmp_path, monkeypatch)
@@ -261,6 +281,25 @@ def test_callback_rejects_bad_or_missing_state(tmp_path, monkeypatch):
         ).status_code
         == 401
     )
+
+
+def test_callback_throttles_repeated_failures(tmp_path, monkeypatch):
+    """The callback is the credential-establishing step for OIDC, same as
+    /v1/auth/login is for the local password — it must not be hammerable
+    at unlimited rate just because the password check itself happens at
+    the IdP instead of here."""
+    _stub_idp(monkeypatch, {"eve-code": {"sub": "sub-eve", "email": "eve@example.com"}})
+    c = _make_app(tmp_path, monkeypatch, {"COUNSELCLEAR_LOGIN_MAX_FAILURES": "3"})
+    r = c.get("/v1/auth/oidc/login", follow_redirects=False)
+    state = r.headers["location"].split("state=")[1].split("&")[0]
+    for _ in range(3):
+        resp = c.get(
+            "/v1/auth/oidc/callback", params={"code": "eve-code", "state": state}
+        )
+        assert resp.status_code == 403  # not allowlisted
+    locked = c.get("/v1/auth/oidc/callback", params={"code": "eve-code", "state": state})
+    assert locked.status_code == 429
+    assert int(locked.headers["Retry-After"]) >= 1
 
 
 def test_callback_maps_idp_errors_to_401(tmp_path, monkeypatch):

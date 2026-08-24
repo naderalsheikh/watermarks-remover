@@ -32,6 +32,7 @@ import urllib.request
 import jwt as pyjwt
 
 from .config import Config
+from .security import sign_hmac_sha256
 
 STATE_TTL_S = 600
 _DISCOVERY_TTL_S = 3600
@@ -89,7 +90,7 @@ def make_state(cfg: Config) -> str:
     ).hexdigest()[:32]
     issued = int(time.time())
     payload = f"{nonce}.{issued}".encode()
-    return f"{payload.decode()}.{hmac.new(secret, b'state|' + payload, hashlib.sha256).hexdigest()}"
+    return f"{payload.decode()}.{sign_hmac_sha256(secret, b'state|' + payload)}"
 
 
 def parse_state(cfg: Config, state: str) -> str:
@@ -100,7 +101,7 @@ def parse_state(cfg: Config, state: str) -> str:
         raise OidcError("malformed state")
     nonce, issued_s, sig = parts
     payload = f"{nonce}.{issued_s}".encode()
-    expected = hmac.new(secret, b"state|" + payload, hashlib.sha256).hexdigest()
+    expected = sign_hmac_sha256(secret, b"state|" + payload)
     if not hmac.compare_digest(sig, expected):
         raise OidcError("state signature mismatch")
     try:
@@ -201,10 +202,12 @@ def validated_claims(cfg: Config, id_token: str, expected_nonce: str) -> dict:
 
 
 def allowed_principal(cfg: Config, claims: dict) -> bool:
+    """`sub` is the OIDC spec's case-sensitive opaque identifier — matched
+    exactly against the allowlist as configured, not lowercased. Only
+    `email` (conventionally case-insensitive) is folded to lowercase."""
     sub = str(claims.get("sub", ""))
     email = str(claims.get("email", "")).lower()
-    pool = cfg.oidc_allowed
-    return bool(sub and sub.lower() in pool) or bool(email and email in pool)
+    return bool(sub and sub in cfg.oidc_allowed) or bool(email and email in cfg.oidc_allowed_lower)
 
 
 def principal_for(sub: str) -> str:

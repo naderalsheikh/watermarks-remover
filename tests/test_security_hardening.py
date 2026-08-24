@@ -621,3 +621,64 @@ def test_login_throttle_sweep_keeps_live_state(monkeypatch):
     assert "locked" not in t._failures
     assert "locked" not in t._locked_until
     assert t.allow("locked")
+
+
+# --- Config.rotate_cookie_secret: no missing-file window ----------------------
+# revoke_all_sessions used to unlink() the secret file then call
+# ensure_cookie_secret() to recreate it, leaving a window with no secret file
+# at all. Anything racing that window (a concurrent login issuing a session,
+# or a second concurrent revoke) would see the file missing and create its
+# own — whichever caller wrote last could silently invalidate a session
+# another caller had just handed a client. rotate_cookie_secret() replaces
+# that with a single atomic os.replace().
+
+
+def test_rotate_cookie_secret_changes_value_and_invalidates_old_sessions(tmp_path):
+    from app.config import Config
+    from app.security import issue_session, session_subject
+
+    cfg = Config(tmp_path)
+    tok = issue_session(cfg)
+    assert session_subject(cfg, tok) == "operator"
+
+    old_secret = cfg.ensure_cookie_secret()
+    new_secret = cfg.rotate_cookie_secret()
+    assert new_secret != old_secret
+    assert cfg.secret_file.exists()
+    assert cfg.ensure_cookie_secret() == new_secret  # rotation is durable
+
+    # The pre-rotation token no longer validates.
+    assert session_subject(cfg, tok) is None
+
+
+def test_rotate_cookie_secret_never_leaves_file_missing(tmp_path, monkeypatch):
+    """os.replace() is the only mutation of the real path — assert no code
+    path in rotate_cookie_secret unlinks it first."""
+    from app.config import Config
+
+    cfg = Config(tmp_path)
+    cfg.ensure_cookie_secret()
+
+    real_unlink = os.unlink
+    seen_secret_file_unlinked = []
+
+    def spying_unlink(path, *a, **kw):
+        if str(path) == str(cfg.secret_file):
+            seen_secret_file_unlinked.append(path)
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(os, "unlink", spying_unlink)
+    cfg.rotate_cookie_secret()
+    assert seen_secret_file_unlinked == []
+    assert cfg.secret_file.exists()
+
+
+def test_revoke_all_sessions_uses_atomic_rotation(tmp_path):
+    from app.config import Config
+    from app.security import issue_session, revoke_all_sessions, session_subject
+
+    cfg = Config(tmp_path)
+    tok = issue_session(cfg)
+    revoke_all_sessions(cfg)
+    assert session_subject(cfg, tok) is None
+    assert cfg.secret_file.exists()

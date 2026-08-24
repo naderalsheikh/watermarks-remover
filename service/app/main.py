@@ -17,7 +17,7 @@ from common import MAX_INPUT_BYTES  # a size constant, not a parser
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.orm import Session
 
 # Imported as a module (not by name): tests stub IdP calls on the module
@@ -45,6 +45,8 @@ from .security import (
     session_subject,
     verify_password,
 )
+from .storage import StorageError as StorageError_
+from .storage import original_key, storage_from_config
 
 
 class LoginBody(BaseModel):
@@ -97,19 +99,27 @@ def _sweep_orphaned_jobs(s: Session) -> int:
     anything, any queued/running row is by definition orphaned: its worker
     subprocess/container died with the old API process and sync_job will
     never run for it. Left alone it would sit "running" forever.
+
+    A single bulk UPDATE, not a load-then-mutate-per-row loop: boot already
+    blocks on this (the app must not start serving before orphans are
+    reconciled), and a restart after a long queue backlog could otherwise
+    mean thousands of individual ORM-tracked UPDATE statements before the
+    first request is served.
     """
-    rows = s.query(Job).filter(Job.status.in_(("queued", "running"))).all()
-    if not rows:
-        return 0
-    for j in rows:
-        j.status = "failed"
-        j.error = "interrupted by an application restart"
-        j.finished_utc = _now()
+    result = s.execute(
+        update(Job)
+        .where(Job.status.in_(("queued", "running")))
+        .values(
+            status="failed",
+            error="interrupted by an application restart",
+            finished_utc=_now(),
+        )
+    )
     s.commit()
-    return len(rows)
+    return result.rowcount or 0
 
 
-def _log_startup_posture(cfg: Config, swept: int) -> None:
+def _log_startup_posture(cfg: Config, swept: int, storage) -> None:
     """One-time, non-secret operational summary at boot — this app shipped
     with zero logging until now, which meant an operator running it
     unisolated or with a no-op malware scanner had no way to notice short
@@ -154,11 +164,36 @@ def _log_startup_posture(cfg: Config, swept: int) -> None:
         )
 
 
+_unknown_client_state = {"warned": False}
+
+
 def _client_host(request: Request) -> str:
     # Socket peer only — X-Forwarded-For is client-controlled and would let
     # an attacker rotate fake IPs past the throttle. Proxy deployments that
     # need real-IP accounting should rate-limit at the proxy.
-    return request.client.host if request.client else "unknown"
+    #
+    # request.client is None only when the ASGI server exposes no peer
+    # address at all (e.g. bound to a Unix domain socket) — every such
+    # request collapses onto this one literal key, sharing one throttle
+    # bucket and one access-log "client" value across every caller. That's
+    # a real loss of the per-peer isolation this exists for, not a
+    # theoretical one: it silently affects 100% of traffic on that
+    # deployment shape. It isn't attacker-triggerable over a normal TCP
+    # path (the ASGI server decides this, not the client), so it can't be
+    # abused to dodge the throttle — but an operator deploying that way
+    # needs to know the throttle is now effectively deployment-wide and
+    # must rate-limit at the proxy, so warn once instead of failing silent.
+    if request.client:
+        return request.client.host
+    if not _unknown_client_state["warned"]:
+        _unknown_client_state["warned"] = True
+        log.warning(
+            "request.client is unavailable (no ASGI peer address, e.g. a "
+            "Unix-socket bind): the login throttle and access log now "
+            "share one bucket across every caller on this deployment — "
+            "rate-limit at the proxy instead."
+        )
+    return "unknown"
 
 
 async def _read_capped(file: UploadFile, cap: int | None = None) -> bytes:
@@ -272,7 +307,19 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             s.close()
 
     @app.get("/health")
-    def health(s: Session = Depends(db_session)):
+    def health():
+        """Liveness only: the process is up and serving HTTP. No DB, no
+        dependencies — a probe wired to this should never restart the
+        container over a transient database outage; use /health/ready for
+        that instead (see docs/COUNSELCLEAR_PRODUCTION.md)."""
+        return {"ok": True}
+
+    @app.get("/health/ready")
+    def health_ready(s: Session = Depends(db_session)):
+        """Readiness: can this instance actually serve a request right
+        now. 503 when the database is unreachable — an orchestrator should
+        stop routing traffic here, not restart the process (restarting
+        doesn't fix a downed database and just adds churn)."""
         try:
             s.execute(text("SELECT 1"))
         except Exception:
@@ -341,7 +388,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
         @app.get("/v1/auth/oidc/callback")
         def oidc_callback(request: Request, response: Response, code: str = "", state: str = ""):
+            # Same per-peer sliding-window guard as local-password login:
+            # this is the credential-establishing step (state/code/id_token
+            # validation), so it deserves the same brute-force/DoS backstop
+            # as /v1/auth/login rather than being reachable at unlimited
+            # rate just because the password check happens to live at the
+            # IdP instead of here.
+            peer = _client_host(request)
+            if not throttle.allow(peer):
+                raise HTTPException(
+                    429,
+                    "too many failed sign-in attempts; try again later",
+                    headers={"Retry-After": str(throttle.retry_after_s(peer))},
+                )
             if not code or not state:
+                throttle.record_failure(peer)
                 raise HTTPException(400, "missing code/state")
             try:
                 nonce = oidc_mod.parse_state(cfg, state)  # CSRF: signed + fresh
@@ -350,11 +411,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 )
                 claims = oidc_mod.validated_claims(cfg, id_token, nonce)
             except OidcError as e:
+                throttle.record_failure(peer)
                 raise HTTPException(401, f"SSO sign-in refused: {e}") from e
             if not oidc_mod.allowed_principal(cfg, claims):
                 # Fail closed: not on the allowlist. Same message shape for
                 # all denials; no enumeration help.
+                throttle.record_failure(peer)
                 raise HTTPException(403, "principal not permitted")
+            throttle.record_success(peer)
             sub = str(claims["sub"])
             response.set_cookie(
                 "cc_session",

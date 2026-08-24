@@ -63,7 +63,18 @@ def event_hash(prev_hash: str, seq: int, actor_id: str, action: str, payload: di
 def append_event(
     s: Session, *, matter_id: str, actor_id: str, action: str, payload: dict
 ) -> AuditEvent:
-    """Serialized per-matter append. Commits."""
+    """Serialized per-matter append. Commits.
+
+    Callers routinely s.add() other rows (a Matter, a Document, ACL grants)
+    on the same session before calling this, expecting append_event's own
+    commit to persist those too as one atomic unit. A seq collision retry
+    used to call the plain s.rollback() — which discards the *entire*
+    transaction, not just this insert, silently dropping whatever the
+    caller had already staged. Each attempt now runs inside its own
+    SAVEPOINT (Session.begin_nested()): a collision unwinds only that
+    attempt's insert, leaving earlier pending objects intact for the next
+    attempt (or the final commit) to still pick up.
+    """
     with _matter_lock(matter_id):
         for _attempt in range(_APPEND_ATTEMPTS):
             last_seq = s.execute(
@@ -90,16 +101,20 @@ def append_event(
                 prev_hash=prev_hash,
                 row_hash=event_hash(prev_hash, seq, actor_id, action, payload),
             )
-            s.add(ev)
             try:
-                s.commit()
-                return ev
+                with s.begin_nested():
+                    s.add(ev)
+                    s.commit()
             except IntegrityError:
                 # Another process claimed this seq between our read and our
                 # commit (possible only on Postgres — SQLite's BEGIN IMMEDIATE
-                # holds the write lock across the whole transaction). Roll
-                # back and re-read; the retry appends at the winner's seq+1.
-                s.rollback()
+                # holds the write lock across the whole transaction). The
+                # begin_nested() SAVEPOINT already rolled back just this
+                # attempt's insert; re-read and append at the winner's seq+1.
+                continue
+            else:
+                s.commit()
+                return ev
         raise RuntimeError(f"audit append kept colliding on seq for matter {matter_id}")
 
 

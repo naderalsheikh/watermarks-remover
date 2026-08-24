@@ -98,7 +98,12 @@ services:
     user: "10001:10001"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8443/health', timeout=5)"]
+      # /health/ready (not /health) deliberately: it checks DB reachability,
+      # which is what an operator staring at `docker ps` wants to know. A
+      # k8s-style livenessProbe elsewhere should use /health instead — that
+      # one has no dependencies, so it can't trigger a restart over a
+      # transient DB outage a restart wouldn't fix anyway.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8443/health/ready', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 5
