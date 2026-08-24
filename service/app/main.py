@@ -383,6 +383,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if not has_perm(s, matter_id, user, perm):
             raise HTTPException(403, f"missing permission: {perm}")
 
+    def _cookie_secure(request: Request) -> bool:
+        """Session-cookie Secure flag per COUNSELCLEAR_COOKIE_SECURE.
+
+        auto (default): follow the request scheme — correct when uvicorn runs
+        with --proxy-headers behind a TLS-terminating proxy (the documented
+        topology; it then reflects X-Forwarded-Proto from the trusted proxy).
+        true/false: explicit override for deployments where the proxy cannot
+        forward the proto (e.g. TCP passthrough) or for loopback dev.
+        """
+        mode = cfg.cookie_secure
+        if mode == "true":
+            return True
+        if mode == "false":
+            return False
+        return request.url.scheme == "https"
+
     # --- auth ---------------------------------------------------------------
 
     @app.get("/v1/auth/config")
@@ -414,14 +430,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             throttle.record_failure(peer)
             raise HTTPException(403, "invalid credentials")
         throttle.record_success(peer)
-        # secure=True whenever the request actually arrived over TLS; not
-        # hardcoded True because this app has no TLS termination of its own
-        # today (loopback-bound plain HTTP is the documented v1 deployment)
-        # and a hardcoded secure flag would just make the cookie never get
-        # sent at all rather than add any real protection.
+        # Secure flag policy lives in _cookie_secure: "auto" follows the
+        # request scheme (this app has no TLS termination of its own today —
+        # loopback-bound plain HTTP is the documented v1 deployment — and a
+        # hardcoded secure flag would just make the cookie never get sent at
+        # all rather than add any real protection), with explicit
+        # COUNSELCLEAR_COOKIE_SECURE=true/false overrides for proxy
+        # deployments that cannot forward the proto.
         response.set_cookie(
             "cc_session", issue_session(cfg),
-            httponly=True, samesite="strict", secure=request.url.scheme == "https",
+            httponly=True, samesite="strict", secure=_cookie_secure(request),
         )
         return {"ok": True}
 
@@ -434,10 +452,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     oidc_mod.authorization_redirect(cfg, request), status_code=303
                 )
             except OidcError as e:
-                raise HTTPException(502, f"identity provider unavailable: {e}") from e
+                log.warning("oidc discovery failed for peer %s: %s", _client_host(request), e)
+                raise HTTPException(502, "identity provider unavailable") from e
 
         @app.get("/v1/auth/oidc/callback")
-        def oidc_callback(request: Request, response: Response, code: str = "", state: str = ""):
+        def oidc_callback(request: Request, code: str = "", state: str = ""):
             # Same per-peer sliding-window guard as local-password login:
             # this is the credential-establishing step (state/code/id_token
             # validation), so it deserves the same brute-force/DoS backstop
@@ -462,7 +481,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 claims = oidc_mod.validated_claims(cfg, id_token, nonce)
             except OidcError as e:
                 throttle.record_failure(peer)
-                raise HTTPException(401, f"SSO sign-in refused: {e}") from e
+                # Never echo IdP/validation internals to the client — the
+                # exception text can carry token endpoints, audience values,
+                # and PyJWT internals. Log it server-side for the operator.
+                log.warning("oidc sign-in refused for peer %s: %s", peer, e)
+                raise HTTPException(401, "SSO sign-in failed") from e
             if not oidc_mod.allowed_principal(cfg, claims):
                 # Fail closed: not on the allowlist. Same message shape for
                 # all denials; no enumeration help.
@@ -476,7 +499,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 issue_session(cfg, oidc_mod.principal_for(sub)),
                 httponly=True,
                 samesite="strict",
-                secure=request.url.scheme == "https",
+                secure=_cookie_secure(request),
             )
             # This is a top-level browser navigation (the IdP redirected the
             # user here), not a fetch() call from the web app — returning
@@ -521,13 +544,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     # --- matters ------------------------------------------------------------
 
     @app.get("/v1/matters")
-    def list_matters(user: str = Depends(principal), s: Session = Depends(db_session)):
+    def list_matters(
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+        limit: int = 100,
+    ):
+        limit = min(max(1, limit), 500)  # server-capped, never unbounded
         matter_ids = [
             r[0]
             for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
         ]
         matters = (
-            s.query(Matter).filter(Matter.id.in_(matter_ids)).order_by(Matter.created_utc.desc())
+            s.query(Matter)
+            .filter(Matter.id.in_(matter_ids))
+            .order_by(Matter.created_utc.desc())
+            .limit(limit)
         )
         return {"matters": [_matter_dict(m) for m in matters]}
 
@@ -554,9 +585,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     def get_matter(
         matter_id: str, user: str = Depends(principal), s: Session = Depends(db_session)
     ):
-        matter = _matter(matter_id, s)
+        # Permission check first (uniform 403 for both nonexistent and
+        # unauthorized), matching every other matter-scoped route — the
+        # old existence-first order leaked an ID-existence oracle.
         _require(matter_id, "read", s, user)
-        return _matter_dict(matter)
+        return _matter_dict(_matter(matter_id, s))
 
     # --- documents ----------------------------------------------------------
 
@@ -603,14 +636,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         matter_id: str,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        limit: int = 100,
     ):
+        limit = min(max(1, limit), 500)  # server-capped, never unbounded
         _require(matter_id, "read", s, user)
         _matter(matter_id, s)
         docs = (
             s.query(Document)
             .filter_by(matter_id=matter_id)
             .order_by(Document.created_utc.desc())
-            .all()
+            .limit(limit)
         )
         return {"documents": [_doc_dict(d) for d in docs]}
 
@@ -691,14 +726,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         document_id: str = "",
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        limit: int = 100,
     ):
+        limit = min(max(1, limit), 500)  # server-capped, never unbounded
         _require(matter_id, "read", s, user)
         _matter(matter_id, s)
         q = s.query(Job).filter_by(matter_id=matter_id)
         if document_id:
             q = q.filter_by(document_id=document_id)
-        jobs = q.order_by(Job.created_utc.desc()).all()
-        return {"jobs": [_job_dict(j) for j in jobs]}
+        jobs = (
+            q.order_by(Job.created_utc.desc())
+            .limit(limit)
+            .all()
+        )
+        # List view omits the full result payload (it can be large for
+        # inspect jobs); the detail route carries it.
+        return {"jobs": [_job_dict(j, include_result=False) for j in jobs]}
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}")
     def get_job(
@@ -887,7 +930,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "created_utc": d.created_utc,
         }
 
-    def _job_dict(j: Job) -> dict:
+    def _job_dict(j: Job, *, include_result: bool = True) -> dict:
         out = {
             "id": j.id,
             "matter_id": j.matter_id,
@@ -901,7 +944,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "created_utc": j.created_utc,
             "finished_utc": j.finished_utc,
         }
-        if j.result_json:
+        if include_result and j.result_json:
             out["result"] = j.result_json
         return out
 

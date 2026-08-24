@@ -74,6 +74,10 @@ class Config:
         self.login_max_failures = self._int_env("COUNSELCLEAR_LOGIN_MAX_FAILURES", 5, 1)
         self.login_window_s = self._int_env("COUNSELCLEAR_LOGIN_WINDOW_S", 300, 1)
         self.login_lockout_s = self._int_env("COUNSELCLEAR_LOGIN_LOCKOUT_S", 300, 1)
+        # Session-cookie Secure flag: "auto" (default) follows the request
+        # scheme (correct with uvicorn --proxy-headers behind a TLS-terminating
+        # proxy); "true" always sets Secure; "false" never does (loopback dev).
+        self.cookie_secure = os.environ.get("COUNSELCLEAR_COOKIE_SECURE", "auto").strip().lower()
 
         # --- Phase 3: optional OIDC SSO ---------------------------------------
         # All three of ISSUER/CLIENT_ID/CLIENT_SECRET must be set to switch
