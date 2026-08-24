@@ -996,7 +996,7 @@ Deliberately out of scope for v1, not blockers: per-org residency rows (single-t
 
 ### Phase 4 — Advanced
 
-DMS, e-discovery, desktop agent, watermark gate (PR 20). **Signed Mac app** (if ever) lives here — not v1.
+DMS, e-discovery, desktop agent, watermark gate (PR 20). **Signed Mac app** (if ever) lives here — not v1. **Started (2026-08-24):** PR 19 (Next.js reviewer UI) landed — see PR 19 below. PR 20 (gated watermark / Layer B) not started.
 
 ### Feature flags
 
@@ -1242,6 +1242,7 @@ PR 14 (PDF raster warn) is optional-parallel after 13 and is **not** required to
 - **Files/components:** `web/`
 - **Depends on:** PR 15, PR 11 (policy picker), PR 9 (unicode diff), PR 16 (ACL)
 - **Changes:** Category-grouped findings, policy picker, reports, bundle download. `ui.html` remains for engine-only use.
+- **Status (2026-08-24): landed.** Same-origin static export (`web/README.md` has the architecture — no Next.js server in production; nginx serves `web/out` at `/` and proxies `/v1/*` to `cc-api`, per the updated `deploy/nginx-counselclear.conf.example`). Pages: login (password or OIDC redirect, driven by the new `GET /v1/auth/config`), matters list + create, matter detail (upload, per-document inspect/sanitize with the policy picker from the new `GET /v1/policies`), job detail — category-grouped findings for inspect jobs, the sanitize manifest's actions/findings-before/verification checks for sanitize jobs (different shapes: `apply_actions` has already resolved every finding into an action by the time a sanitize job exists, so there's no structured `Finding[]` left to group). Matter/job detail pages take their id via `?id=` query params, not `[id]` route segments, since static export can't pre-render pages for ids that don't exist at build time. Auth is a client-side gate: every page fetches its own data on mount and a 401 bounces to `/login`. Landing this also surfaced and fixed two backend gaps: the API had no `GET` list endpoints for matters/documents/jobs (only single-resource routes existed), and the OIDC callback returned raw JSON instead of redirecting the browser back into the app. Verified end-to-end against the real API in a browser (login, matter create, upload, inspect, sanitize, findings, bundle download, logout); `next build` produces a working static export.
 
 ### PR 20 — Gated watermark / Layer B module (off by default)
 
