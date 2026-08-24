@@ -48,6 +48,22 @@ class Config:
         # Note: original downloads are gated solely by the per-matter
         # download_original permission (PR 16) — no deployment flag.
 
+        # --- PR 21: custody storage (S3 Object Lock / CMK / residency) ---------
+        # Empty/default keeps the engine's local O_EXCL+0444 write-once files
+        # (Phase 2 profile). "s3" switches the original store to S3-compatible
+        # object storage with Object Lock retention; CMK/VOLUME_KEY_FILE enable
+        # at-rest envelope encryption; RESIDENCY_REGION pins the bucket region
+        # (checked at startup, mismatch refuses to boot).
+        self.storage_mode = os.environ.get("COUNSELCLEAR_STORAGE", "local").strip().lower()
+        self.s3_bucket = os.environ.get("COUNSELCLEAR_S3_BUCKET", "").strip()
+        self.s3_prefix = os.environ.get("COUNSELCLEAR_S3_PREFIX", "").strip().strip("/")
+        self.s3_region = os.environ.get("COUNSELCLEAR_S3_REGION", "").strip()
+        self.residency_region = os.environ.get("COUNSELCLEAR_RESIDENCY_REGION", "").strip()
+        self.retention_days = self._int_env("COUNSELCLEAR_RETENTION_DAYS", 365, 0)
+        self.org = os.environ.get("COUNSELCLEAR_ORG", "local").strip() or "local"
+        self.cmk_arn = os.environ.get("COUNSELCLEAR_CMK_ARN", "").strip()
+        self.volume_key_file = os.environ.get("COUNSELCLEAR_VOLUME_KEY_FILE", "").strip()
+
         # --- login brute-force throttle ---------------------------------------
         # Sliding-window failure counter per client peer address, held in
         # process memory (a restart resets it; a second API process keeps its

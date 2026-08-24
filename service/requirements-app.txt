@@ -13,3 +13,11 @@ psycopg[binary]==3.2.13
 # crypto is where subtle bugs live; PyJWT + the cryptography extra is the
 # boring correct choice. Only exercised when COUNSELCLEAR_OIDC_ISSUER is set.
 pyjwt[crypto]==2.13.0
+# AES-GCM envelope encryption for the custody store (PR 21) — already pulled
+# in by pyjwt[crypto] above; listed explicitly because app.storage imports it
+# directly now.
+cryptography==50.0.0
+# S3-compatible custody backend + KMS CMK keyring (PR 21). Lazily imported by
+# app.storage, so local-only installs (COUNSELCLEAR_STORAGE unset) never load
+# it; shipped in the image so production mode works out of the box.
+boto3==1.43.78

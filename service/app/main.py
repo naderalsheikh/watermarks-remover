@@ -121,8 +121,16 @@ def _log_startup_posture(cfg: Config, swept: int) -> None:
         worker_mode=cfg.worker_mode,
         auth_mode="oidc" if cfg.oidc_enabled else "local_password",
         db_backend="postgres" if cfg.database_url else "sqlite",
+        storage=storage.describe(),
         orphaned_jobs_failed=swept,
     )
+    if cfg.storage_mode == "s3" and cfg.retention_days <= 0:
+        log.warning(
+            "COUNSELCLEAR_STORAGE=s3 with COUNSELCLEAR_RETENTION_DAYS=0: "
+            "Object Lock is off — overwrite/delete protection relies on "
+            "If-None-Match only (and any Object-Lock-enabled bucket still "
+            "enforces it)."
+        )
     if cfg.oidc_enabled and not cfg.oidc_allowed:
         log.warning(
             "OIDC is enabled but COUNSELCLEAR_OIDC_ALLOWED is empty: the "
@@ -197,7 +205,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     )
     with session_factory() as s:
         swept = _sweep_orphaned_jobs(s)
-    _log_startup_posture(cfg, swept)
+    storage = storage_from_config(cfg)
+    _log_startup_posture(cfg, swept, storage)
 
     # Docs are fail-closed: /docs, /redoc and /openapi.json carry no auth
     # check, so they only exist when explicitly opted in with
@@ -437,12 +446,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             bytes=len(data),
             storage_path="",
         )
-        dest = cfg.data_root / "matters" / matter_id / "docs" / doc.id / "original" / name
+        key = original_key(cfg.org, matter_id, doc.id, name)
         try:
-            stored, _created = custody_mod.write_once(dest, data)
-        except custody_mod.CustodyError as e:
+            doc.storage_path = storage.write_once(key, data)
+        except StorageError_ as e:
             raise HTTPException(409, str(e)) from e
-        doc.storage_path = str(stored)
         s.add(doc)
         append_event(
             s,
@@ -481,7 +489,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         """
         s = session_factory()
         try:
-            res = run_job(cfg, s, job_id, kind=kind)
+            res = run_job(cfg, s, job_id, kind=kind, storage=storage)
             sync_job(s, job_id, res)
         finally:
             s.close()
@@ -560,11 +568,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         job = _job(matter_id, job_id, s)
         if job.status != "done" or not job.bundle_dir:
             raise HTTPException(409, f"job is {job.status}; no bundle")
-        original_path = None
+        original_ref = None
+        original_name = None
         if include_original:
             _require(matter_id, "download_original", s, user)
             doc = s.get(Document, job.document_id)
-            original_path = Path(doc.storage_path)
+            original_ref = doc.storage_path
+            original_name = doc.filename
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             bundle = Path(job.bundle_dir)
@@ -586,8 +596,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 .get("findings_before"),
             }
             zf.writestr("report.json", json.dumps(report, indent=2, sort_keys=True))
-            if original_path and original_path.exists():
-                zf.write(original_path, arcname=f"original/{original_path.name}")
+            if original_ref and storage.exists(original_ref):
+                zf.writestr(f"original/{original_name}", storage.read(original_ref))
         append_event(
             s,
             matter_id=matter_id,

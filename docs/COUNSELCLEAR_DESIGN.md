@@ -870,7 +870,7 @@ Privilege is the threat model. Treat every uploaded file as hostile *and* confid
 
 - Local: bind `127.0.0.1`; single argon2id hash in `0600` file; session cookie `HttpOnly`, `SameSite=Strict`. Optional “no password” only if bind is loopback **and** a config flag `local_open=true` (default false once FastAPI exists). Prototype `WATERMARKS_SERVER_API_KEY` remains for `server.py`.
 - Firm: OIDC — **implemented (PR 21, 2026-08-23)**, see below; auditors see manifests/findings, not originals, unless granted.
-- CMK in production; local uses OS keychain or a 0600 volume key. **Not yet implemented** — production custody objects are filesystem + optional S3, with no customer-managed-key wrapping yet.
+- CMK in production; local uses OS keychain or a 0600 volume key. **Implemented (2026-08-24, `app/storage.py`)** — at-rest envelope encryption (AES-256-GCM, per-object data key) under a KMS CMK (`COUNSELCLEAR_CMK_ARN`) or a 0600 volume-key file (`COUNSELCLEAR_VOLUME_KEY_FILE`), on the local and S3 backends alike; opt-in, default unchanged.
 
 ### Malware
 
@@ -967,7 +967,7 @@ Deliberately **not** done in this pass (flagged, not silently deferred): default
 - **SQLite durability pragmas.** WAL journal mode (readers no longer block behind a writer's `BEGIN IMMEDIATE`), `busy_timeout=5000` (concurrent commits wait instead of failing instantly with "database is locked"), and `foreign_keys=ON` (the declared matters→documents→jobs graph is now actually enforced; SQLite leaves FKs off by default).
 - **Login brute-force throttle.** Sliding-window per-peer-address failure counter (`COUNSELCLEAR_LOGIN_MAX_FAILURES/WINDOW_S/LOCKOUT_S`, defaults 5/300/300); once tripped, even correct passwords get 429 + Retry-After until lockout expiry. Keyed by socket peer, never X-Forwarded-For (spoofable).
 - **Logout + session revocation.** `POST /v1/auth/logout` clears the cookie; `POST /v1/auth/revoke-sessions` rotates the cookie secret so every outstanding HMAC token dies server-side instantly (the honest revocation story for stateless tokens).
-- **Deep health + compose healthcheck.** `/health` now executes `SELECT 1` against the DB (503 when unavailable); `cc-api` in compose gained a `healthcheck:` hitting it, so orchestrators can see a wedged instance.
+- **Deep health + compose healthcheck.** `GET /health/ready` executes `SELECT 1` against the DB (503 when unavailable); `cc-api` in compose gained a `healthcheck:` hitting it, so orchestrators can see a wedged instance. `GET /health` stays a dependency-free liveness check (see the 2026-08-24 review-fixes pass below — the DB check originally lived at `/health` itself, which is the wrong endpoint for a livenessProbe to restart on).
 - **Fail-closed API docs.** `/docs`, `/redoc`, `/openapi.json` now exist only with `COUNSELCLEAR_ENABLE_DOCS=1` (they carry no auth check; the old disable-only flag still wins if both are set). Compose leaves them off.
 - **Structured JSON logging + request IDs.** Every request logs one JSON line (`event`, `request_id`, method, path, status, duration_ms, client) via the app logger; responses carry `X-Request-ID` for correlation. Startup posture lines use the same funnel. `COUNSELCLEAR_ACCESS_LOG=0` silences per-request lines. Filenames/basenames are still never logged (path has no query string).
 - **Live ClamAV definitions.** A `cc-freshclam` sidecar (legal profile) refreshes a shared `clamav-db` volume every 6 h; `cc-api` mounts it read-only and scans with `COUNSELCLEAR_CLAMAV_DB_DIR=/clamav-defs` instead of the build-time seed that goes stale the day the image was built.
@@ -977,7 +977,7 @@ Deliberately **not** done in this pass (flagged, not silently deferred): default
 
 ### Phase 3 — Production (PR 21)
 
-Postgres, OIDC, gVisor, CMK, residency, Object Lock. **Partially landed (2026-08-23):** Postgres backend and OIDC SSO are implemented and tested (see PR 21 below); gVisor worker isolation is wired (`COUNSELCLEAR_WORKER_RUNTIME=runsc`) and documented in `docs/COUNSELCLEAR_PRODUCTION.md`. CMK, region residency, and S3 Object Lock remain undone — production custody storage is still filesystem/plain-S3 with no key-wrapping or retention lock.
+Postgres, OIDC, gVisor, CMK, residency, Object Lock. **Landed (2026-08-24):** Postgres backend and OIDC SSO are implemented and tested (see PR 21 below); gVisor worker isolation is wired (`COUNSELCLEAR_WORKER_RUNTIME=runsc`) and documented in `docs/COUNSELCLEAR_PRODUCTION.md`; S3 Object Lock, CMK envelope encryption, and the residency pin shipped in `app/storage.py` (2026-08-24, env-gated — see PR 21 below). Not done: per-org residency rows (single-tenant `COUNSELCLEAR_ORG` only), KMS key-rotation policy, and operator-side IAM/bucket provisioning docs.
 
 ### Phase 4 — Advanced
 
@@ -1239,7 +1239,11 @@ PR 14 (PDF raster warn) is optional-parallel after 13 and is **not** required to
 - **Files/components:** app config, IAM, bucket object-lock
 - **Depends on:** PR 16, PR 17, PR 18
 - **Changes:** Multi-tenant schema, OIDC, customer key, region pin, legal hold. No engine changes.
-- **Status (2026-08-23):** Postgres backend, OIDC SSO, and gVisor worker isolation shipped and tested. Customer-managed keys, region residency, and S3 Object Lock/retention are not started.
+- **Status (2026-08-24):** Postgres backend, OIDC SSO, and gVisor worker isolation shipped and tested (2026-08-23). **Custody storage (2026-08-24):** `app/storage.py` adds a storage boundary for the original store with three backends/behaviours, all env-gated and defaulting to the unchanged local write-once path:
+  - `S3Storage` (`COUNSELCLEAR_STORAGE=s3` + `COUNSELCLEAR_S3_BUCKET`): S3-compatible object storage, one key layout `{org}/matters/{matter}/docs/{doc}/original/{filename}`, write-once via `If-None-Match: *` (server-side O_EXCL) plus per-object Object Lock `COMPLIANCE` retention (`COUNSELCLEAR_RETENTION_DAYS`, default 365).
+  - CMK envelope encryption (AES-256-GCM, per-object data key): `COUNSELCLEAR_CMK_ARN` (AWS KMS) or `COUNSELCLEAR_VOLUME_KEY_FILE` (0600 file; exactly one may be set). Transparent wrapper around either backend; idempotency judged on plaintext; tamper detection via GCM tag + envelope key-id.
+  - Residency pin (`COUNSELCLEAR_RESIDENCY_REGION`): the bucket's actual location is checked at startup and a mismatch refuses to boot.
+  The API upload/staging/bundle paths read originals exclusively through the backend (`documents.storage_path` stays the reference: absolute path locally, object key on S3). Job staging and worker output remain local disk (PR 17 worker contract unchanged). Tests: `tests/test_storage.py` (22). Not done: per-org residency rows, KMS rotation/alias policy, IAM/bucket provisioning docs, S3 for derivative/bundle stores.
 
 Each engine PR merges if its tests pass without the next PR. After PR 13 the local service is usable for the operator’s own matters. Shell PRs 15–21 do not rewrite `container_meta.py`.
 

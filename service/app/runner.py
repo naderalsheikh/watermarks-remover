@@ -163,15 +163,21 @@ def job_budget_s(kind: str, caps=None) -> int:
     return c.inspect_timeout_s + c.apply_timeout_s + c.verify_timeout_s + 60
 
 
-def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize") -> RunnerResult:
+def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storage=None) -> RunnerResult:
     """Blocking execution of one queued job in an isolated worker.
 
     Stages ``{job_root}/input/{name}`` (a copy of the document — the real
     write-once original at ``doc.storage_path`` is never handed to the
     worker directly) and ``{job_root}/output/`` (where the worker writes
     ``result.json`` and, for sanitize, ``bundle/``). Only ``job_root`` is
-    exposed to the worker, in either mode.
+    exposed to the worker, in either mode. ``storage`` is the custody
+    backend (PR 21); it defaults to local write-once so callers that
+    predate the storage layer keep working unchanged.
     """
+    from .storage import LocalStorage
+
+    if storage is None:
+        storage = LocalStorage(cfg.data_root)
     job = s.get(Job, job_id)
     doc = s.get(Document, job.document_id)
 
@@ -181,7 +187,7 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize") -> Run
     output_dir.mkdir(parents=True, exist_ok=True)
     staged_input = input_dir / doc.filename
     if not staged_input.exists():
-        staged_input.write_bytes(Path(doc.storage_path).read_bytes())
+        staged_input.write_bytes(storage.read(doc.storage_path))
 
     job.status = "running"
     job.worker_image = cfg.worker_image if cfg.worker_mode == "docker" else ""
