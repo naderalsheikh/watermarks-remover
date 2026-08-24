@@ -37,12 +37,16 @@ from .models import AuditEvent, Document, Job, Matter, MatterAcl, _now, _uuid
 from .oidc import OidcError
 from .runner import run_job, sync_job
 from .security import (
+    ATTEST_STRENGTHS,
     LOCAL_SUBJECT,
     LoginThrottle,
+    consume_attestation,
     ensure_local_password,
+    issue_attestation,
     issue_session,
     revoke_all_sessions,
     session_subject,
+    verify_attestation,
     verify_password,
 )
 from .storage import StorageError as StorageError_
@@ -109,6 +113,22 @@ class SanitizeBody(BaseModel):
     # failed job with a clear PolicyError message) — the same place
     # policy_id's own validity is checked, not pre-validated here.
     finding_decisions: dict[str, str] = {}
+    # PR 20: Layer B (statistical watermark) rewrite, gated by the signed
+    # attestation token issued by POST /v1/attestations. Absent = Layer A
+    # only. The token is verified server-side before the job is created.
+    layer_b: LayerBBody | None = None
+
+
+class LayerBBody(BaseModel):
+    strength: str
+    token: str
+
+
+class AttestationBody(BaseModel):
+    matter_id: str
+    document_id: str
+    strength: str
+    reason: str = ""
 
 
 class AclBody(BaseModel):
@@ -514,6 +534,48 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         response.delete_cookie("cc_session", httponly=True, samesite="strict")
         return {"ok": True}
 
+    @app.post("/v1/attestations")
+    def create_attestation(
+        body: AttestationBody,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """PR 20: sign a Layer B (content-altering) attestation token for one
+        document. The product gate: 403 unless watermark tools are enabled,
+        the caller holds the sanitize permission, and the strength is one the
+        product allows (KD 10 — code/backtranslate stay CLI-only). The token
+        is HMAC-signed, doc-bound (sha256), 10-minute TTL, single-use; the
+        resulting job records the jti so the audit chain can tie the rewrite
+        back to this exact authorization."""
+        if not cfg.watermark_tools_enabled:
+            raise HTTPException(403, "watermark tools are disabled")
+        if body.strength not in ATTEST_STRENGTHS:
+            raise HTTPException(400, f"strength not product-allowed: {body.strength!r}")
+        _require(body.matter_id, "sanitize", s, user)
+        doc = _document(body.matter_id, body.document_id, s)
+        token, jti, expires_utc = issue_attestation(
+            cfg,
+            subject=user,
+            matter_id=body.matter_id,
+            doc_sha256=doc.sha256,
+            strength=body.strength,
+        )
+        append_event(
+            s,
+            matter_id=body.matter_id,
+            actor_id=user,
+            action="attest.issued",
+            payload={
+                "jti": jti,
+                "document_id": doc.id,
+                "sha256": doc.sha256,
+                "strength": body.strength,
+                "reason": body.reason[:500],
+            },
+        )
+        s.commit()
+        return {"token": token, "jti": jti, "expires_utc": expires_utc}
+
     @app.get("/v1/policies", dependencies=[Depends(principal)])
     def list_policies():
         return {"policies": POLICIES}
@@ -671,6 +733,44 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         _require(matter_id, "sanitize", s, user)
         doc = _document(matter_id, doc_id, s)
         body = body or SanitizeBody()
+        layer_b: dict | None = None
+        attest_claims: dict | None = None
+        if body.layer_b is not None:
+            if not cfg.watermark_tools_enabled:
+                raise HTTPException(403, "watermark tools are disabled")
+            claims = verify_attestation(
+                cfg,
+                body.layer_b.token,
+                matter_id=matter_id,
+                doc_sha256=doc.sha256,
+            )
+            if claims is None:
+                raise HTTPException(403, "invalid or expired attestation token")
+            # The token binds a specific principal; only that principal may
+            # consume it (otherwise any sanitize-perm holder could spend
+            # someone else's authorization).
+            if claims.get("sub") != user:
+                raise HTTPException(403, "attestation token was issued to another principal")
+            jti = claims["jti"]
+            # Single-use: an issued jti that already backs a job is refused.
+            # The in-memory set covers this process; the DB row below is the
+            # durable record. .as_string() renders an UNQUOTED extraction on
+            # both dialects (Postgres ->, SQLite JSON_EXTRACT) — cast(...)
+            # quotes the scalar on both, so the comparison would never match.
+            prior = (
+                s.query(Job)
+                .filter(Job.layer_b["jti"].as_string() == jti)
+                .first()
+            )
+            if prior is not None:
+                raise HTTPException(403, "attestation token already used")
+            layer_b = {
+                "strength": claims["strength"],
+                "label": claims["label"],
+                "subject": claims["sub"],
+                "jti": jti,
+            }
+            attest_claims = claims
         job = _create_job(
             matter_id,
             doc.id,
@@ -680,7 +780,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             reason=body.reason[:500],
             attestation=bool(body.signature_break_attestation),
             finding_decisions=dict(body.finding_decisions),
+            layer_b=layer_b,
         )
+        if layer_b is not None and attest_claims is not None:
+            # Consume only after the job row committed: a failed creation
+            # must not burn the token in-memory with no durable record.
+            consume_attestation(attest_claims)
+        if layer_b is not None:
+            append_event(
+                s,
+                matter_id=matter_id,
+                actor_id=user,
+                action="attest.used",
+                payload={"jti": layer_b["jti"], "job_id": job.id, "strength": layer_b["strength"]},
+            )
+            s.commit()
         _execute_job(job.id, kind="sanitize")
         s.expire_all()
         return _job_dict(_job(matter_id, job.id, s))
@@ -897,6 +1011,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "status": j.status,
             "error": j.error,
             "attestation": j.attestation,
+            "layer_b": j.layer_b,
             "worker_image": j.worker_image,
             "created_utc": j.created_utc,
             "finished_utc": j.finished_utc,

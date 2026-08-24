@@ -369,3 +369,188 @@ def test_finding_decisions_bad_value_refuses_the_job_with_a_clear_error(client):
     ).json()
     assert r["status"] == "refused"
     assert "approve" in r["error"] or "keep" in r["error"]
+
+
+# --- PR 20: Layer B watermark gate -------------------------------------------
+# The whole module is off by default: the attestation route 403s without
+# COUNSELCLEAR_WATERMARK_TOOLS, and a layer_b sanitize job is refused
+# without a valid signed token. On, the token lifecycle (issue -> verify ->
+# single-use) and the meaning-lock hard gate are exercised end to end.
+
+
+@pytest.fixture()
+def wm_client(tmp_path, monkeypatch):
+    """Client with COUNSELCLEAR_WATERMARK_TOOLS=1 set BEFORE app creation
+    (the flag is read at construction; the shared `client` fixture would
+    already have booted with it off)."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "correct horse battery")
+    monkeypatch.setenv("COUNSELCLEAR_WATERMARK_TOOLS", "1")
+    app = create_app(tmp_path / "data")
+    c = TestClient(app)
+    r = c.post("/v1/auth/login", json={"password": "correct horse battery"})
+    assert r.status_code == 200
+    yield c
+    c.close()
+
+
+def test_attestation_route_403_when_watermark_tools_disabled(client):
+    m = client.post("/v1/matters", json={"name": "m"}).json()["id"]
+    d = _upload(client, "spa.docx", matter=m)
+    r = client.post(
+        "/v1/attestations",
+        json={"matter_id": m, "document_id": d["id"], "strength": "preserve"},
+    )
+    assert r.status_code == 403
+
+
+def test_attestation_route_rejects_non_product_strength(wm_client):
+    m = wm_client.post("/v1/matters", json={"name": "m"}).json()["id"]
+    d = _upload(wm_client, "spa.docx", matter=m)
+    r = wm_client.post(
+        "/v1/attestations",
+        json={"matter_id": m, "document_id": d["id"], "strength": "code"},
+    )
+    assert r.status_code == 400
+
+
+def test_attestation_issue_and_verify_roundtrip(wm_client):
+    m = wm_client.post("/v1/matters", json={"name": "m"}).json()["id"]
+    d = _upload(wm_client, "spa.docx", matter=m)
+
+    r = wm_client.post(
+        "/v1/attestations",
+        json={"matter_id": m, "document_id": d["id"], "strength": "preserve"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["token"].count(".") == 1
+    assert body["jti"]
+
+    # A layer_b sanitize job with the token is accepted; the jti lands on
+    # the job row so the audit chain can tie the rewrite to the exact
+    # authorization.
+    r2 = wm_client.post(
+        f"/v1/matters/{m}/documents/{d['id']}/sanitize-jobs",
+        json={"layer_b": {"strength": "preserve", "token": body["token"]}},
+    )
+    assert r2.status_code == 200
+    assert r2.json()["layer_b"]["jti"] == body["jti"]
+
+    # Reusing the same token must be refused (single-use).
+    r3 = wm_client.post(
+        f"/v1/matters/{m}/documents/{d['id']}/sanitize-jobs",
+        json={"layer_b": {"strength": "preserve", "token": body["token"]}},
+    )
+    assert r3.status_code == 403
+
+
+def test_layer_b_job_without_flag_is_refused(client):
+    m = client.post("/v1/matters", json={"name": "m"}).json()["id"]
+    d = _upload(client, "spa.docx", matter=m)
+    r = client.post(
+        f"/v1/matters/{m}/documents/{d['id']}/sanitize-jobs",
+        json={"layer_b": {"strength": "preserve", "token": "forged"}},
+    )
+    assert r.status_code == 403
+
+
+def test_layer_b_meaning_lock_miss_fails_job(wm_client, monkeypatch):
+    """A Layer B rewrite whose candidate violates the meaning lock must
+    fail the job (product semantics) — never silently return the original
+    like the CLI's best-effort path. The rewrite endpoint is pointed at a
+    dead port so every candidate fails; the gate must map that to
+    status=failed, not a fallback."""
+    monkeypatch.setenv("WATERMARKS_REWRITE_BACKEND", "openai-compatible")
+    monkeypatch.setenv("WATERMARKS_REWRITE_MODEL", "fake-model")
+    monkeypatch.setenv("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:1")
+    m = wm_client.post("/v1/matters", json={"name": "m"}).json()["id"]
+
+    r = wm_client.post(
+        f"/v1/matters/{m}/documents",
+        files={"file": ("draft.txt", b"Party A shall pay Party B $1,000 by June 1.", "text/plain")},
+    )
+    assert r.status_code == 200, r.text
+    d = r.json()
+
+    tok = wm_client.post(
+        "/v1/attestations",
+        json={"matter_id": m, "document_id": d["id"], "strength": "preserve"},
+    ).json()["token"]
+    r2 = wm_client.post(
+        f"/v1/matters/{m}/documents/{d['id']}/sanitize-jobs",
+        json={"layer_b": {"strength": "preserve", "token": tok}},
+    )
+    assert r2.status_code == 200
+    job = r2.json()
+    assert job["status"] == "failed"
+    assert "layer b" in job["error"].lower()
+
+
+def test_docker_cmd_includes_layer_b_flag_for_layer_b_jobs(tmp_path, monkeypatch):
+    """Regression for the opencode review's F1: build_docker_cmd accepted
+    layer_b (network selection) but never appended --layer-b to the
+    container argv — a docker-mode Layer B job would silently run
+    Layer-A-only while Job.layer_b/attest.used/API all claimed a rewrite
+    had happened. The audit chain must never record an authorization that
+    was not exercised."""
+    from pathlib import Path as _Path
+
+    from app.config import Config as _Config
+    from app.runner import build_docker_cmd
+
+    monkeypatch.setenv("COUNSELCLEAR_WORKER_IMAGE", "repo@sha256:" + "a" * 64)
+    monkeypatch.setenv("COUNSELCLEAR_REWRITE_NETWORK", "cc-rewrite-prod")
+    cfg = _Config(tmp_path)
+    layer_b = {"strength": "preserve", "label": "content_altering", "subject": "operator", "jti": "j1"}
+
+    cmd = build_docker_cmd(
+        cfg,
+        mount_root=_Path("/root"),
+        input_path=_Path("/root/m/jobs/j/input/f.txt"),
+        output_dir=_Path("/root/m/jobs/j/output"),
+        kind="sanitize",
+        policy_id="external_sharing",
+        attest=False,
+        matter_id="m",
+        layer_b=layer_b,
+    )
+    assert "--layer-b" in cmd
+    assert cmd[cmd.index("--layer-b") + 1] == "preserve"
+    # The rewrite env namespace crosses into the container for Layer B jobs.
+    monkeypatch.setenv("WATERMARKS_REWRITE_BACKEND", "ollama")
+    cmd2 = build_docker_cmd(
+        cfg,
+        mount_root=_Path("/root"),
+        input_path=_Path("/root/m/jobs/j/input/f.txt"),
+        output_dir=_Path("/root/m/jobs/j/output"),
+        kind="sanitize",
+        policy_id="external_sharing",
+        attest=False,
+        matter_id="m",
+        layer_b=layer_b,
+    )
+    assert "-e" in cmd2
+    assert "WATERMARKS_REWRITE_BACKEND=ollama" in cmd2
+
+
+def test_docker_cmd_stays_network_none_without_layer_b(tmp_path, monkeypatch):
+    """Non-Layer-B docker jobs must never gain network egress."""
+    from pathlib import Path as _Path
+
+    from app.config import Config as _Config
+    from app.runner import build_docker_cmd
+
+    monkeypatch.setenv("COUNSELCLEAR_WORKER_IMAGE", "repo@sha256:" + "a" * 64)
+    cfg = _Config(tmp_path)
+    cmd = build_docker_cmd(
+        cfg,
+        mount_root=_Path("/root"),
+        input_path=_Path("/root/m/jobs/j/input/f.txt"),
+        output_dir=_Path("/root/m/jobs/j/output"),
+        kind="sanitize",
+        policy_id="external_sharing",
+        attest=False,
+        matter_id="m",
+    )
+    assert cmd[cmd.index("--network") + 1] == "none"
+    assert "--layer-b" not in cmd

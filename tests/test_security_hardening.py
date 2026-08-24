@@ -682,3 +682,154 @@ def test_revoke_all_sessions_uses_atomic_rotation(tmp_path):
     revoke_all_sessions(cfg)
     assert session_subject(cfg, tok) is None
     assert cfg.secret_file.exists()
+
+
+# --- PR 20: attestation tokens (unit level) ----------------------------------
+
+
+def test_attestation_roundtrip_and_tamper_rejection(tmp_path):
+    from app.config import Config
+    from app.security import (
+        issue_attestation,
+        verify_attestation,
+    )
+
+    cfg = Config(tmp_path)
+    tok, jti, expires = issue_attestation(
+        cfg,
+        subject="operator",
+        matter_id="m1",
+        doc_sha256="a" * 64,
+        strength="preserve",
+    )
+    assert tok.count(".") == 1
+    assert jti
+    assert expires.endswith("+00:00")
+
+    claims = verify_attestation(
+        cfg, tok, matter_id="m1", doc_sha256="a" * 64
+    )
+    assert claims is not None
+    assert claims["sub"] == "operator"
+    assert claims["strength"] == "preserve"
+    assert claims["label"] == "content_altering"
+
+    # Wrong matter / wrong doc / tampered body all fail closed.
+    assert verify_attestation(cfg, tok, matter_id="m2", doc_sha256="a" * 64) is None
+    assert verify_attestation(cfg, tok, matter_id="m1", doc_sha256="b" * 64) is None
+    body, _sig = tok.split(".")
+    assert verify_attestation(cfg, f"{body}.{'0' * 64}", matter_id="m1", doc_sha256="a" * 64) is None
+    assert verify_attestation(cfg, "garbage", matter_id="m1", doc_sha256="a" * 64) is None
+    assert verify_attestation(cfg, None, matter_id="m1", doc_sha256="a" * 64) is None
+
+
+def test_attestation_strength_allowlist(tmp_path):
+    from app.config import Config
+    from app.security import ATTEST_STRENGTHS, issue_attestation
+
+    cfg = Config(tmp_path)
+    for ok in ATTEST_STRENGTHS:
+        issue_attestation(
+            cfg, subject="operator", matter_id="m", doc_sha256="a" * 64, strength=ok
+        )
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        issue_attestation(
+            cfg, subject="operator", matter_id="m", doc_sha256="a" * 64, strength="code"
+        )
+    with _pytest.raises(ValueError):
+        issue_attestation(
+            cfg, subject="operator", matter_id="m", doc_sha256="a" * 64,
+            strength="preserve", label="not_content_altering",
+        )
+
+
+def test_attestation_single_use_and_ttl(tmp_path, monkeypatch):
+
+    from app.config import Config
+    from app.security import (
+        ATTEST_TTL_S,
+        consume_attestation,
+        issue_attestation,
+        verify_attestation,
+    )
+
+    cfg = Config(tmp_path)
+    tok, jti, _ = issue_attestation(
+        cfg, subject="operator", matter_id="m", doc_sha256="a" * 64, strength="preserve"
+    )
+    claims = verify_attestation(cfg, tok, matter_id="m", doc_sha256="a" * 64)
+    assert claims is not None and claims["jti"] == jti
+
+    # Consumed jti is refused on re-verify.
+    consume_attestation(claims)
+    assert verify_attestation(cfg, tok, matter_id="m", doc_sha256="a" * 64) is None
+
+    # Expired token (past TTL) is refused even before consumption.
+    tok2, _jti2, _ = issue_attestation(
+        cfg, subject="operator", matter_id="m", doc_sha256="a" * 64, strength="preserve"
+    )
+    import app.security as security_mod
+
+    real_time = security_mod.time.time
+    monkeypatch.setattr(security_mod.time, "time", lambda: real_time() + ATTEST_TTL_S + 1)
+    assert verify_attestation(cfg, tok2, matter_id="m", doc_sha256="a" * 64) is None
+
+
+def test_attestation_jti_replay_refused_after_restart(tmp_path, monkeypatch):
+    """Regression for the opencode review's F2: the durable jti-replay
+    check must survive a process restart. The in-memory consumed set is
+    process-local; the DB row (Job.layer_b.jti) is the durable record. A
+    replayed token after a restart must be refused by the DB query, not
+    slip through. Also verifies the query renders an UNQUOTED comparison on
+    SQLite (cast(...) would quote the scalar and never match)."""
+    import app.security as security_mod
+    from app.main import create_app
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "correct horse battery")
+    monkeypatch.setenv("COUNSELCLEAR_WATERMARK_TOOLS", "1")
+
+    def _issue_and_use(token) -> str:
+        # Simulate a restart: clear the in-memory consumed set.
+        security_mod._consumed_jtis.clear()
+        c = TestClient(create_app(tmp_path / "data"))
+        c.post("/v1/auth/login", json={"password": "correct horse battery"})
+        m = c.post("/v1/matters", json={"name": "m"}).json()["id"]
+        r = c.post(
+            f"/v1/matters/{m}/documents",
+            files={"file": ("spa.docx", (Path(__file__).resolve().parent / "fixtures" / "legal" / "spa.docx").read_bytes(), "application/octet-stream")},
+        )
+        assert r.status_code == 200, r.text
+        return c, m, r.json()["id"]
+
+    # First use: issue + consume.
+    security_mod._consumed_jtis.clear()
+    c1 = TestClient(create_app(tmp_path / "data"))
+    c1.post("/v1/auth/login", json={"password": "correct horse battery"})
+    m1 = c1.post("/v1/matters", json={"name": "m"}).json()["id"]
+    d1 = c1.post(
+        f"/v1/matters/{m1}/documents",
+        files={"file": ("spa.docx", (Path(__file__).resolve().parent / "fixtures" / "legal" / "spa.docx").read_bytes(), "application/octet-stream")},
+    ).json()["id"]
+    tok = c1.post(
+        "/v1/attestations",
+        json={"matter_id": m1, "document_id": d1, "strength": "preserve"},
+    ).json()["token"]
+    r1 = c1.post(
+        f"/v1/matters/{m1}/documents/{d1}/sanitize-jobs",
+        json={"layer_b": {"strength": "preserve", "token": tok}},
+    )
+    assert r1.status_code == 200
+
+    # Restart: fresh process, same DB, consumed set empty. Replay must 403
+    # via the DB row's jti — the durable single-use record.
+    security_mod._consumed_jtis.clear()
+    c2 = TestClient(create_app(tmp_path / "data"))
+    c2.post("/v1/auth/login", json={"password": "correct horse battery"})
+    r2 = c2.post(
+        f"/v1/matters/{m1}/documents/{d1}/sanitize-jobs",
+        json={"layer_b": {"strength": "preserve", "token": tok}},
+    )
+    assert r2.status_code == 403

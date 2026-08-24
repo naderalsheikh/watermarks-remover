@@ -699,6 +699,98 @@ def clean_path(
 # --- Custodial bundle (PR 12) ------------------------------------------------
 
 
+def _layer_b_rewrite(
+    original: bytes, cleaned: bytes, name: str, kind: str, strength: str
+) -> dict[str, Any]:
+    """PR 20: statistical-watermark rewrite with product-hard semantics.
+
+    Runs between apply_actions and verify_derivative, so the single
+    verification gate sees the final bytes (Layer A cannot regress) and the
+    meaning lock compares the rewrite against the Layer A-cleaned text it
+    actually received. Product semantics differ from the CLI: any lock
+    miss or rewrite failure raises CustodyError (the worker maps it to a
+    failed job); the original is never silently substituted.
+    """
+    import custody as custody_mod
+    from rewrite_text import meaning_lock_ok, rewrite
+
+    if kind != "text":
+        raise custody_mod.CustodyError(
+            f"layer b requires a text document, got kind={kind!r}"
+        )
+    try:
+        text = cleaned.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise custody_mod.CustodyError(f"layer b input is not utf-8 text: {e}") from e
+
+    # The worker inherits the operator's rewrite env (subprocess mode
+    # passes os.environ; docker mode passes the WATERMARKS_REWRITE_*
+    # whitelist). print-prompt is the CLI's offline default and meaningless
+    # here — refuse instead of "rewriting" to the same text.
+    backend = os.environ.get("WATERMARKS_REWRITE_BACKEND", "print-prompt")
+    if backend == "print-prompt":
+        raise custody_mod.CustodyError(
+            "layer b requires WATERMARKS_REWRITE_BACKEND (ollama / openai-compatible); "
+            "print-prompt is a CLI-only diagnostic mode"
+        )
+    # Loopback is the default posture. The docker rewrite-proxy network
+    # names the proxy by hostname, so a deployment that uses it must
+    # explicitly allow remote endpoints (same opt-in as the CLI).
+    allow_remote = os.environ.get("WATERMARKS_REWRITE_ALLOW_REMOTE", "") == "1"
+    try:
+        result, info = rewrite(
+            text,
+            backend=backend,
+            model=os.environ.get("WATERMARKS_REWRITE_MODEL"),
+            base_url=os.environ.get("WATERMARKS_REWRITE_BASE_URL", "http://127.0.0.1:11434"),
+            api_key=os.environ.get("WATERMARKS_REWRITE_API_KEY"),
+            strength=strength,
+            lang="en",
+            original_lang="en",
+            timeout=float(os.environ.get("WATERMARKS_REWRITE_TIMEOUT_S", "120")),
+            layer_a_after=True,
+            temperature=float(os.environ.get("WATERMARKS_REWRITE_TEMPERATURE", "0.3")),
+            candidates=int(os.environ.get("WATERMARKS_REWRITE_CANDIDATES", "1")),
+            max_loops=int(os.environ.get("WATERMARKS_REWRITE_LOOPS", "1")),
+            allow_remote=allow_remote,
+            reasoning_effort=os.environ.get("WATERMARKS_REWRITE_REASONING_EFFORT", "none"),
+        )
+    except custody_mod.CustodyError:
+        raise
+    except SystemExit as e:
+        # rewrite_text._check_remote refuses non-loopback endpoints with
+        # SystemExit (its CLI semantics). In the product path that must be a
+        # labeled job failure, not an uncaught exit that crashes the worker
+        # before result.json is written.
+        raise custody_mod.CustodyError(f"layer b rewrite refused: {e}") from e
+    except Exception as e:
+        # Any rewrite failure (transport, provider, parsing) fails the job
+        # with a Layer B-labeled error — never a silent fallback to the
+        # original text.
+        raise custody_mod.CustodyError(f"layer b rewrite failed: {type(e).__name__}: {e}") from e
+    if info.get("mode") == "unchanged" or not meaning_lock_ok(text, result):
+        raise custody_mod.CustodyError(
+            "layer b meaning-lock miss: every rewrite candidate changed operative "
+            "meaning (modals, numbers, citations, or quoted terms)"
+        )
+    if result == text:
+        # Defensive: the only paths that return the input unchanged are the
+        # lock-miss fallback (handled above) and print-prompt (refused
+        # above); anything else reaching here means the rewrite silently
+        # no-op'd, which must fail the job rather than ship an unrewritten
+        # derivative as if Layer B had run.
+        raise custody_mod.CustodyError("layer b rewrite produced no change")
+    return {
+        "cleaned": result.encode("utf-8"),
+        "strength": strength,
+        "backend": backend,
+        "attempts_made": info.get("attempts_made", 0),
+        "passed": info.get("passed"),
+        "mode": info.get("mode", "rewritten"),
+        "meaning_lock_ok": True,
+    }
+
+
 def clean_to_bundle(
     src: Path,
     out_dir: Path,
@@ -708,6 +800,7 @@ def clean_to_bundle(
     matter_id: str | None = None,
     signature_break_attestation: bool = False,
     decisions: dict[str, str] | None = None,
+    layer_b_strength: str | None = None,
 ) -> dict[str, Any]:
     """Inspect -> plan -> apply -> verify -> store write-once + manifest.
 
@@ -746,6 +839,18 @@ def clean_to_bundle(
         cleaned, records = _run_capped(lambda: apply_actions(data, plan), Caps().apply_timeout_s)
     except PolicyError as e:
         raise custody_mod.CustodyError(f"plan refused: {e}") from e
+
+    layer_b: dict[str, Any] | None = None
+    if layer_b_strength is not None:
+        # PR 20: statistical-watermark rewrite, gated by the signed
+        # attestation upstream. Product semantics differ from the CLI's
+        # best-effort fallback: a meaning-lock miss (or any other rewrite
+        # failure) raises CustodyError, which the worker maps to a failed
+        # job — the original is never silently substituted.
+        layer_b = _layer_b_rewrite(
+            data, cleaned, src.name, result.kind, layer_b_strength
+        )
+        cleaned = layer_b["cleaned"]
 
     verification = verify_derivative(
         data,
@@ -843,6 +948,7 @@ def clean_to_bundle(
         verification=verification,
         operator_id=operator_id,
         matter_id=matter_id,
+        layer_b=layer_b,
     )
     manifest_path, _m_created = custody_mod.write_manifest(out_dir, manifest)
     report_path = _write_bundle_report(
