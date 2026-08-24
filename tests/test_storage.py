@@ -207,6 +207,19 @@ def test_encrypted_at_rest_is_not_plaintext(tmp_path):
     assert b"top secret" not in Path(ref).read_bytes()
 
 
+def test_s3_client_injection_needs_no_boto3(tmp_path, monkeypatch):
+    """boto3 is a lazy, optional dependency: constructing a backend with an
+    injected client must not import it, so test doubles work on hosts that
+    never install boto3. (Regression: the constructor used to import boto3
+    unconditionally, shadowed by the real lazy import three lines later.)"""
+    monkeypatch.setitem(sys.modules, "boto3", None)  # `import boto3` -> ImportError
+    s3 = S3Storage(bucket="cc", client=FakeS3())
+    assert s3.write_once("k", b"x") == "k"
+    kms = KmsKeyring("arn:aws:kms:x:1:key/abc", client=FakeKMS())
+    _dek, wrapped = kms.new_data_key()
+    assert kms.unwrap(wrapped) is not None
+
+
 def test_volume_key_file_created_0600_and_reused(tmp_path):
     keyfile = tmp_path / "volume.key"
     LocalKeyring(keyfile)

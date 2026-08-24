@@ -179,8 +179,6 @@ class S3Storage(Backend):
         org: str = "local",
         client=None,
     ):
-        import boto3  # lazy: local deployments never install it
-
         self._bucket = bucket
         self._prefix = prefix.strip("/")
         self._org = org
