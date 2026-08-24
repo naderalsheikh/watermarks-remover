@@ -217,9 +217,11 @@ def _parse_id3v2_frames(data: bytes) -> tuple[int, int, list[tuple[bytes, bytes]
         frame_start = pos + 10
         frame_end = frame_start + frame_size
         if frame_size < 0 or frame_end > frames_end:
-            break
+            return None
         frames.append((frame_id, data[frame_start:frame_end]))
         pos = frame_end
+    if any(data[pos:frames_end]):
+        return None
     return total, major, frames
 
 

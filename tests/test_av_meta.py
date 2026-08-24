@@ -285,6 +285,50 @@ def test_flac_ignores_truncated_c2pa_geob(tmp_path):
     assert dest.read_bytes() == data
 
 
+def test_flac_keep_mode_preserves_tag_with_truncated_frame(tmp_path):
+    truncated_title = b"TIT2" + struct.pack(">I", 20) + b"\x00\x00partial"
+    data = _flac(
+        _id3v2_frame(b"GEOB", _c2pa_geob()),
+        truncated_title,
+    )
+    src = tmp_path / "voice.flac"
+    src.write_bytes(data)
+    dest = tmp_path / "voice.cleaned.flac"
+
+    clean_av(src, dest, strip_all_metadata=False)
+
+    assert dest.read_bytes() == data
+
+
+def test_flac_keep_mode_preserves_tag_with_nonzero_short_tail(tmp_path):
+    data = _flac(
+        _id3v2_frame(b"GEOB", _c2pa_geob()),
+        b"TIT2bad",
+    )
+    src = tmp_path / "voice.flac"
+    src.write_bytes(data)
+    dest = tmp_path / "voice.cleaned.flac"
+
+    clean_av(src, dest, strip_all_metadata=False)
+
+    assert dest.read_bytes() == data
+
+
+def test_flac_keep_mode_accepts_zero_padding(tmp_path):
+    src = tmp_path / "voice.flac"
+    src.write_bytes(
+        _flac(
+            _id3v2_frame(b"GEOB", _c2pa_geob()),
+            b"\x00" * 7,
+        )
+    )
+    dest = tmp_path / "voice.cleaned.flac"
+
+    clean_av(src, dest, strip_all_metadata=False)
+
+    assert dest.read_bytes() == _flac()
+
+
 # ---------------------------------------------------------------------------
 # MP4 / MOV
 # ---------------------------------------------------------------------------
