@@ -20,6 +20,8 @@
 !/skills/remove-ai-marks/**
 !/tests/
 !/tests/**
+!/web/
+!/web/**
 !/.dockerignore
 !/.env.example
 !/.gitignore
@@ -47,3 +49,8 @@ posts.md
 *.cleaned.*
 *.bak
 .kgw-key
+web/node_modules/
+web/.next/
+web/out/
+web/*.tsbuildinfo
+web/next-env.d.ts

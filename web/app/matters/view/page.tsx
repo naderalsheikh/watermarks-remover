@@ -1,0 +1,288 @@
+"use client";
+
+import { Suspense, useRef, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { api } from "@/lib/api";
+import { useApiData } from "@/lib/useApi";
+import type { Document, Job, Matter, Policy } from "@/lib/types";
+import { Header } from "@/components/Header";
+
+const STATUS_COLOR: Record<Job["status"], string> = {
+  queued: "text-muted",
+  running: "text-amber-600",
+  done: "text-emerald-600",
+  failed: "text-red-600",
+};
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+function SanitizePanel({
+  matterId,
+  docId,
+  policies,
+  onClose,
+  onDone,
+}: {
+  matterId: string;
+  docId: string;
+  policies: Policy[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [policyId, setPolicyId] = useState(policies[0]?.id ?? "external_sharing");
+  const [reason, setReason] = useState("");
+  const [attest, setAttest] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const selected = policies.find((p) => p.id === policyId);
+
+  async function submit() {
+    setSubmitting(true);
+    try {
+      await api.post(`/v1/matters/${matterId}/documents/${docId}/sanitize-jobs`, {
+        policy_id: policyId,
+        reason,
+        signature_break_attestation: attest,
+      });
+      onDone();
+      onClose();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 space-y-3 rounded-md border border-border bg-black/[0.02] p-3 dark:bg-white/[0.02]">
+      <div>
+        <label className="mb-1 block text-xs font-medium">Policy</label>
+        <select
+          value={policyId}
+          onChange={(e) => setPolicyId(e.target.value)}
+          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+        >
+          {policies.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        {selected && <p className="mt-1 text-xs text-muted">{selected.description}</p>}
+      </div>
+      <div>
+        <label className="mb-1 block text-xs font-medium">Reason (optional)</label>
+        <input
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+        />
+      </div>
+      <label className="flex items-center gap-2 text-xs">
+        <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />
+        I attest to breaking a digital signature if this job requires it
+      </label>
+      <div className="flex gap-2">
+        <button
+          onClick={submit}
+          disabled={submitting}
+          className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {submitting ? "Starting…" : "Run sanitize"}
+        </button>
+        <button onClick={onClose} className="px-3 py-1.5 text-xs text-muted hover:text-foreground">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DocumentRow({
+  matterId,
+  doc,
+  jobs,
+  policies,
+  onJobStarted,
+}: {
+  matterId: string;
+  doc: Document;
+  jobs: Job[];
+  policies: Policy[];
+  onJobStarted: () => void;
+}) {
+  const [sanitizing, setSanitizing] = useState(false);
+  const [inspecting, setInspecting] = useState(false);
+  const docJobs = jobs
+    .filter((j) => j.document_id === doc.id)
+    .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
+
+  async function inspect() {
+    setInspecting(true);
+    try {
+      await api.post(`/v1/matters/${matterId}/documents/${doc.id}/inspect-jobs`);
+      onJobStarted();
+    } finally {
+      setInspecting(false);
+    }
+  }
+
+  return (
+    <li className="px-4 py-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="truncate font-medium">{doc.filename}</p>
+          <p className="text-xs text-muted">
+            {formatBytes(doc.bytes)} · {doc.sha256.slice(0, 12)}…
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <button
+            onClick={inspect}
+            disabled={inspecting}
+            className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+          >
+            {inspecting ? "Inspecting…" : "Inspect"}
+          </button>
+          <button
+            onClick={() => setSanitizing((v) => !v)}
+            className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+          >
+            Sanitize
+          </button>
+        </div>
+      </div>
+
+      {sanitizing && (
+        <SanitizePanel
+          matterId={matterId}
+          docId={doc.id}
+          policies={policies}
+          onClose={() => setSanitizing(false)}
+          onDone={onJobStarted}
+        />
+      )}
+
+      {docJobs.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {docJobs.map((j) => (
+            <li key={j.id} className="text-xs">
+              <Link
+                href={`/matters/job?matter=${matterId}&job=${j.id}`}
+                className="hover:underline"
+              >
+                {j.kind}
+              </Link>{" "}
+              <span className={STATUS_COLOR[j.status]}>{j.status}</span>
+              {j.kind === "sanitize" && <span className="text-muted"> · {j.policy_id}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+function MatterView({ matterId }: { matterId: string }) {
+  const matterQ = useApiData(() => api.get<Matter>(`/v1/matters/${matterId}`), `matter:${matterId}`);
+  const docsQ = useApiData(
+    () => api.get<{ documents: Document[] }>(`/v1/matters/${matterId}/documents`),
+    `docs:${matterId}`,
+  );
+  const jobsQ = useApiData(
+    () => api.get<{ jobs: Job[] }>(`/v1/matters/${matterId}/jobs`),
+    `jobs:${matterId}`,
+  );
+  const policiesQ = useApiData(() => api.get<{ policies: Policy[] }>("/v1/policies"), "policies");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  async function upload(e: React.FormEvent) {
+    e.preventDefault();
+    const file = fileInput.current?.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      await api.post(`/v1/matters/${matterId}/documents`, body);
+      if (fileInput.current) fileInput.current.value = "";
+      docsQ.reload();
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
+      <Link href="/matters" className="text-sm text-muted hover:text-foreground">
+        ← Matters
+      </Link>
+      <h1 className="mb-6 mt-2 text-2xl font-semibold tracking-tight">
+        {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
+      </h1>
+
+      <form onSubmit={upload} className="mb-8 flex items-center gap-2">
+        <input
+          ref={fileInput}
+          type="file"
+          required
+          className="flex-1 text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-transparent file:px-3 file:py-1.5 file:text-sm"
+        />
+        <button
+          type="submit"
+          disabled={uploading}
+          className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {uploading ? "Uploading…" : "Upload"}
+        </button>
+      </form>
+      {uploadError && <p className="mb-4 text-sm text-red-600">{uploadError}</p>}
+
+      {docsQ.loading && <p className="text-sm text-muted">Loading documents…</p>}
+      {docsQ.error && <p className="text-sm text-red-600">{docsQ.error}</p>}
+      {docsQ.data && docsQ.data.documents.length === 0 && (
+        <p className="text-sm text-muted">No documents yet. Upload one above.</p>
+      )}
+
+      <ul className="divide-y divide-border rounded-md border border-border">
+        {docsQ.data?.documents.map((doc) => (
+          <DocumentRow
+            key={doc.id}
+            matterId={matterId}
+            doc={doc}
+            jobs={jobsQ.data?.jobs ?? []}
+            policies={policiesQ.data?.policies ?? []}
+            onJobStarted={jobsQ.reload}
+          />
+        ))}
+      </ul>
+    </main>
+  );
+}
+
+function MatterViewInner() {
+  const id = useSearchParams().get("id");
+  if (!id) {
+    return <main className="mx-auto max-w-5xl flex-1 px-6 py-8 text-sm text-red-600">Missing matter id.</main>;
+  }
+  return <MatterView matterId={id} />;
+}
+
+export default function MatterViewPage() {
+  return (
+    <>
+      <Header />
+      <Suspense fallback={<div className="flex-1 px-6 py-8 text-sm text-muted">Loading…</div>}>
+        <MatterViewInner />
+      </Suspense>
+    </>
+  );
+}

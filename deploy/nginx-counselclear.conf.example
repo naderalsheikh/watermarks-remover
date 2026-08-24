@@ -1,12 +1,23 @@
 # CounselClear TLS-terminating reverse proxy (nginx example).
 #
-# Matches docs/COUNSELCLEAR_PRODUCTION.md §1: the proxy terminates TLS and
-# talks plain HTTP to cc-api over loopback/private network only. Copy to
-# /etc/nginx/sites-available/counselclear.conf, fill in your names/certs,
-# and symlink into sites-enabled/. This file is an example, not provisioned
-# by anything in this repo.
+# Matches docs/COUNSELCLEAR_PRODUCTION.md §1: the proxy terminates TLS,
+# serves the web/ static export at "/", and talks plain HTTP to cc-api over
+# loopback/private network only for everything under /v1/ (plus health
+# checks). Copy to /etc/nginx/sites-available/counselclear.conf, fill in
+# your names/certs/root, and symlink into sites-enabled/. This file is an
+# example, not provisioned by anything in this repo.
 #
 # What each directive is FOR (don't delete blindly):
+#   root .../web/out             — the PR 19 web app (web/README.md): "npm
+#                                   run build" in web/ produces this
+#                                   directory; same-origin by design, so the
+#                                   SameSite=Strict cc_session cookie works
+#                                   without any CORS carve-out.
+#   try_files $uri $uri.html ... — every route is a real prebuilt .html file
+#                                   (web/ deliberately avoids Next dynamic
+#                                   route segments — see web/README.md — so
+#                                   there is no SPA index.html fallback to
+#                                   wire up here).
 #   client_max_body_size 256m   — matches the engine's MAX_INPUT_BYTES cap;
 #                                 nginx's default 1m would 413 real matters
 #                                 before the app ever sees them.
@@ -41,6 +52,10 @@ server {
     client_max_body_size 256m;
     client_body_timeout 120s;
 
+    # PR 19 web app: "npm run build" in web/ writes this. Update the path
+    # to wherever it's actually deployed.
+    root /opt/counselclear/web/out;
+
     # Fail-closed API docs at the edge as well as in the app (returns 404).
     location ~ ^/(docs|redoc|openapi\.json) {
         return 404;
@@ -59,10 +74,21 @@ server {
         include /etc/nginx/counselclear-proxy-headers.conf;
     }
 
-    location / {
+    location /v1/ {
         limit_req zone=ccl_api burst=40 nodelay;
         proxy_pass http://127.0.0.1:8443;
         include /etc/nginx/counselclear-proxy-headers.conf;
+    }
+
+    location ~ ^/health(/ready)?$ {
+        proxy_pass http://127.0.0.1:8443;
+        include /etc/nginx/counselclear-proxy-headers.conf;
+    }
+
+    # The web app: every route is a prebuilt static file (see the try_files
+    # note above) — nothing here proxies to cc-api.
+    location / {
+        try_files $uri $uri.html $uri/ =404;
     }
 }
 
