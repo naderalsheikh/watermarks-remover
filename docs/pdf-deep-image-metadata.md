@@ -28,6 +28,52 @@ the SOS-to-EOI scan data is **byte-identical** before and after. That's the
 evidence the Ghostscript approach below could never have produced even if
 it had worked.
 
+**Reporting was landed separately, and mattered**: the strip runs for real
+on every PDF sanitize job via `policies._apply_pdf` (confirmed by reading
+the call chain, not assumed) — but two gaps meant nobody could see it happen:
+`findings_from_container_report`'s dispatch is a strict prefix match with
+no fallback, so `inspect_pdf`'s two new finding strings had no matching
+prefix and were silently dropped before ever reaching `job.result.findings`
+(now fixed: `embedded_image_metadata`/`embedded_image_provenance` are their
+own structured `Finding` subtypes, distinct from the generic
+`has_c2pa`-driven "Content Credentials manifest present" finding, since only
+the embedded-image case carries the indirect-`/Length` caveat). Separately,
+`_apply_pdf` filtered `clean_pdf`'s returned `meta` dict down to
+`{mode, structural_rewrite, info_clear}` before building the sanitize
+manifest's `actions` — `deep_images` was dropped there too, so a real
+sanitize job's manifest never said anything happened to the image even
+though it had (now fixed: an `embedded_image_metadata` `ActionRecord` is
+added when a strip ran, or flags the indirect-`/Length` case when one
+didn't). Verified through `clean_to_bundle` itself, not `_apply_pdf` in
+isolation — a regression test asserts the actual manifest `actions` list.
+
+**A precise, verified nuance on the indirect-`/Length` skip's reachability**:
+for `external_sharing`/`production` (`policies._PDF_STRICT_TOOLING_
+POLICIES`), the skip is unreachable through a real sanitize job. Both
+policies hard-require `clean_pdf`'s `structural_rewrite` (qpdf
+`--linearize`) to have succeeded before the job is allowed to complete — and
+that same rewrite is exactly what normalizes an indirect `/Length` to
+direct as a side effect, confirmed above. So by the time a strict-policy
+job could reach the strip step, there's no indirect reference left to skip.
+Confirmed by hand: simulating qpdf's absence for a strict policy doesn't
+reach the "flag" case at all — the job fails closed with `CustodyError:
+... tooling bar ...` before it gets that far, which is itself the correct,
+existing, pre-this-work behavior (a strict-policy job must not ship a
+derivative it couldn't fully verify). The skip path is real and unit-tested
+(`test_clean_pdf_reports_indirect_length_images_honestly`), just only
+actually reachable outside the two strict-tooling policies or when calling
+`clean_pdf` directly.
+
+**Known gap, not fixed, flagged rather than silently left implicit**:
+`privacy_only`'s PDF path (`_exiftool_privacy_pdf`) is a separate,
+narrower exiftool-only routine that never calls `clean_pdf` at all — a
+`privacy_only` sanitize job on a PDF does not strip embedded-image
+metadata today, even though the policy's own design intent (GPS-only
+strip, not `strip_all_metadata`) suggests it plausibly should. Whether
+that's the right call for `privacy_only` specifically is a policy-semantics
+question, not a bug in this work — left for a deliberate decision, not
+bundled into this pass.
+
 **Rejected: the Ghostscript re-encode pass.** It was built (seven
 correctness points from the original design below all addressed —
 symlink-safe temp path, single clean-wide budget, correct Downsample vs.

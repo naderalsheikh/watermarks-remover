@@ -460,3 +460,61 @@ def test_embedded_image_provenance_finding_is_distinct_from_generic_c2pa(tmp_pat
     assert len(embedded) == 1
     assert embedded[0].category == "provenance_metadata"
     assert "not the document's own manifest" in embedded[0].notes
+
+
+# --- clean_to_bundle: the actual product sanitize-job pipeline ----------------
+# apply_actions -> _apply_pdf calls clean_pdf (confirmed by reading
+# service/scripts/policies.py) but used to filter its meta dict down to
+# {mode, structural_rewrite, info_clear} before building the manifest's
+# ActionRecords — deep_images was silently dropped, so the strip ran for
+# real on every PDF sanitize job but was invisible in the manifest. These
+# tests go through clean_to_bundle itself, not _apply_pdf in isolation, so
+# a regression here would mean a real sanitize job stops reporting this.
+
+
+@NEED_EXIFTOOL_QPDF
+def test_clean_to_bundle_records_the_embedded_image_strip(tmp_path):
+    from engine_api import clean_to_bundle
+
+    jpeg = _jpeg(_jpeg_appn(0xEB, b"jumb c2pa manifest bytes"))
+    src = tmp_path / "in.pdf"
+    src.write_bytes(_pdf_with_image_xobject(jpeg))
+    out = tmp_path / "bundle"
+    result = clean_to_bundle(src, out, policy_id="external_sharing", matter_id="m1")
+    actions = result["manifest_data"]["actions"]
+    assert any(
+        a.startswith("embedded_image_metadata:strip:") and "provenance" in a for a in actions
+    )
+
+
+@NEED_EXIFTOOL_QPDF
+def test_clean_to_bundle_fails_closed_without_qpdf_rather_than_ship_unverified(
+    tmp_path, monkeypatch
+):
+    """The indirect-/Length "flag, don't guess" path in clean_pdf turns out
+    to be unreachable through clean_to_bundle for external_sharing/
+    production specifically: both are in policies._PDF_STRICT_TOOLING_
+    POLICIES, which requires clean_pdf's own structural_rewrite (qpdf
+    --linearize) to have succeeded — and that same rewrite is what
+    normalizes an indirect /Length to direct as a side effect (see
+    container_meta.py's module comment), so by the time a strict-policy
+    job would reach the strip step, there's no indirect reference left to
+    skip. What's actually reachable, and what this asserts instead: qpdf
+    genuinely absent means the whole job fails closed with a clear reason
+    (unit-level indirect-/Length coverage lives in test_clean_pdf_
+    reports_indirect_length_images_honestly)."""
+    import container_meta
+    from custody import CustodyError
+    from engine_api import clean_to_bundle
+
+    real_which = container_meta.which
+    monkeypatch.setattr(
+        container_meta, "which", lambda cmd: None if cmd == "qpdf" else real_which(cmd)
+    )
+
+    jpeg = _jpeg(_jpeg_appn(0xEB, b"jumb c2pa manifest bytes"))
+    src = tmp_path / "in.pdf"
+    src.write_bytes(_pdf_with_image_xobject(jpeg, indirect_length=True))
+    out = tmp_path / "bundle"
+    with pytest.raises(CustodyError, match="tooling bar"):
+        clean_to_bundle(src, out, policy_id="external_sharing", matter_id="m1")

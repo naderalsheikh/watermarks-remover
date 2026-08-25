@@ -538,13 +538,45 @@ def _apply_pdf(
                     "exiftool and a successful qpdf --linearize are both required, "
                     "otherwise the original metadata stays recoverable in the output"
                 )
-        return dest.read_bytes(), [
+        records = [
             ActionRecord(
                 "pdf_incremental" if k == "structural_rewrite" else "authoring_props", k, str(v)
             )
             for k, v in meta.items()
             if k in ("structural_rewrite", "info_clear", "mode")
         ]
+        # docs/pdf-deep-image-metadata.md: clean_pdf already ran the
+        # byte-preserving embedded-image strip above (it's unconditional,
+        # not policy-gated — an image's own EXIF/C2PA isn't something any
+        # policy chooses to keep). Without this, the strip happens for
+        # real but is invisible in the manifest — the exact "surface it
+        # honestly" gap this product can't afford for an evidentiary tool.
+        deep = meta.get("deep_images") or {}
+        if deep.get("images_stripped"):
+            records.append(
+                ActionRecord(
+                    "embedded_image_metadata",
+                    "strip",
+                    f"stripped embedded-image metadata from {deep['images_stripped']} "
+                    "image(s) inside the PDF (byte-preserving: scan data untouched)"
+                    + (
+                        ", including C2PA/JUMBF provenance"
+                        if deep.get("provenance_present_before")
+                        else ""
+                    ),
+                )
+            )
+        elif deep.get("metadata_present"):
+            records.append(
+                ActionRecord(
+                    "embedded_image_metadata",
+                    "flag",
+                    "embedded-image metadata remains: the image's /Length is an "
+                    "indirect reference, skipped rather than guessed at "
+                    "(see docs/pdf-deep-image-metadata.md)",
+                )
+            )
+        return dest.read_bytes(), records
 
 
 def apply_actions(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionRecord]]:
