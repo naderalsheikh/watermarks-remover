@@ -275,6 +275,20 @@ class ActionPlan:
         return any(eff["action"] not in passive for eff in self.actions.values())
 
 
+def policy_subtype_for_finding(f: Finding) -> str | None:
+    """Map one structured Finding to its policy-engine subtype (SUBTYPES),
+    via the same alias table plan_actions uses internally through
+    _collect_subtypes below. None means the finding has no policy-subtype
+    mapping (an unmapped/unsupported shape) -- there is nothing a caller
+    could put in a `finding_decisions` dict for it. Public (unlike
+    _collect_subtypes) because the inspect worker uses it too, to tell the
+    UI up front which findings a per-finding Production decision applies
+    to -- see worker.py's inspect branch and docs/COUNSELCLEAR_DESIGN.md's
+    Structured findings section."""
+    st = _FINDING_SUBTYPE_ALIASES.get(f.subtype, f.subtype)
+    return st if st in SUBTYPES else None
+
+
 def _collect_subtypes(result: Any) -> tuple[list[str], list[str]]:
     """Return (policy subtypes seen, unmapped finding strings)."""
     subtypes: list[str] = []
@@ -295,8 +309,8 @@ def _collect_subtypes(result: Any) -> tuple[list[str], list[str]]:
         except Exception:
             found = []
     for f in found:
-        st = _FINDING_SUBTYPE_ALIASES.get(f.subtype, f.subtype)
-        if st in SUBTYPES:
+        st = policy_subtype_for_finding(f)
+        if st:
             subtypes.append(st)
         else:
             unmapped.append(f"{f.category}/{f.subtype}")
@@ -580,38 +594,58 @@ def _apply_pdf(
 
 
 NO_DECISION_MARKER = "no operator decision was supplied"
+# Distinct from NO_DECISION_MARKER on purpose: a finding an operator looked
+# at and chose to keep is a reviewed outcome, not a gap -- flagging it with
+# the same "not reviewed" language (and the same red no-decision banner /
+# audit no_decision_count) would be dishonest in the opposite direction, so
+# the UI must be able to tell the two apart by string.
+OPERATOR_KEPT_MARKER = "reviewed and kept by operator"
 
 
-def _no_decision_records(plan: ActionPlan) -> list[ActionRecord]:
+def _approve_default_keep_records(plan: ActionPlan) -> list[ActionRecord]:
     """Explicit record for every present subtype whose approve-default
-    resolved to "keep" for lack of an operator decision (plan_actions:
-    reason "no_decision"). Without this, a subtype like tracked_changes or
-    comments_and_notes that was found but never decided produces *no*
-    ActionRecord at all -- the manifest's actions list simply omits it,
-    while findings_before still lists it and verification.pass can still
-    read true (reinspect_targeted_gone trivially holds when nothing was
-    targeted). That combination -- a done, verification-passed sanitize
-    job whose derivative still contains a high-consequence finding, with
-    nothing in the manifest saying so -- is exactly the silently-wrong
-    outcome this product's own trust bar forbids. Single choke point in
-    apply_actions rather than one fix per (kind, format) branch, so it
-    covers every document kind uniformly, including ones added later."""
-    return [
-        ActionRecord(
-            st,
-            "keep",
-            f"kept: {NO_DECISION_MARKER} for this approve-default finding "
-            "(per-finding review is not yet available in this build)",
-        )
-        for st in sorted(plan.present_subtypes)
-        if plan.actions.get(st, {}).get("reason") == "no_decision"
-    ]
+    resolved to "keep" -- whether because no operator decision was
+    supplied (plan_actions: reason "no_decision") or because the operator
+    explicitly chose to keep it (reason "operator_kept"). Without this, a
+    subtype like tracked_changes or comments_and_notes that was found but
+    resolved to "keep" produces *no* ActionRecord at all -- the manifest's
+    actions list simply omits it, while findings_before still lists it and
+    verification.pass can still read true (reinspect_targeted_gone
+    trivially holds when nothing was targeted). That combination -- a
+    done, verification-passed sanitize job whose derivative still contains
+    a high-consequence finding, with nothing in the manifest saying so --
+    is exactly the silently-wrong outcome this product's own trust bar
+    forbids, for an undecided finding and a reviewed-and-kept one alike.
+    Single choke point in apply_actions rather than one fix per (kind,
+    format) branch, so it covers every document kind uniformly, including
+    ones added later."""
+    records = []
+    for st in sorted(plan.present_subtypes):
+        reason = plan.actions.get(st, {}).get("reason")
+        if reason == "no_decision":
+            records.append(
+                ActionRecord(
+                    st,
+                    "keep",
+                    f"kept: {NO_DECISION_MARKER} for this approve-default finding "
+                    "(per-finding review is not yet available in this build)",
+                )
+            )
+        elif reason == "operator_kept":
+            records.append(
+                ActionRecord(
+                    st,
+                    "keep",
+                    f"kept: {OPERATOR_KEPT_MARKER} for this approve-default finding",
+                )
+            )
+    return records
 
 
 def apply_actions(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionRecord]]:
     """Execute a plan. Returns (cleaned_bytes, records)."""
     cleaned, records = _apply_actions_impl(data, plan)
-    records.extend(_no_decision_records(plan))
+    records.extend(_approve_default_keep_records(plan))
     return cleaned, records
 
 

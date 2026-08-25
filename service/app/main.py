@@ -28,7 +28,7 @@ from . import oidc as oidc_mod
 # PR 17 doctrine: this module must NOT import engine_api / custody or call
 # inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
 # isolated worker processes (see app.runner). A test enforces the ban.
-from .acl import OPERATOR, bootstrap_operator, grant, has_perm, revoke
+from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, revoke
 from .audit import append_event, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
@@ -437,6 +437,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         read an env var from, so this is the one thing it fetches before
         a session exists. No secrets — just the OIDC on/off bit."""
         return {"oidc_enabled": cfg.oidc_enabled}
+
+    @app.get("/v1/auth/me")
+    def auth_me(user: str = Depends(principal)):
+        """The caller's own authenticated principal -- "operator" for a
+        local-password session, "oidc:<hash>" for SSO. Exists so a reviewer
+        can discover and hand an admin the exact string an Access-panel
+        grant needs (service/app/acl.py's user_id); the value itself is not
+        new exposure, since it already appears in every audit event's
+        actor_id and every ACL row this session can see."""
+        return {"principal": user}
 
     @app.post("/v1/auth/login")
     def login(body: LoginBody, request: Request, response: Response):
@@ -975,6 +985,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{job.id}-bundle.zip"'},
         )
+
+    @app.get("/v1/matters/{matter_id}/acl")
+    def get_acl(
+        matter_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        _require(matter_id, "admin", s, user)
+        _matter(matter_id, s)
+        return {"grants": list_grants(s, matter_id)}
 
     @app.put("/v1/matters/{matter_id}/acl")
     def put_acl(

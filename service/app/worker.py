@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 from engine_api import clean_to_bundle, inspect_bytes
+from policies import DEFAULT_POLICIES, policy_subtype_for_finding
 
 
 def _write_result(output_dir: Path, payload: dict) -> None:
@@ -76,10 +77,27 @@ def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, a
     try:
         if kind == "inspect":
             res = inspect_bytes(data, name)
+            findings = []
+            for f in res.findings:
+                if hasattr(f, "to_dict"):
+                    d = f.to_dict()
+                    # production is the only default policy with "approve"
+                    # cells; a finding's policy_subtype/requires_approval
+                    # here tells the sanitize UI, up front, which findings
+                    # a per-finding decision would apply to -- computed at
+                    # inspect time so the sanitize panel doesn't need to
+                    # re-derive the same alias mapping (or duplicate it in
+                    # TypeScript, which would drift from policies.py).
+                    pst = policy_subtype_for_finding(f)
+                    d["policy_subtype"] = pst
+                    d["requires_approval"] = bool(pst and DEFAULT_POLICIES["production"].get(pst) == "approve")
+                else:
+                    d = f
+                findings.append(d)
             return finish("done", result={
                 "kind": res.kind,
                 "format": res.format,
-                "findings": [f.to_dict() if hasattr(f, "to_dict") else f for f in res.findings],
+                "findings": findings,
                 "unsupported_reason": res.unsupported_reason,
             })
 

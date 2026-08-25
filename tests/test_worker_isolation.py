@@ -112,6 +112,25 @@ def test_inspect_job_runs_in_worker_subprocess(client):
     assert r["status"] == "done", r.get("error")
 
 
+def test_inspect_findings_carry_policy_subtype_and_requires_approval(client):
+    """The sanitize panel's per-finding Production decision control (web/
+    app/matters/view/page.tsx) needs to know, at inspect time, which
+    findings a decision would apply to -- computed once here (worker.py)
+    rather than duplicating policies.py's alias table in TypeScript."""
+    matter, doc_id = _upload(client, "spa.docx")
+    r = client.post(f"/v1/matters/{matter}/documents/{doc_id}/inspect-jobs").json()
+    assert r["status"] == "done", r.get("error")
+    by_subtype = {f["subtype"]: f for f in r["result"]["findings"]}
+
+    assert by_subtype["comments_and_notes"]["policy_subtype"] == "comments_and_notes"
+    assert by_subtype["comments_and_notes"]["requires_approval"] is True
+    assert by_subtype["office_tracked_changes"]["policy_subtype"] == "tracked_changes"
+    assert by_subtype["office_tracked_changes"]["requires_approval"] is True
+    # authoring_props is "strip" (not "approve") under production -- never
+    # needs a per-finding decision, so requires_approval must stay False.
+    assert by_subtype["authoring_props"]["requires_approval"] is False
+
+
 def test_worker_cli_is_pure_no_db_access(tmp_path):
     """run-job takes explicit --input/--output-dir, never a --data-root or
     --job to look up in a database — the whole point of PR 17 hardening

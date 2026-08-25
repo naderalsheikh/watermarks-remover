@@ -42,3 +42,17 @@ def revoke(s: Session, matter_id: str, user_id: str, perm: str) -> None:
 def perms_of(s: Session, matter_id: str, user_id: str) -> list[str]:
     rows = s.query(MatterAcl).filter_by(matter_id=matter_id, user_id=user_id).all()
     return sorted(r.perm for r in rows)
+
+
+def list_grants(s: Session, matter_id: str) -> list[dict]:
+    """Every (user_id, perms) pair currently granted on a matter, for the
+    Access panel -- one row per user_id, perms sorted, users sorted so the
+    list renders in a stable order across requests."""
+    rows = s.query(MatterAcl).filter_by(matter_id=matter_id).all()
+    by_user: dict[str, list[str]] = {}
+    for r in rows:
+        by_user.setdefault(r.user_id, []).append(r.perm)
+    return [
+        {"user_id": user_id, "perms": sorted(perms)}
+        for user_id, perms in sorted(by_user.items())
+    ]

@@ -44,6 +44,11 @@ export type Finding = {
   requires_approval: boolean;
   requires_attestation: boolean;
   notes: string | null;
+  // Inspect-time only (service/app/worker.py): the policy-engine subtype
+  // this finding maps to, and whether Production's default for that
+  // subtype is "approve" (i.e. a per-finding decision would apply). null
+  // policy_subtype means this finding has no policy-engine mapping.
+  policy_subtype?: string | null;
 };
 
 export type JobResult = {
@@ -103,3 +108,15 @@ export type Audit = {
   chain_detail: string;
   events: AuditEvent[];
 };
+
+// GET /v1/matters/{id}/acl — current access grants, one row per user_id.
+export type AclGrant = { user_id: string; perms: string[] };
+
+export const KNOWN_PERMS = [
+  "read",
+  "upload",
+  "inspect",
+  "sanitize",
+  "download_original",
+  "admin",
+] as const;

@@ -47,6 +47,23 @@ def _audit(client, matter_id):
     return client.get(f"/v1/matters/{matter_id}/audit").json()
 
 
+def test_auth_me_returns_operator_in_local_mode(env):
+    """The Access panel's "Your principal ID" display needs somewhere to
+    read the caller's own identity from. Local mode has exactly one:
+    the shared "operator" subject."""
+    c, _, _, _, _ = env
+    r = c.get("/v1/auth/me")
+    assert r.status_code == 200
+    assert r.json() == {"principal": "operator"}
+
+
+def test_auth_me_requires_authentication(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw-me")
+    c = TestClient(create_app(tmp_path / "data"))
+    r = c.get("/v1/auth/me")
+    assert r.status_code == 401
+
+
 def test_audit_chain_is_intact_and_ordered(env):
     c, matter, _, _, _ = env
     body = _audit(c, matter["id"])
@@ -120,6 +137,31 @@ def test_grant_unknown_perm_is_400(env):
     assert r.status_code == 400
 
 
+def test_get_acl_lists_current_grants(env):
+    """The Access panel (web/app/matters/access/page.tsx) needs to show
+    who currently has what -- there was no read endpoint for that at all
+    before this test's fix, only grant/revoke."""
+    c, matter, _, _, _ = env
+    r = c.get(f"/v1/matters/{matter['id']}/acl")
+    assert r.status_code == 200
+    grants = r.json()["grants"]
+    operator_row = next(g for g in grants if g["user_id"] == "operator")
+    assert set(operator_row["perms"]) == {"read", "upload", "inspect", "sanitize", "admin"}
+
+    c.put(f"/v1/matters/{matter['id']}/acl", json={"user_id": "paralegal", "perm": "read"})
+    grants = c.get(f"/v1/matters/{matter['id']}/acl").json()["grants"]
+    paralegal_row = next(g for g in grants if g["user_id"] == "paralegal")
+    assert paralegal_row["perms"] == ["read"]
+
+    c.request(
+        "DELETE",
+        f"/v1/matters/{matter['id']}/acl",
+        json={"user_id": "paralegal", "perm": "read"},
+    )
+    grants = c.get(f"/v1/matters/{matter['id']}/acl").json()["grants"]
+    assert not any(g["user_id"] == "paralegal" for g in grants)
+
+
 def test_audit_records_acl_changes(env):
     c, matter, _, _, _ = env
     c.put(
@@ -168,7 +210,7 @@ def test_audit_records_inspect_and_sanitize_execution(env):
 
 def test_audit_no_decision_count_reflects_production_findings_kept(tmp_path, monkeypatch):
     """The audit trail must surface the same "kept without review" signal
-    the manifest does (see policies.py's _no_decision_records / test_
+    the manifest does (see policies.py's _approve_default_keep_records / test_
     apply_production_docx_discloses_findings_kept_without_a_decision) --
     not just leave it buried in the manifest's actions list. spa.docx has
     one comment and tracked changes, both approve-default under

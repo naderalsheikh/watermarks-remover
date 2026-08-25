@@ -89,6 +89,30 @@ def test_prefix_subtypes_match_real_emitted_prefixes():
         assert seen == [expected_subtype], f"{text!r}: got seen={seen} unmapped={unmapped}"
 
 
+def test_policy_subtype_for_finding_matches_collect_subtypes():
+    """policy_subtype_for_finding is the per-Finding primitive
+    _collect_subtypes is now built from -- same alias table, so an
+    aliased raw subtype (office_tracked_changes) resolves the same way
+    whichever path calls it, and an unmapped one returns None rather than
+    a bogus subtype string a caller could put in finding_decisions."""
+    from findings import Finding, FindingLocation
+    from policies import policy_subtype_for_finding
+
+    aliased = Finding(
+        category="revision_history",
+        subtype="office_tracked_changes",
+        format="docx",
+        location=FindingLocation(pane="markup"),
+    )
+    assert policy_subtype_for_finding(aliased) == "tracked_changes"
+
+    direct = Finding(category="revision_history", subtype="comments_and_notes", format="docx")
+    assert policy_subtype_for_finding(direct) == "comments_and_notes"
+
+    unmapped = Finding(category="file_metadata", subtype="totally_unknown_subtype", format="docx")
+    assert policy_subtype_for_finding(unmapped) is None
+
+
 def test_validate_overlay_rules():
     ok = validate_policy({"hidden_text": "strip"}, base_id="production")
     assert ok["hidden_text"] == "strip" and ok["tracked_changes"] == "approve"
@@ -211,7 +235,7 @@ def test_apply_privacy_docx_keeps_markup_and_comments_blanks_listed_props():
 def test_apply_production_docx_discloses_findings_kept_without_a_decision():
     """production's comments_and_notes/tracked_changes default to "approve",
     which resolves to "keep" (not strip) when no operator decision is
-    supplied. Before this test's fix (policies.py's _no_decision_records),
+    supplied. Before this test's fix (policies.py's _approve_default_keep_records),
     apply_actions produced *no* record at all for those kept, present
     findings -- so a caller reading only manifest.actions had no way to
     tell "reviewed and kept" apart from "never looked at". This asserts
@@ -242,7 +266,7 @@ def test_apply_production_docx_discloses_findings_kept_without_a_decision():
 
 def test_apply_production_docx_with_decisions_records_no_gap():
     """The counterpart to the test above: once every present approve-default
-    subtype has an explicit operator decision, _no_decision_records has
+    subtype has an explicit operator decision, _approve_default_keep_records has
     nothing left to add -- present_subtypes minus decided subtypes is
     empty, so no "no operator decision" record appears."""
     data = _load("spa.docx")
@@ -254,6 +278,31 @@ def test_apply_production_docx_with_decisions_records_no_gap():
     )
     _cleaned, records = apply_actions(data, plan)
     assert not any("no operator decision was supplied" in r.detail for r in records)
+
+
+def test_apply_production_docx_explicit_keep_is_visible_and_distinct_from_no_decision():
+    """An operator who reviews a finding and chooses "keep" made a
+    deliberate call -- that must not look, in the manifest, like the
+    no_decision case (never reviewed at all). Both currently resolve to
+    the same "keep" action, so the only thing that can tell them apart is
+    the record's detail string; assert the two are actually distinct and
+    that the reviewed one doesn't trip the no-decision marker the job
+    page's NoDecisionWarning keys off of."""
+    data = _load("spa.docx")
+    res = inspect_bytes(data, "spa.docx")
+    plan = plan_actions(
+        res,
+        "production",
+        decisions={"comments_and_notes": "keep", "tracked_changes": "approve"},
+    )
+    _cleaned, records = apply_actions(data, plan)
+
+    by_subtype = {r.subtype: r for r in records}
+    assert by_subtype["comments_and_notes"].action == "keep"
+    assert "reviewed and kept by operator" in by_subtype["comments_and_notes"].detail
+    assert "no operator decision was supplied" not in by_subtype["comments_and_notes"].detail
+    # approved subtypes still resolve to a real action, not a keep record
+    assert by_subtype["tracked_changes"].action != "keep"
 
 
 def test_apply_sharing_docx_strips_everything():

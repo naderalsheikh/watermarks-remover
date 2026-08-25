@@ -226,6 +226,14 @@ def test_callback_issues_session_for_allowed_email(tmp_path, monkeypatch):
     audit = c.get(f"/v1/matters/{m['id']}/audit").json()
     assert audit["chain_ok"]
 
+    # /v1/auth/me is the Access panel's one legitimate way for this
+    # reviewer to discover the exact string an admin needs to grant them
+    # access -- it must return the real oidc:<hash> principal, not "sub-
+    # alice" or anything else an admin couldn't paste into acl.grant.
+    me = c.get("/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json() == {"principal": principal_for("sub-alice")}
+
 
 def test_oidc_principal_cannot_revoke_all_sessions(tmp_path, monkeypatch):
     """revoke-sessions is a deployment-wide action gated on the local

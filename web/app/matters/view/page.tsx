@@ -16,15 +16,24 @@ function formatBytes(n: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
+// Human-readable labels for the policy-engine subtypes a per-finding
+// Production decision can apply to (SUBTYPES in policies.py) — only the
+// ones with an "approve" default ever appear here.
+function subtypeLabel(subtype: string): string {
+  return subtype.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function SanitizePanel({
   matterId,
   docId,
+  docJobs,
   policies,
   onClose,
   onDone,
 }: {
   matterId: string;
   docId: string;
+  docJobs: Job[];
   policies: Policy[];
   onClose: () => void;
   onDone: () => void;
@@ -33,26 +42,53 @@ function SanitizePanel({
   const [reason, setReason] = useState("");
   const [attest, setAttest] = useState(false);
   const [noDecisionAck, setNoDecisionAck] = useState(false);
+  const [decisions, setDecisions] = useState<Record<string, "approve" | "keep">>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const selected = policies.find((p) => p.id === policyId);
-  // production is the only policy with approve-default subtypes today; a
-  // finding under one is kept, not reviewed, unless a per-finding decision
-  // is supplied — and this UI doesn't have a per-finding decision control
-  // yet. Every such finding is honestly disclosed in the resulting
-  // manifest (see EmbeddedImageNotice-style NoDecisionNotice on the job
-  // page), but that disclosure is after the fact; this gate is the before.
   const isProduction = policyId === "production";
   const isEvidenceOnly = policyId === "evidence_preservation";
+
+  // production is the only policy with approve-default subtypes today. A
+  // present approve-default finding is kept, not reviewed, unless it gets
+  // an explicit decision. If the document has a completed inspect job, its
+  // findings already carry policy_subtype/requires_approval (computed once
+  // in worker.py, not duplicated here) -- so we can offer a real per-
+  // finding Approve/Keep control instead of only the honest-but-blunt
+  // fallback (warn, gate on an acknowledgment, let the manifest disclose
+  // whatever got kept). Without an inspect job, there's nothing to show
+  // per-finding, so the fallback is what runs.
+  const latestInspectJob = docJobs.find((j) => j.kind === "inspect" && j.status === "done");
+  const inspectQ = useApiData(
+    () =>
+      isProduction && latestInspectJob
+        ? api.get<Job>(`/v1/matters/${matterId}/jobs/${latestInspectJob.id}`)
+        : Promise.resolve(null),
+    `inspect-for-decisions:${matterId}:${docId}:${isProduction}:${latestInspectJob?.id ?? ""}`,
+  );
+  const approveSubtypeCounts = new Map<string, number>();
+  for (const f of inspectQ.data?.result?.findings ?? []) {
+    if (f.requires_approval && f.policy_subtype) {
+      approveSubtypeCounts.set(f.policy_subtype, (approveSubtypeCounts.get(f.policy_subtype) ?? 0) + 1);
+    }
+  }
+  const approveSubtypes = [...approveSubtypeCounts.keys()].sort();
+  const hasPerFindingReview = isProduction && !!latestInspectJob && !inspectQ.loading;
+  const needsFallbackGate = isProduction && !hasPerFindingReview;
 
   async function submit() {
     setSubmitting(true);
     setSubmitError(null);
     try {
+      const finding_decisions =
+        hasPerFindingReview && approveSubtypes.length > 0
+          ? Object.fromEntries(approveSubtypes.map((st) => [st, decisions[st] ?? "keep"]))
+          : undefined;
       await api.post(`/v1/matters/${matterId}/documents/${docId}/sanitize-jobs`, {
         policy_id: policyId,
         reason,
         signature_break_attestation: attest,
+        ...(finding_decisions ? { finding_decisions } : {}),
       });
       onDone();
       onClose();
@@ -81,15 +117,19 @@ function SanitizePanel({
         {selected && <p className="mt-1 text-xs text-muted">{selected.description}</p>}
       </div>
 
-      {isProduction && (
+      {needsFallbackGate && (
         <div className="rounded-md border border-amber-600/40 bg-amber-600/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
-          <p className="font-medium">Per-finding review isn&apos;t available in this build yet.</p>
+          <p className="font-medium">
+            {latestInspectJob
+              ? "Loading findings for per-finding review…"
+              : "No inspect results yet, so per-finding review isn't available."}
+          </p>
           <p className="mt-1">
             Findings this policy marks &quot;approve&quot; (comments, tracked changes, hidden
             content, embedded objects, attachments, links, and more) will be{" "}
             <strong>kept as-is</strong>, not reviewed one by one. Each one will be listed
             explicitly in the resulting manifest — the derivative will not silently look
-            cleaner than it is.
+            cleaner than it is. Run Inspect first to review findings individually instead.
           </p>
           <label className="mt-2 flex items-center gap-2">
             <input
@@ -100,6 +140,45 @@ function SanitizePanel({
             I understand undecided approve-default findings will be kept, not reviewed
           </label>
         </div>
+      )}
+      {hasPerFindingReview && approveSubtypes.length > 0 && (
+        <div className="rounded-md border border-border p-3 text-xs">
+          <p className="mb-2 font-medium">
+            {approveSubtypes.length} finding type{approveSubtypes.length === 1 ? "" : "s"} need a
+            decision
+          </p>
+          <ul className="space-y-2">
+            {approveSubtypes.map((st) => {
+              const count = approveSubtypeCounts.get(st) ?? 0;
+              const value = decisions[st] ?? "keep";
+              return (
+                <li key={st} className="flex items-center justify-between gap-3">
+                  <span>
+                    {subtypeLabel(st)}{" "}
+                    <span className="text-muted">
+                      ({count} finding{count === 1 ? "" : "s"})
+                    </span>
+                  </span>
+                  <select
+                    value={value}
+                    onChange={(e) =>
+                      setDecisions((d) => ({ ...d, [st]: e.target.value as "approve" | "keep" }))
+                    }
+                    className="rounded border border-border bg-transparent px-1.5 py-1 text-xs outline-none focus:border-accent"
+                  >
+                    <option value="keep">Keep</option>
+                    <option value="approve">Approve (strip)</option>
+                  </select>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {hasPerFindingReview && approveSubtypes.length === 0 && (
+        <p className="text-xs text-muted">
+          No approve-default findings present in the latest inspection — nothing to decide.
+        </p>
       )}
       {isEvidenceOnly && (
         <div className="rounded-md border border-border bg-black/[0.02] px-3 py-2 text-xs text-muted dark:bg-white/[0.02]">
@@ -124,7 +203,7 @@ function SanitizePanel({
       <div className="flex gap-2">
         <button
           onClick={submit}
-          disabled={submitting || (isProduction && !noDecisionAck)}
+          disabled={submitting || (needsFallbackGate && !noDecisionAck)}
           className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
           {submitting ? "Starting…" : isEvidenceOnly ? "Run inspection" : "Run sanitize"}
@@ -202,6 +281,7 @@ function DocumentRow({
         <SanitizePanel
           matterId={matterId}
           docId={doc.id}
+          docJobs={docJobs}
           policies={policies}
           onClose={() => setSanitizing(false)}
           onDone={onJobStarted}
@@ -296,12 +376,20 @@ function MatterView({ matterId }: { matterId: string }) {
         <Link href="/matters" className="text-sm text-muted hover:text-foreground">
           ← Matters
         </Link>
-        <Link
-          href={`/matters/audit?id=${matterId}`}
-          className="text-sm text-muted hover:text-foreground"
-        >
-          Audit log →
-        </Link>
+        <div className="flex gap-4">
+          <Link
+            href={`/matters/access?id=${matterId}`}
+            className="text-sm text-muted hover:text-foreground"
+          >
+            Access →
+          </Link>
+          <Link
+            href={`/matters/audit?id=${matterId}`}
+            className="text-sm text-muted hover:text-foreground"
+          >
+            Audit log →
+          </Link>
+        </div>
       </div>
       <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">
         {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
