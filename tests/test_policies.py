@@ -208,6 +208,54 @@ def test_apply_privacy_docx_keeps_markup_and_comments_blanks_listed_props():
         assert "Draft" in core or "SPA" in core  # non-listed field survives
 
 
+def test_apply_production_docx_discloses_findings_kept_without_a_decision():
+    """production's comments_and_notes/tracked_changes default to "approve",
+    which resolves to "keep" (not strip) when no operator decision is
+    supplied. Before this test's fix (policies.py's _no_decision_records),
+    apply_actions produced *no* record at all for those kept, present
+    findings -- so a caller reading only manifest.actions had no way to
+    tell "reviewed and kept" apart from "never looked at". This asserts
+    the derivative is unchanged for the two present approve-default
+    findings, and that the records list says so explicitly rather than
+    staying silent."""
+    data = _load("spa.docx")
+    res = inspect_bytes(data, "spa.docx")
+    plan = plan_actions(res, "production")
+    cleaned, records = apply_actions(data, plan)
+
+    by_subtype = {r.subtype: r for r in records}
+    for subtype in ("comments_and_notes", "tracked_changes"):
+        assert subtype in by_subtype, f"no record at all for kept-but-present {subtype}"
+        assert by_subtype[subtype].action == "keep"
+        assert "no operator decision was supplied" in by_subtype[subtype].detail
+
+    def parts(blob):
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            return zf.read("word/document.xml"), zf.namelist()
+
+    orig_doc_xml, _ = parts(data)
+    new_doc_xml, _ = parts(cleaned)
+    with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
+        assert "word/comments.xml" in zf.namelist(), "comments part dropped despite 'keep'"
+    assert orig_doc_xml == new_doc_xml, "kept subtype's markup was altered anyway"
+
+
+def test_apply_production_docx_with_decisions_records_no_gap():
+    """The counterpart to the test above: once every present approve-default
+    subtype has an explicit operator decision, _no_decision_records has
+    nothing left to add -- present_subtypes minus decided subtypes is
+    empty, so no "no operator decision" record appears."""
+    data = _load("spa.docx")
+    res = inspect_bytes(data, "spa.docx")
+    plan = plan_actions(
+        res,
+        "production",
+        decisions={"comments_and_notes": "approve", "tracked_changes": "approve"},
+    )
+    _cleaned, records = apply_actions(data, plan)
+    assert not any("no operator decision was supplied" in r.detail for r in records)
+
+
 def test_apply_sharing_docx_strips_everything():
     data = _load("spa.docx")
     res = inspect_bytes(data, "spa.docx")

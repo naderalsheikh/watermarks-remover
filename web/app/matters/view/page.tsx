@@ -32,9 +32,18 @@ function SanitizePanel({
   const [policyId, setPolicyId] = useState(policies[0]?.id ?? "external_sharing");
   const [reason, setReason] = useState("");
   const [attest, setAttest] = useState(false);
+  const [noDecisionAck, setNoDecisionAck] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const selected = policies.find((p) => p.id === policyId);
+  // production is the only policy with approve-default subtypes today; a
+  // finding under one is kept, not reviewed, unless a per-finding decision
+  // is supplied — and this UI doesn't have a per-finding decision control
+  // yet. Every such finding is honestly disclosed in the resulting
+  // manifest (see EmbeddedImageNotice-style NoDecisionNotice on the job
+  // page), but that disclosure is after the fact; this gate is the before.
+  const isProduction = policyId === "production";
+  const isEvidenceOnly = policyId === "evidence_preservation";
 
   async function submit() {
     setSubmitting(true);
@@ -71,6 +80,34 @@ function SanitizePanel({
         </select>
         {selected && <p className="mt-1 text-xs text-muted">{selected.description}</p>}
       </div>
+
+      {isProduction && (
+        <div className="rounded-md border border-amber-600/40 bg-amber-600/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+          <p className="font-medium">Per-finding review isn&apos;t available in this build yet.</p>
+          <p className="mt-1">
+            Findings this policy marks &quot;approve&quot; (comments, tracked changes, hidden
+            content, embedded objects, attachments, links, and more) will be{" "}
+            <strong>kept as-is</strong>, not reviewed one by one. Each one will be listed
+            explicitly in the resulting manifest — the derivative will not silently look
+            cleaner than it is.
+          </p>
+          <label className="mt-2 flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={noDecisionAck}
+              onChange={(e) => setNoDecisionAck(e.target.checked)}
+            />
+            I understand undecided approve-default findings will be kept, not reviewed
+          </label>
+        </div>
+      )}
+      {isEvidenceOnly && (
+        <div className="rounded-md border border-border bg-black/[0.02] px-3 py-2 text-xs text-muted dark:bg-white/[0.02]">
+          Evidence preservation only inspects and records — it never produces a sanitized
+          derivative.
+        </div>
+      )}
+
       <div>
         <label className="mb-1 block text-xs font-medium">Reason (optional)</label>
         <input
@@ -87,10 +124,10 @@ function SanitizePanel({
       <div className="flex gap-2">
         <button
           onClick={submit}
-          disabled={submitting}
+          disabled={submitting || (isProduction && !noDecisionAck)}
           className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
-          {submitting ? "Starting…" : "Run sanitize"}
+          {submitting ? "Starting…" : isEvidenceOnly ? "Run inspection" : "Run sanitize"}
         </button>
         <button onClick={onClose} className="px-3 py-1.5 text-xs text-muted hover:text-foreground">
           Cancel
@@ -222,11 +259,11 @@ function MatterStats({ documents, jobs }: { documents: Document[]; jobs: Job[] }
 function MatterView({ matterId }: { matterId: string }) {
   const matterQ = useApiData(() => api.get<Matter>(`/v1/matters/${matterId}`), `matter:${matterId}`);
   const docsQ = useApiData(
-    () => api.get<{ documents: Document[] }>(`/v1/matters/${matterId}/documents`),
+    () => api.get<{ documents: Document[]; total: number }>(`/v1/matters/${matterId}/documents`),
     `docs:${matterId}`,
   );
   const jobsQ = useApiData(
-    () => api.get<{ jobs: Job[] }>(`/v1/matters/${matterId}/jobs`),
+    () => api.get<{ jobs: Job[]; total: number }>(`/v1/matters/${matterId}/jobs`),
     `jobs:${matterId}`,
   );
   const policiesQ = useApiData(() => api.get<{ policies: Policy[] }>("/v1/policies"), "policies");
@@ -308,18 +345,25 @@ function MatterView({ matterId }: { matterId: string }) {
       )}
 
       {docsQ.data && docsQ.data.documents.length > 0 && (
-        <ul className="divide-y divide-border rounded-md border border-border">
-          {docsQ.data.documents.map((doc) => (
-            <DocumentRow
-              key={doc.id}
-              matterId={matterId}
-              doc={doc}
-              jobs={jobsQ.data?.jobs ?? []}
-              policies={policiesQ.data?.policies ?? []}
-              onJobStarted={jobsQ.reload}
-            />
-          ))}
-        </ul>
+        <>
+          {docsQ.data.total > docsQ.data.documents.length && (
+            <p className="mb-2 text-xs text-muted">
+              Showing {docsQ.data.documents.length} of {docsQ.data.total} documents.
+            </p>
+          )}
+          <ul className="divide-y divide-border rounded-md border border-border">
+            {docsQ.data.documents.map((doc) => (
+              <DocumentRow
+                key={doc.id}
+                matterId={matterId}
+                doc={doc}
+                jobs={jobsQ.data?.jobs ?? []}
+                policies={policiesQ.data?.policies ?? []}
+                onJobStarted={jobsQ.reload}
+              />
+            ))}
+          </ul>
+        </>
       )}
     </main>
   );

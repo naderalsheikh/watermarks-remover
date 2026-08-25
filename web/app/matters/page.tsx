@@ -9,7 +9,7 @@ import { Header } from "@/components/Header";
 
 export default function MattersPage() {
   const { data, error, loading, reload } = useApiData(
-    () => api.get<{ matters: Matter[] }>("/v1/matters"),
+    () => api.get<{ matters: Matter[]; total: number }>("/v1/matters"),
     "matters",
   );
   const [name, setName] = useState("");
@@ -84,21 +84,29 @@ export default function MattersPage() {
         )}
 
         {data && data.matters.length > 0 && (
-          <ul className="divide-y divide-border rounded-md border border-border">
-            {data.matters.map((m) => (
-              <li key={m.id}>
-                <Link
-                  href={`/matters/view?id=${m.id}`}
-                  className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-                >
-                  <span className="font-medium">{m.name}</span>
-                  <span className="text-xs text-muted">
-                    {new Date(m.created_utc).toLocaleDateString()}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+          <>
+            {data.total > data.matters.length && (
+              <p className="mb-2 text-xs text-muted">
+                Showing {data.matters.length} of {data.total} matters — narrow with a name filter
+                to see more (not yet available).
+              </p>
+            )}
+            <ul className="divide-y divide-border rounded-md border border-border">
+              {data.matters.map((m) => (
+                <li key={m.id}>
+                  <Link
+                    href={`/matters/view?id=${m.id}`}
+                    className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                  >
+                    <span className="font-medium">{m.name}</span>
+                    <span className="text-xs text-muted">
+                      {new Date(m.created_utc).toLocaleDateString()}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </>
         )}
       </main>
     </>

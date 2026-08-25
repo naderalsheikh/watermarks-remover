@@ -61,6 +61,21 @@ def test_api_module_never_imports_parsers():
     code = "\n".join(line.split("#")[0] for line in src.splitlines())
     for banned in ("engine_api", "clean_to_bundle", "inspect_bytes"):
         assert banned not in code, f"main.py must not reference {banned}"
+    # policies.py is the engine, not a thin data-only module like
+    # custody/common — main.py may not import it either, even for a
+    # constant (see the NO_DECISION_MARKER comment in main.py).
+    assert "import policies" not in code
+    assert "from policies" not in code
+
+
+def test_no_decision_marker_stays_in_sync_with_policies():
+    """main.py hardcodes NO_DECISION_MARKER instead of importing
+    scripts.policies (PR 17 isolation — see the comment above it). Nothing
+    stops the two literals from drifting apart except this test."""
+    import policies as policies_mod
+    from app.main import NO_DECISION_MARKER
+
+    assert NO_DECISION_MARKER == policies_mod.NO_DECISION_MARKER
 
 
 # --- end-to-end through the subprocess runner ------------------------------------

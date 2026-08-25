@@ -56,6 +56,7 @@ def test_audit_chain_is_intact_and_ordered(env):
     kinds = [e["action"] for e in body["events"]]
     assert kinds[0] == "matter.create"
     assert "document.upload" in kinds and "bundle.download" in kinds
+    assert "job.sanitize" in kinds
 
 
 def test_audit_chain_detects_tampering(env):
@@ -132,6 +133,65 @@ def test_audit_records_acl_changes(env):
     )
     actions = [e["action"] for e in _audit(c, matter["id"])["events"]]
     assert "acl.grant" in actions and "acl.revoke" in actions
+
+
+def test_audit_records_inspect_and_sanitize_execution(env):
+    """Before this test's fix, the audit chain covered matter.create,
+    document.upload, and acl.* -- but never the inspect/sanitize jobs
+    themselves, which is the one thing a "chain of custody" claim is
+    actually about. The env fixture already ran one sanitize job; assert
+    its event and payload here, then run an inspect job too."""
+    c, matter, doc, job, _ = env
+    events = _audit(c, matter["id"])["events"]
+    sanitize_events = [e for e in events if e["action"] == "job.sanitize"]
+    assert len(sanitize_events) == 1
+    payload = sanitize_events[0]["payload"]
+    assert payload["job_id"] == job["id"]
+    assert payload["document_id"] == doc["id"]
+    assert payload["policy_id"] == "external_sharing"
+    assert payload["status"] == "done"
+    assert payload["verification_pass"] is True
+    assert payload["no_decision_count"] == 0
+    assert sanitize_events[0]["actor_id"] == "operator"
+
+    inspect_job = c.post(f"/v1/matters/{matter['id']}/documents/{doc['id']}/inspect-jobs").json()
+    assert inspect_job["status"] == "done", inspect_job.get("error")
+    events = _audit(c, matter["id"])["events"]
+    inspect_events = [e for e in events if e["action"] == "job.inspect"]
+    assert len(inspect_events) == 1
+    payload = inspect_events[0]["payload"]
+    assert payload["job_id"] == inspect_job["id"]
+    assert payload["document_id"] == doc["id"]
+    assert payload["status"] == "done"
+    assert isinstance(payload["findings_count"], int)
+
+
+def test_audit_no_decision_count_reflects_production_findings_kept(tmp_path, monkeypatch):
+    """The audit trail must surface the same "kept without review" signal
+    the manifest does (see policies.py's _no_decision_records / test_
+    apply_production_docx_discloses_findings_kept_without_a_decision) --
+    not just leave it buried in the manifest's actions list. spa.docx has
+    one comment and tracked changes, both approve-default under
+    production, so a production sanitize with zero decisions must show
+    no_decision_count >= 2 in the audit payload."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw-nodecision")
+    c = TestClient(create_app(tmp_path / "data"))
+    assert c.post("/v1/auth/login", json={"password": "pw-nodecision"}).status_code == 200
+    matter = c.post("/v1/matters", json={"name": "m"}).json()
+    doc = c.post(
+        f"/v1/matters/{matter['id']}/documents",
+        files={"file": ("spa.docx", (FIXTURES / "spa.docx").read_bytes(), "application/octet-stream")},
+    ).json()
+    job = c.post(
+        f"/v1/matters/{matter['id']}/documents/{doc['id']}/sanitize-jobs",
+        json={"policy_id": "production", "signature_break_attestation": True},
+    ).json()
+    assert job["status"] == "done", job["error"]
+
+    events = _audit(c, matter["id"])["events"]
+    sanitize_events = [e for e in events if e["action"] == "job.sanitize"]
+    assert len(sanitize_events) == 1
+    assert sanitize_events[0]["payload"]["no_decision_count"] >= 2
 
 
 def test_cross_matter_document_and_job_access_is_404_not_leaked(env):

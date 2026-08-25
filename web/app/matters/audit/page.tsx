@@ -4,12 +4,21 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
+import { formatTimestamp } from "@/lib/format";
 import { useApiData } from "@/lib/useApi";
 import type { Audit, AuditEvent, Matter } from "@/lib/types";
 import { Header } from "@/components/Header";
 
 function shortHash(h: string): string {
   return h.length > 16 ? `${h.slice(0, 8)}…${h.slice(-8)}` : h;
+}
+
+// job.inspect / job.sanitize events carry the job's own id in their
+// payload — link straight to it instead of leaving the reviewer to go
+// back to the matter and hunt for the matching job.
+function jobIdFromPayload(payload: Record<string, unknown> | null): string | null {
+  const id = payload?.job_id;
+  return typeof id === "string" ? id : null;
 }
 
 function PayloadCell({ payload }: { payload: Record<string, unknown> | null }) {
@@ -23,12 +32,21 @@ function PayloadCell({ payload }: { payload: Record<string, unknown> | null }) {
   );
 }
 
-function EventRow({ ev }: { ev: AuditEvent }) {
+function EventRow({ ev, matterId }: { ev: AuditEvent; matterId: string }) {
+  const jobId = jobIdFromPayload(ev.payload);
   return (
     <tr className="border-b border-border align-top last:border-0">
       <td className="px-3 py-2 font-mono text-xs text-muted">{ev.seq}</td>
-      <td className="px-3 py-2 font-mono text-xs">{new Date(ev.at).toLocaleString()}</td>
-      <td className="px-3 py-2 text-sm font-medium">{ev.action}</td>
+      <td className="px-3 py-2 font-mono text-xs">{formatTimestamp(ev.at)}</td>
+      <td className="px-3 py-2 text-sm font-medium">
+        {jobId ? (
+          <Link href={`/matters/job?matter=${matterId}&job=${jobId}`} className="hover:underline">
+            {ev.action}
+          </Link>
+        ) : (
+          ev.action
+        )}
+      </td>
       <td className="px-3 py-2 font-mono text-xs">{ev.actor_id}</td>
       <td className="px-3 py-2">
         <PayloadCell payload={ev.payload} />
@@ -100,7 +118,7 @@ function AuditView({ matterId }: { matterId: string }) {
                 </thead>
                 <tbody>
                   {auditQ.data.events.map((ev) => (
-                    <EventRow key={ev.id} ev={ev} />
+                    <EventRow key={ev.id} ev={ev} matterId={matterId} />
                   ))}
                 </tbody>
               </table>

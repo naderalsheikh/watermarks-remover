@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
+import { formatTimestamp } from "@/lib/format";
 import { useApiData } from "@/lib/useApi";
 import type { Finding, Job, Manifest } from "@/lib/types";
 import { Header } from "@/components/Header";
@@ -190,9 +191,39 @@ function EmbeddedImageNotice({ actions }: { actions: string[] }) {
   );
 }
 
+// policies.py: _no_decision_records. An approve-default subtype (e.g.
+// comments_and_notes, tracked_changes) that was present but never got an
+// operator decision resolves to "keep" — the finding survives in the
+// derivative untouched. This is a green "done" job that still contains
+// undecided content; it must never look identical to a fully-reviewed one.
+// Deliberately rendered above CustodyCard: this is the one disclosure that
+// must not be missable, and must hold regardless of whether the job was
+// submitted through this UI (which gates it, see SanitizePanel) or
+// directly via the API (which doesn't).
+const NO_DECISION_MARKER = "no operator decision was supplied";
+
+function NoDecisionWarning({ actions }: { actions: string[] }) {
+  const lines = actions.filter((a) => a.includes(NO_DECISION_MARKER));
+  if (lines.length === 0) return null;
+  const subtypes = lines.map((l) => l.split(":", 1)[0]);
+  return (
+    <div className="mb-6 rounded-md border border-red-600/40 bg-red-600/10 p-4 text-sm">
+      <p className="font-medium text-red-700 dark:text-red-400">
+        {subtypes.length} finding{subtypes.length === 1 ? "" : "s"} kept without review
+      </p>
+      <p className="mt-1 text-muted">
+        No operator decision was supplied for these approve-default findings, so they were
+        kept as-is rather than reviewed: <strong>{titleCase(subtypes.join(", "))}</strong>. This
+        derivative is not a full sanitize despite the job status.
+      </p>
+    </div>
+  );
+}
+
 function SanitizeManifestView({ manifest }: { manifest: Manifest }) {
   return (
     <div className="space-y-4">
+      <NoDecisionWarning actions={manifest.actions} />
       <CustodyCard manifest={manifest} />
       <EmbeddedImageNotice actions={manifest.actions} />
 
@@ -267,9 +298,17 @@ function JobView({ matterId, jobId }: { matterId: string; jobId: string }) {
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
-      <Link href={`/matters/view?id=${matterId}`} className="text-sm text-muted hover:text-foreground">
-        ← Matter
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link href={`/matters/view?id=${matterId}`} className="text-sm text-muted hover:text-foreground">
+          ← Matter
+        </Link>
+        <Link
+          href={`/matters/audit?id=${matterId}`}
+          className="text-sm text-muted hover:text-foreground"
+        >
+          Audit log →
+        </Link>
+      </div>
 
       <div className="mt-4">
         {loading && <JobSkeleton />}
@@ -290,9 +329,8 @@ function JobView({ matterId, jobId }: { matterId: string; jobId: string }) {
               </div>
               <p className="mt-1 text-sm text-muted">
                 {job.kind === "sanitize" ? `${job.policy_id} · ` : ""}started{" "}
-                {new Date(job.created_utc).toLocaleString()}
-                {job.finished_utc &&
-                  ` · finished ${new Date(job.finished_utc).toLocaleString()}`}
+                {formatTimestamp(job.created_utc)}
+                {job.finished_utc && ` · finished ${formatTimestamp(job.finished_utc)}`}
               </p>
               {job.status === "failed" && job.error && (
                 <div className="mt-3 rounded-md border border-red-600/30 bg-red-600/5 px-4 py-3 text-sm text-red-700 dark:text-red-400">

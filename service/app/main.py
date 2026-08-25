@@ -53,6 +53,14 @@ from .security import (
 from .storage import StorageError as StorageError_
 from .storage import original_key, storage_from_config
 
+# scripts.policies.NO_DECISION_MARKER, literal here for the same PR 17
+# reason as POLICIES below: main.py must not import the engine. Used only
+# to count how many kept-without-review findings an already-finished
+# sanitize job's manifest reports, for the job.sanitize audit event —
+# never to decide anything. Kept in sync by
+# test_worker_isolation.py::test_no_decision_marker_stays_in_sync_with_policies.
+NO_DECISION_MARKER = "no operator decision was supplied"
+
 # Four frozen v1 default policies (docs/COUNSELCLEAR_DESIGN.md, "Key
 # Decisions" #5, and the full subtype table under Policy Engine). Literal
 # ids/labels here, not an import of scripts.policies: main.py stays out of
@@ -617,13 +625,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             r[0]
             for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
         ]
-        matters = (
-            s.query(Matter)
-            .filter(Matter.id.in_(matter_ids))
-            .order_by(Matter.created_utc.desc())
-            .limit(limit)
-        )
-        return {"matters": [_matter_dict(m) for m in matters]}
+        base = s.query(Matter).filter(Matter.id.in_(matter_ids))
+        total = base.count()
+        matters = base.order_by(Matter.created_utc.desc()).limit(limit)
+        return {"matters": [_matter_dict(m) for m in matters], "total": total}
 
     @app.post("/v1/matters")
     def create_matter(body: MatterBody, user: str = Depends(principal), s: Session = Depends(db_session)):
@@ -704,13 +709,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         limit = min(max(1, limit), 500)  # server-capped, never unbounded
         _require(matter_id, "read", s, user)
         _matter(matter_id, s)
-        docs = (
-            s.query(Document)
-            .filter_by(matter_id=matter_id)
-            .order_by(Document.created_utc.desc())
-            .limit(limit)
-        )
-        return {"documents": [_doc_dict(d) for d in docs]}
+        base = s.query(Document).filter_by(matter_id=matter_id)
+        total = base.count()
+        docs = base.order_by(Document.created_utc.desc()).limit(limit)
+        return {"documents": [_doc_dict(d) for d in docs], "total": total}
 
     @app.get("/v1/matters/{matter_id}/documents/{doc_id}")
     def get_document(
@@ -756,7 +758,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         job = _create_job(matter_id, doc.id, "inspect", s)
         _execute_job(job.id, kind="inspect")
         s.expire_all()
-        return _job_dict(_job(matter_id, job.id, s))
+        finished = _job(matter_id, job.id, s)
+        findings = (finished.result_json or {}).get("findings") or []
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="job.inspect",
+            payload={
+                "job_id": job.id,
+                "document_id": doc.id,
+                "status": finished.status,
+                "findings_count": len(findings),
+            },
+        )
+        return _job_dict(finished)
 
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs")
     def sanitize_job(
@@ -841,7 +857,25 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s.commit()
         _execute_job(job.id, kind="sanitize")
         s.expire_all()
-        return _job_dict(_job(matter_id, job.id, s))
+        finished = _job(matter_id, job.id, s)
+        result = finished.result_json or {}
+        actions = (result.get("manifest") or {}).get("actions") or []
+        no_decision_count = sum(1 for a in actions if NO_DECISION_MARKER in a)
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="job.sanitize",
+            payload={
+                "job_id": job.id,
+                "document_id": doc.id,
+                "policy_id": body.policy_id,
+                "status": finished.status,
+                "verification_pass": result.get("verification_pass"),
+                "no_decision_count": no_decision_count,
+            },
+        )
+        return _job_dict(finished)
 
     @app.get("/v1/matters/{matter_id}/jobs")
     def list_jobs(
@@ -857,14 +891,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         q = s.query(Job).filter_by(matter_id=matter_id)
         if document_id:
             q = q.filter_by(document_id=document_id)
-        jobs = (
-            q.order_by(Job.created_utc.desc())
-            .limit(limit)
-            .all()
-        )
+        total = q.count()
+        jobs = q.order_by(Job.created_utc.desc()).limit(limit).all()
         # List view omits the full result payload (it can be large for
         # inspect jobs); the detail route carries it.
-        return {"jobs": [_job_dict(j, include_result=False) for j in jobs]}
+        return {"jobs": [_job_dict(j, include_result=False) for j in jobs], "total": total}
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}")
     def get_job(

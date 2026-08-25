@@ -579,8 +579,43 @@ def _apply_pdf(
         return dest.read_bytes(), records
 
 
+NO_DECISION_MARKER = "no operator decision was supplied"
+
+
+def _no_decision_records(plan: ActionPlan) -> list[ActionRecord]:
+    """Explicit record for every present subtype whose approve-default
+    resolved to "keep" for lack of an operator decision (plan_actions:
+    reason "no_decision"). Without this, a subtype like tracked_changes or
+    comments_and_notes that was found but never decided produces *no*
+    ActionRecord at all -- the manifest's actions list simply omits it,
+    while findings_before still lists it and verification.pass can still
+    read true (reinspect_targeted_gone trivially holds when nothing was
+    targeted). That combination -- a done, verification-passed sanitize
+    job whose derivative still contains a high-consequence finding, with
+    nothing in the manifest saying so -- is exactly the silently-wrong
+    outcome this product's own trust bar forbids. Single choke point in
+    apply_actions rather than one fix per (kind, format) branch, so it
+    covers every document kind uniformly, including ones added later."""
+    return [
+        ActionRecord(
+            st,
+            "keep",
+            f"kept: {NO_DECISION_MARKER} for this approve-default finding "
+            "(per-finding review is not yet available in this build)",
+        )
+        for st in sorted(plan.present_subtypes)
+        if plan.actions.get(st, {}).get("reason") == "no_decision"
+    ]
+
+
 def apply_actions(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionRecord]]:
     """Execute a plan. Returns (cleaned_bytes, records)."""
+    cleaned, records = _apply_actions_impl(data, plan)
+    records.extend(_no_decision_records(plan))
+    return cleaned, records
+
+
+def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionRecord]]:
     if hashlib.sha256(data).hexdigest() != plan.source_sha256:
         raise PolicyError("input changed since inspection (sha256 mismatch)")
     if plan.policy_id == "evidence_preservation":
