@@ -20,6 +20,8 @@
 !/skills/remove-ai-marks/**
 !/tests/
 !/tests/**
+!/tools/
+!/tools/**
 !/web/
 !/web/**
 !/.dockerignore

@@ -7,13 +7,7 @@ import { api } from "@/lib/api";
 import { useApiData } from "@/lib/useApi";
 import type { Document, Job, Matter, Policy } from "@/lib/types";
 import { Header } from "@/components/Header";
-
-const STATUS_COLOR: Record<Job["status"], string> = {
-  queued: "text-muted",
-  running: "text-amber-600",
-  done: "text-emerald-600",
-  failed: "text-red-600",
-};
+import { StatusBadge } from "@/components/StatusBadge";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -39,10 +33,12 @@ function SanitizePanel({
   const [reason, setReason] = useState("");
   const [attest, setAttest] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const selected = policies.find((p) => p.id === policyId);
 
   async function submit() {
     setSubmitting(true);
+    setSubmitError(null);
     try {
       await api.post(`/v1/matters/${matterId}/documents/${docId}/sanitize-jobs`, {
         policy_id: policyId,
@@ -51,6 +47,8 @@ function SanitizePanel({
       });
       onDone();
       onClose();
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Sanitize failed to start");
     } finally {
       setSubmitting(false);
     }
@@ -85,6 +83,7 @@ function SanitizePanel({
         <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />
         I attest to breaking a digital signature if this job requires it
       </label>
+      {submitError && <p className="text-xs text-red-600">{submitError}</p>}
       <div className="flex gap-2">
         <button
           onClick={submit}
@@ -116,15 +115,19 @@ function DocumentRow({
 }) {
   const [sanitizing, setSanitizing] = useState(false);
   const [inspecting, setInspecting] = useState(false);
+  const [inspectError, setInspectError] = useState<string | null>(null);
   const docJobs = jobs
     .filter((j) => j.document_id === doc.id)
     .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
 
   async function inspect() {
     setInspecting(true);
+    setInspectError(null);
     try {
       await api.post(`/v1/matters/${matterId}/documents/${doc.id}/inspect-jobs`);
       onJobStarted();
+    } catch (err) {
+      setInspectError(err instanceof Error ? err.message : "Inspect failed to start");
     } finally {
       setInspecting(false);
     }
@@ -135,8 +138,8 @@ function DocumentRow({
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <p className="truncate font-medium">{doc.filename}</p>
-          <p className="text-xs text-muted">
-            {formatBytes(doc.bytes)} · {doc.sha256.slice(0, 12)}…
+          <p className="truncate font-mono text-xs text-muted" title={doc.sha256}>
+            {formatBytes(doc.bytes)} · sha256:{doc.sha256.slice(0, 16)}…
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
@@ -156,6 +159,8 @@ function DocumentRow({
         </div>
       </div>
 
+      {inspectError && <p className="mt-2 text-xs text-red-600">{inspectError}</p>}
+
       {sanitizing && (
         <SanitizePanel
           matterId={matterId}
@@ -167,22 +172,50 @@ function DocumentRow({
       )}
 
       {docJobs.length > 0 && (
-        <ul className="mt-2 space-y-1">
+        <ul className="mt-2 space-y-1.5">
           {docJobs.map((j) => (
-            <li key={j.id} className="text-xs">
+            <li key={j.id} className="flex items-center gap-2 text-xs">
               <Link
                 href={`/matters/job?matter=${matterId}&job=${j.id}`}
-                className="hover:underline"
+                className="font-medium capitalize hover:underline"
               >
                 {j.kind}
-              </Link>{" "}
-              <span className={STATUS_COLOR[j.status]}>{j.status}</span>
-              {j.kind === "sanitize" && <span className="text-muted"> · {j.policy_id}</span>}
+              </Link>
+              <StatusBadge status={j.status} />
+              {j.kind === "sanitize" && <span className="text-muted">{j.policy_id}</span>}
             </li>
           ))}
         </ul>
       )}
     </li>
+  );
+}
+
+function MatterStats({ documents, jobs }: { documents: Document[]; jobs: Job[] }) {
+  const done = jobs.filter((j) => j.status === "done").length;
+  const running = jobs.filter((j) => j.status === "queued" || j.status === "running").length;
+  const failed = jobs.filter((j) => j.status === "failed").length;
+  return (
+    <div className="mb-6 flex flex-wrap gap-4 text-sm text-muted">
+      <span>
+        <span className="font-medium text-foreground">{documents.length}</span> document
+        {documents.length === 1 ? "" : "s"}
+      </span>
+      <span>
+        <span className="font-medium text-foreground">{done}</span> job{done === 1 ? "" : "s"}{" "}
+        done
+      </span>
+      {running > 0 && (
+        <span className="text-amber-600">
+          <span className="font-medium">{running}</span> in progress
+        </span>
+      )}
+      {failed > 0 && (
+        <span className="text-red-600">
+          <span className="font-medium">{failed}</span> failed
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -233,9 +266,12 @@ function MatterView({ matterId }: { matterId: string }) {
           Audit log →
         </Link>
       </div>
-      <h1 className="mb-6 mt-2 text-2xl font-semibold tracking-tight">
+      <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">
         {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
       </h1>
+      {matterQ.error && <p className="mb-4 text-sm text-red-600">{matterQ.error}</p>}
+
+      {docsQ.data && <MatterStats documents={docsQ.data.documents} jobs={jobsQ.data?.jobs ?? []} />}
 
       <form onSubmit={upload} className="mb-8 flex items-center gap-2">
         <input
@@ -252,26 +288,39 @@ function MatterView({ matterId }: { matterId: string }) {
           {uploading ? "Uploading…" : "Upload"}
         </button>
       </form>
-      {uploadError && <p className="mb-4 text-sm text-red-600">{uploadError}</p>}
-
-      {docsQ.loading && <p className="text-sm text-muted">Loading documents…</p>}
-      {docsQ.error && <p className="text-sm text-red-600">{docsQ.error}</p>}
-      {docsQ.data && docsQ.data.documents.length === 0 && (
-        <p className="text-sm text-muted">No documents yet. Upload one above.</p>
+      {uploadError && (
+        <p className="mb-4 rounded-md border border-red-600/30 bg-red-600/5 px-3 py-2 text-sm text-red-600">
+          {uploadError}
+        </p>
       )}
 
-      <ul className="divide-y divide-border rounded-md border border-border">
-        {docsQ.data?.documents.map((doc) => (
-          <DocumentRow
-            key={doc.id}
-            matterId={matterId}
-            doc={doc}
-            jobs={jobsQ.data?.jobs ?? []}
-            policies={policiesQ.data?.policies ?? []}
-            onJobStarted={jobsQ.reload}
-          />
-        ))}
-      </ul>
+      {docsQ.loading && (
+        <div className="animate-pulse space-y-2">
+          <div className="h-14 rounded-md bg-black/[0.04] dark:bg-white/[0.04]" />
+          <div className="h-14 rounded-md bg-black/[0.04] dark:bg-white/[0.04]" />
+        </div>
+      )}
+      {docsQ.error && <p className="text-sm text-red-600">{docsQ.error}</p>}
+      {docsQ.data && docsQ.data.documents.length === 0 && (
+        <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
+          No documents yet — upload one above to inspect or sanitize it.
+        </div>
+      )}
+
+      {docsQ.data && docsQ.data.documents.length > 0 && (
+        <ul className="divide-y divide-border rounded-md border border-border">
+          {docsQ.data.documents.map((doc) => (
+            <DocumentRow
+              key={doc.id}
+              matterId={matterId}
+              doc={doc}
+              jobs={jobsQ.data?.jobs ?? []}
+              policies={policiesQ.data?.policies ?? []}
+              onJobStarted={jobsQ.reload}
+            />
+          ))}
+        </ul>
+      )}
     </main>
   );
 }

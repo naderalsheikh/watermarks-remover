@@ -14,15 +14,19 @@ export default function MattersPage() {
   );
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   async function createMatter(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim()) return;
     setCreating(true);
+    setCreateError(null);
     try {
       await api.post("/v1/matters", { name: name.trim() });
       setName("");
       reload();
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Couldn't create the matter");
     } finally {
       setCreating(false);
     }
@@ -33,10 +37,15 @@ export default function MattersPage() {
       <Header />
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
         <div className="mb-8 flex items-end justify-between gap-4">
-          <h1 className="text-2xl font-semibold tracking-tight">Matters</h1>
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Matters</h1>
+            <p className="mt-1 text-sm text-muted">
+              Each matter is an isolated review workspace with its own custody chain.
+            </p>
+          </div>
         </div>
 
-        <form onSubmit={createMatter} className="mb-8 flex gap-2">
+        <form onSubmit={createMatter} className="mb-6 flex gap-2">
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -51,28 +60,46 @@ export default function MattersPage() {
             {creating ? "Creating…" : "New matter"}
           </button>
         </form>
-
-        {loading && <p className="text-sm text-muted">Loading…</p>}
-        {error && <p className="text-sm text-red-600">{error}</p>}
-        {data && data.matters.length === 0 && (
-          <p className="text-sm text-muted">No matters yet. Create one above.</p>
+        {createError && (
+          <p className="mb-6 rounded-md border border-red-600/30 bg-red-600/5 px-3 py-2 text-sm text-red-600">
+            {createError}
+          </p>
         )}
 
-        <ul className="divide-y divide-border rounded-md border border-border">
-          {data?.matters.map((m) => (
-            <li key={m.id}>
-              <Link
-                href={`/matters/view?id=${m.id}`}
-                className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-              >
-                <span className="font-medium">{m.name}</span>
-                <span className="text-xs text-muted">
-                  {new Date(m.created_utc).toLocaleDateString()}
-                </span>
-              </Link>
-            </li>
-          ))}
-        </ul>
+        {loading && (
+          <div className="animate-pulse space-y-2">
+            <div className="h-12 rounded-md bg-black/[0.04] dark:bg-white/[0.04]" />
+            <div className="h-12 rounded-md bg-black/[0.04] dark:bg-white/[0.04]" />
+          </div>
+        )}
+        {error && (
+          <p className="rounded-md border border-red-600/30 bg-red-600/5 px-3 py-2 text-sm text-red-600">
+            {error}
+          </p>
+        )}
+        {data && data.matters.length === 0 && (
+          <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
+            No matters yet — create one above to get started.
+          </div>
+        )}
+
+        {data && data.matters.length > 0 && (
+          <ul className="divide-y divide-border rounded-md border border-border">
+            {data.matters.map((m) => (
+              <li key={m.id}>
+                <Link
+                  href={`/matters/view?id=${m.id}`}
+                  className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                >
+                  <span className="font-medium">{m.name}</span>
+                  <span className="text-xs text-muted">
+                    {new Date(m.created_utc).toLocaleDateString()}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
       </main>
     </>
   );
