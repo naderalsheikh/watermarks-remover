@@ -222,9 +222,17 @@ function MatterView({ matterId }: { matterId: string }) {
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
-      <Link href="/matters" className="text-sm text-muted hover:text-foreground">
-        ← Matters
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link href="/matters" className="text-sm text-muted hover:text-foreground">
+          ← Matters
+        </Link>
+        <Link
+          href={`/matters/audit?id=${matterId}`}
+          className="text-sm text-muted hover:text-foreground"
+        >
+          Audit log →
+        </Link>
+      </div>
       <h1 className="mb-6 mt-2 text-2xl font-semibold tracking-tight">
         {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
       </h1>

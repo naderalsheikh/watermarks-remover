@@ -83,3 +83,23 @@ export type Job = {
   finished_utc: string | null;
   result?: JobResult;
 };
+
+// GET /v1/matters/{id}/audit — the tamper-evident per-matter log
+// (service/app/main.py list_audit): every event is hash-chained, so the
+// chain_ok flag is the integrity verdict, not the rows themselves.
+export type AuditEvent = {
+  id: string;
+  seq: number;
+  action: string;
+  actor_id: string;
+  payload: Record<string, unknown> | null;
+  prev_hash: string;
+  row_hash: string;
+  at: string;
+};
+
+export type Audit = {
+  chain_ok: boolean;
+  chain_detail: string;
+  events: AuditEvent[];
+};
