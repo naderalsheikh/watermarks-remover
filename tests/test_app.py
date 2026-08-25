@@ -484,6 +484,79 @@ def test_attestation_issue_and_verify_roundtrip(wm_client):
     assert r3.status_code == 403
 
 
+def test_concurrent_duplicate_jti_yields_exactly_one_success(wm_client):
+    """PR 20 follow-up: single-use must be race-free under concurrent
+    requests (FastAPI's threadpool for sync routes; worse still across
+    gunicorn workers, which the in-memory _consumed_jtis set can't see at
+    all). N threads race the very same attestation token against
+    sanitize-jobs simultaneously; the attestation_uses table's jti primary
+    key — inserted in the same transaction as the job row — must let
+    exactly one INSERT win and 403 every other racer, never two jobs for
+    one token."""
+    import threading
+
+    m = wm_client.post("/v1/matters", json={"name": "m"}).json()["id"]
+    d = _upload(wm_client, "spa.docx", matter=m)
+    token = wm_client.post(
+        "/v1/attestations",
+        json={"matter_id": m, "document_id": d["id"], "strength": "preserve"},
+    ).json()["token"]
+
+    n = 8
+    start = threading.Barrier(n)
+    statuses: list[int] = []
+    statuses_lock = threading.Lock()
+
+    def racer():
+        start.wait()  # line every thread up to maximize the race window
+        r = wm_client.post(
+            f"/v1/matters/{m}/documents/{d['id']}/sanitize-jobs",
+            json={"layer_b": {"strength": "preserve", "token": token}},
+        )
+        with statuses_lock:
+            statuses.append(r.status_code)
+
+    threads = [threading.Thread(target=racer) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert statuses.count(200) == 1, statuses
+    assert statuses.count(403) == n - 1, statuses
+
+
+def test_jti_replay_after_in_memory_reset_is_refused_by_the_db(wm_client):
+    """The in-memory _consumed_jtis set (app.security) is a per-process
+    fast path only; it does not survive a restart and a second gunicorn
+    worker never shares it. Clearing it here simulates exactly that, so
+    that a replay of an already-used token is verified purely against the
+    durable record: the attestation_uses row written in the same
+    transaction as the first job. It must still 403."""
+    from app import security as security_mod
+
+    m = wm_client.post("/v1/matters", json={"name": "m"}).json()["id"]
+    d = _upload(wm_client, "spa.docx", matter=m)
+    token = wm_client.post(
+        "/v1/attestations",
+        json={"matter_id": m, "document_id": d["id"], "strength": "preserve"},
+    ).json()["token"]
+
+    r1 = wm_client.post(
+        f"/v1/matters/{m}/documents/{d['id']}/sanitize-jobs",
+        json={"layer_b": {"strength": "preserve", "token": token}},
+    )
+    assert r1.status_code == 200
+
+    security_mod._consumed_jtis.clear()  # simulate a process restart
+
+    r2 = wm_client.post(
+        f"/v1/matters/{m}/documents/{d['id']}/sanitize-jobs",
+        json={"layer_b": {"strength": "preserve", "token": token}},
+    )
+    assert r2.status_code == 403
+
+
 def test_layer_b_job_without_flag_is_refused(client):
     m = client.post("/v1/matters", json={"name": "m"}).json()["id"]
     d = _upload(client, "spa.docx", matter=m)

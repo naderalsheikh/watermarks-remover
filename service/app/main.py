@@ -18,6 +18,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, Up
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 # Imported as a module (not by name): tests stub IdP calls on the module
@@ -33,7 +34,7 @@ from .config import Config
 from .db import make_engine, make_session_factory
 from .malware import get_scanner
 from .migrate import upgrade_head
-from .models import AuditEvent, Document, Job, Matter, MatterAcl, _now, _uuid
+from .models import AttestationUse, AuditEvent, Document, Job, Matter, MatterAcl, _now, _uuid
 from .oidc import OidcError
 from .runner import run_job, sync_job
 from .security import (
@@ -770,6 +771,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body = body or SanitizeBody()
         layer_b: dict | None = None
         attest_claims: dict | None = None
+        jti: str | None = None
         if body.layer_b is not None:
             if not cfg.watermark_tools_enabled:
                 raise HTTPException(403, "watermark tools are disabled")
@@ -787,18 +789,6 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             if claims.get("sub") != user:
                 raise HTTPException(403, "attestation token was issued to another principal")
             jti = claims["jti"]
-            # Single-use: an issued jti that already backs a job is refused.
-            # The in-memory set covers this process; the DB row below is the
-            # durable record. .as_string() renders an UNQUOTED extraction on
-            # both dialects (Postgres ->, SQLite JSON_EXTRACT) — cast(...)
-            # quotes the scalar on both, so the comparison would never match.
-            prior = (
-                s.query(Job)
-                .filter(Job.layer_b["jti"].as_string() == jti)
-                .first()
-            )
-            if prior is not None:
-                raise HTTPException(403, "attestation token already used")
             layer_b = {
                 "strength": claims["strength"],
                 "label": claims["label"],
@@ -806,30 +796,49 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "jti": jti,
             }
             attest_claims = claims
-        job = _create_job(
-            matter_id,
-            doc.id,
-            "sanitize",
-            s,
+        job = Job(
+            matter_id=matter_id,
+            document_id=doc.id,
+            kind="sanitize",
             policy_id=body.policy_id,
             reason=body.reason[:500],
             attestation=bool(body.signature_break_attestation),
             finding_decisions=dict(body.finding_decisions),
             layer_b=layer_b,
         )
+        s.add(job)
+        s.flush()  # assigns job.id (Job.id's default is Python-side)
+        if jti is not None:
+            # Single-use, race-free: jti is the primary key of a dedicated
+            # table (0005 migration), inserted in the *same transaction* as
+            # the job row it authorizes. A concurrent duplicate use of the
+            # same token — a second thread, a second gunicorn worker, or a
+            # replay of a token whose in-memory record didn't survive a
+            # restart — collides with the unique constraint here instead of
+            # racing a read-then-write check. app.security's in-memory
+            # _consumed_jtis set (checked inside verify_attestation above)
+            # is only the fast path for the common single-attempt case;
+            # this is the durable backstop.
+            s.add(AttestationUse(jti=jti, job_id=job.id, matter_id=matter_id))
+            try:
+                s.flush()
+            except IntegrityError as e:
+                s.rollback()
+                raise HTTPException(403, "attestation token already used") from e
         if layer_b is not None and attest_claims is not None:
-            # Consume only after the job row committed: a failed creation
-            # must not burn the token in-memory with no durable record.
+            # Consume only once the job + attestation_uses rows are staged
+            # in this (not-yet-committed) transaction: a rollback above must
+            # not have already burned the token in-memory with no durable
+            # record to show for it.
             consume_attestation(attest_claims)
-        if layer_b is not None:
             append_event(
                 s,
                 matter_id=matter_id,
                 actor_id=user,
                 action="attest.used",
-                payload={"jti": layer_b["jti"], "job_id": job.id, "strength": layer_b["strength"]},
+                payload={"jti": jti, "job_id": job.id, "strength": layer_b["strength"]},
             )
-            s.commit()
+        s.commit()
         _execute_job(job.id, kind="sanitize")
         s.expire_all()
         return _job_dict(_job(matter_id, job.id, s))
