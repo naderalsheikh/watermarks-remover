@@ -9,6 +9,7 @@ import contextlib
 import io
 import posixpath
 import re
+import struct
 import subprocess
 import threading
 import urllib.parse
@@ -3047,7 +3048,193 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     probe_note = c2patool_probe_note(tools)
     if probe_note:
         findings.append(probe_note)
+
+    # Embedded-image metadata (JPEG XObjects) — detection only, see
+    # pdf_deep_image_scan's docstring and docs/pdf-deep-image-metadata.md.
+    metadata_present, provenance_present = pdf_deep_image_scan(data)
+    if provenance_present:
+        has_c2pa = True
+        findings.append(
+            "embedded-image provenance: an image XObject carries a C2PA/JUMBF "
+            "marker (detection only — not removed by clean)"
+        )
+    elif metadata_present:
+        findings.append(
+            "embedded-image metadata: an image XObject carries EXIF/APPn "
+            "metadata (detection only — not removed by clean)"
+        )
+
     return has_c2pa, has_ai or has_c2pa, findings, {"tools": tools, "pdf_legal": legal}
+
+
+# --- PDF deep-image metadata (docs/pdf-deep-image-metadata.md) ---------------
+# clean_pdf strips the document's own /Info and XMP but never touches image
+# XObjects — a PDF that's really a scanned/photographed JPEG keeps that
+# JPEG's own EXIF/GPS/C2PA after a "successful" clean.
+#
+# Detection only. A Ghostscript re-encode pass (pdfwrite) was built and then
+# deliberately not shipped: it reliably dropped the embedded image entirely
+# in testing — not recompressed, not degraded, gone — even though a raster
+# render (-sDEVICE=ppmraw) proved Ghostscript's own interpreter drew the
+# same image correctly. Root cause wasn't isolated (ruled out image size,
+# a /Width vs. /Height mismatch against the JPEG's own SOF header, and the injected
+# marker itself as causes). For a legal-evidence product, silently losing
+# image content is a worse failure than leaving metadata in place, so this
+# mode is not implemented — see docs/pdf-deep-image-metadata.md "Status" for
+# the investigation notes and the follow-up plan (byte-preserving APPn
+# segment removal directly on the extracted stream + qpdf structural
+# rebuild, no re-render, is the more promising direction).
+#
+# What ships here: embedded-image metadata/provenance is detected and
+# reported (clean_pdf's manifest, inspect_pdf's findings) but never removed.
+# Every clean_pdf/inspect_pdf call path is a no-op for this class of content
+# — see the regression test proving that.
+
+# APP0 (JFIF header) and APP2 (ICC color profile) are structural/functional,
+# never "metadata to strip" — stripping either corrupts the file or its color
+# rendering. Only APP1/APP11/APP13/APP14 (EXIF, JUMBF/C2PA, Photoshop, Adobe)
+# count as metadata.
+_JPEG_METADATA_MARKERS = frozenset({0xE1, 0xEB, 0xED, 0xEE})
+_JPEG_PROVENANCE_MARKERS = frozenset({0xE1, 0xEB})
+
+
+def _iter_jpeg_appn(data: bytes):
+    """Yield (marker, payload) for each APPn segment in a JPEG byte string,
+    fill-byte-aware (same walk as image_meta.inspect_jpeg, generalized to a
+    standalone stream buffer rather than a whole-file path)."""
+    if not data.startswith(b"\xff\xd8"):
+        return
+    i = 2
+    n = len(data)
+    while i + 2 <= n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        while i < n and data[i] == 0xFF:
+            i += 1
+        if i >= n:
+            return
+        marker = data[i]
+        i += 1
+        if marker in (0xD8, 0xD9):  # SOI/EOI
+            continue
+        if marker == 0xDA:  # SOS — image data follows, segments are done
+            return
+        if 0xD0 <= marker <= 0xD7:  # RSTn, no length field
+            continue
+        if i + 2 > n:
+            return
+        seglen = struct.unpack(">H", data[i : i + 2])[0]
+        if seglen < 2 or i + seglen > n:
+            return
+        payload = data[i + 2 : i + seglen]
+        i += seglen
+        if 0xE0 <= marker <= 0xEF:
+            yield marker, payload
+
+
+def embedded_image_metadata_present(data: bytes) -> bool:
+    """True if a JPEG carries any APP1/11/13/14 segment (EXIF, JUMBF/C2PA,
+    Photoshop, Adobe) — APP0/APP2 don't count (see module comment above)."""
+    return any(marker in _JPEG_METADATA_MARKERS for marker, _payload in _iter_jpeg_appn(data))
+
+
+def embedded_provenance_present(data: bytes) -> bool:
+    """True if a JPEG's APP1/APP11 payload carries a C2PA/JUMBF marker —
+    narrower than embedded_image_metadata_present: ordinary camera EXIF
+    (present in plenty of APP1 segments) must not trip this."""
+    for marker, payload in _iter_jpeg_appn(data):
+        if marker not in _JPEG_PROVENANCE_MARKERS:
+            continue
+        low = payload.lower()
+        if any(needle.lower() in low for needle in C2PA_MARKERS):
+            return True
+    return False
+
+
+def _matching_dict_open(data: bytes, dict_close: int) -> int | None:
+    """Find the `<<` that balances the `>>` ending at dict_close, scanning
+    backward with nesting depth tracked — a single rfind() would land on a
+    nested sub-dictionary's `<<` (e.g. /DecodeParms << ... >>) instead of the
+    object dictionary's own opening, silently missing /Subtype /Image or
+    /Filter /DCTDecode keys that sit outside that nested range. Not a full
+    PDF parser (see docs/pdf-deep-image-metadata.md non-goals) — good enough
+    for the common case of one dictionary, possibly with nested sub-dicts,
+    immediately preceding a stream."""
+    depth = 1
+    pos = dict_close
+    while pos > 0:
+        pos -= 1
+        if data[pos : pos + 2] == b">>":
+            depth += 1
+        elif data[pos : pos + 2] == b"<<":
+            depth -= 1
+            if depth == 0:
+                return pos
+    return None
+
+
+def _iter_pdf_image_xobjects(data: bytes):
+    """Yield raw bytes of JPEG (DCTDecode) image streams embedded in a PDF.
+
+    Best-effort byte scan for `stream ... endstream` blocks whose owning
+    dictionary declares `/Subtype /Image` and `/Filter ... /DCTDecode`; not a
+    full PDF object-graph parser. Non-JPEG image filters (JBIG2, CCITT fax)
+    are out of scope (docs/pdf-deep-image-metadata.md non-goals).
+    """
+    search_from = 0
+    while True:
+        stream_idx = data.find(b"stream", search_from)
+        if stream_idx == -1:
+            return
+        dict_close = data.rfind(b">>", 0, stream_idx)
+        if dict_close == -1:
+            search_from = stream_idx + 1
+            continue
+        dict_open = _matching_dict_open(data, dict_close)
+        if dict_open is None:
+            search_from = stream_idx + 1
+            continue
+        dict_content = data[dict_open + 2 : dict_close]
+        if (
+            b"/Subtype" in dict_content
+            and b"/Image" in dict_content
+            and b"/Filter" in dict_content
+            and b"/DCTDecode" in dict_content
+        ):
+            pos = stream_idx + len(b"stream")
+            # PDF spec: `stream` is followed by CRLF or LF before the actual
+            # data — this must be skipped by byte value, not by membership
+            # against a tuple of bytes literals (`data[pos] in (b" ", ...)`
+            # compares an int to bytes objects and is always False, silently
+            # leaving the CRLF as the first two bytes of "JPEG" data and
+            # breaking every \xff\xd8 SOI check downstream).
+            while pos < len(data) and data[pos] in (0x20, 0x09, 0x0D, 0x0A):
+                pos += 1
+            endstream_idx = data.find(b"endstream", pos)
+            if endstream_idx == -1:
+                return  # malformed tail; nothing more to find
+            yield data[pos:endstream_idx]
+            search_from = endstream_idx + len(b"endstream")
+        else:
+            search_from = stream_idx + 1
+
+
+def pdf_deep_image_scan(data: bytes) -> tuple[bool, bool]:
+    """(metadata_present, provenance_present) across every JPEG XObject in a
+    PDF's bytes. Detection only — see the module comment above for why there
+    is deliberately no corresponding removal pass. Shared by inspect_pdf
+    (surfaces findings) and clean_pdf (surfaces the same in its manifest)."""
+    metadata_present = False
+    provenance_present = False
+    for stream in _iter_pdf_image_xobjects(data):
+        if not metadata_present and embedded_image_metadata_present(stream):
+            metadata_present = True
+        if not provenance_present and embedded_provenance_present(stream):
+            provenance_present = True
+        if metadata_present and provenance_present:
+            break
+    return metadata_present, provenance_present
 
 
 def _pdf_structural_rewrite(dest: Path, actions: list[str]) -> bool:
@@ -3132,7 +3319,14 @@ def _pdf_info_clear(dest: Path, actions: list[str]) -> bool:
 
 
 def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
-    """Best-effort PDF clean. Prefers exiftool; falls back to XMP strip warning."""
+    """Best-effort PDF clean. Prefers exiftool; falls back to XMP strip warning.
+
+    Embedded-image metadata/provenance (JPEG XObjects) is detected and
+    reported in the returned dict's "deep_images" key but never removed —
+    see the module comment above pdf_deep_image_scan and
+    docs/pdf-deep-image-metadata.md. Callers/UI must not present
+    metadata_present or provenance_present as cleared.
+    """
     actions: list[str] = []
     data = path.read_bytes()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -3171,28 +3365,51 @@ def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
         # c2patool does not always strip; leave note
         if c2patool:
             actions.append("c2patool available for inspect; strip via exiftool/re-export")
-        return actions, {
-            "mode": "exiftool",
-            "structural_rewrite": rewritten,
-            "info_clear": info_clear,
-        }
+        mode_actual, degraded = "exiftool", False
+    else:
+        # Degraded: strip obvious XMP packets between <?xpacket begin and end
+        # (linear scan - the lazy .*? form is quadratic on unclosed begin markers)
+        text = data
+        new, n = _drop_tag_blocks(text, _XMP_PACKET_OPEN_RE, _XMP_PACKET_CLOSE_RE)
+        if n:
+            actions.append(f"stripped XMP xpacket x{n} (degraded; may leave offsets broken)")
+            safe_write_bytes(dest, new)
+            # Byte-range deletion shifts every xref offset and stream
+            # /Length after the cut — always followed by a rebuild (when
+            # qpdf is present) rather than handed back unparseable.
+            rewritten = _pdf_structural_rewrite(dest, actions)
+            if not rewritten:
+                actions.append("warning: pure-stdlib PDF strip is best-effort; prefer exiftool")
+            mode_actual, degraded = "stdlib-xmp", True
+        else:
+            safe_write_bytes(dest, data)
+            actions.append(
+                "no PDF cleaner available (install exiftool for reliable metadata strip); "
+                "copied as-is"
+            )
+            mode_actual, degraded, rewritten = "copy", True, False
+        info_clear = False
 
-    # Degraded: strip obvious XMP packets between <?xpacket begin and end
-    # (linear scan - the lazy .*? form is quadratic on unclosed begin markers)
-    text = data
-    new, n = _drop_tag_blocks(text, _XMP_PACKET_OPEN_RE, _XMP_PACKET_CLOSE_RE)
-    if n:
-        actions.append(f"stripped XMP xpacket x{n} (degraded; may leave offsets broken)")
-        # PDF structural risk: document degraded mode clearly
-        safe_write_bytes(dest, new)
-        actions.append("warning: pure-stdlib PDF strip is best-effort; prefer exiftool")
-        return actions, {"mode": "stdlib-xmp", "degraded": True}
+    metadata_present, provenance_present = pdf_deep_image_scan(dest.read_bytes())
+    if metadata_present or provenance_present:
+        actions.append(
+            "embedded-image metadata detected, not cleared (detection only — "
+            f"see docs/pdf-deep-image-metadata.md): metadata_present={metadata_present}, "
+            f"provenance_present={provenance_present}"
+        )
 
-    safe_write_bytes(dest, data)
-    actions.append(
-        "no PDF cleaner available (install exiftool for reliable metadata strip); copied as-is"
-    )
-    return actions, {"mode": "copy", "degraded": True}
+    return actions, {
+        "mode": mode_actual,
+        "structural_rewrite": rewritten,
+        "info_clear": info_clear,
+        "degraded": degraded,
+        "deep_images": {
+            "metadata_present": metadata_present,
+            "provenance_present": provenance_present,
+            "cleared": False,
+            "note": "detection only; embedded-image metadata is not removed",
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
