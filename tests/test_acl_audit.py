@@ -168,6 +168,45 @@ def test_revoke_rejects_removing_the_last_admin_grant(env):
     assert "admin" in operator_row["perms"]
 
 
+def test_revoke_rejects_removing_the_last_admin_grant_even_without_confirmation(env):
+    """Complements the confirmed case above: the last-admin refusal holds
+    "regardless of confirm flag" as stated -- without confirm_self_revoke
+    the request is refused for the (also true) missing-confirmation
+    reason, but it is never a case where sending the flag would let it
+    through. There is no confirm_self_revoke value that ever succeeds
+    here. (A non-self caller hitting this same last-admin path is not
+    reachable through the API: delete_acl requires the caller to already
+    hold admin on the matter, and if only one admin grant exists, that
+    admin *is* the caller -- so "last admin, revoked by someone else" has
+    no way to happen without another admin grant existing first, which by
+    definition means it isn't the last one.)"""
+    c, matter, _, _, _ = env
+    r = c.request(
+        "DELETE",
+        f"/v1/matters/{matter['id']}/acl",
+        json={"user_id": "operator", "perm": "admin"},
+    )
+    assert r.status_code == 400
+    grants = c.get(f"/v1/matters/{matter['id']}/acl").json()["grants"]
+    assert "admin" in next(g for g in grants if g["user_id"] == "operator")["perms"]
+
+
+def test_revoking_someone_elses_admin_needs_no_self_confirmation(env):
+    """Mirrors test_revoking_someone_elses_read_needs_no_self_confirmation
+    for the admin perm specifically -- the confirmation gate is about
+    self-revocation, not about which perm is being revoked."""
+    c, matter, _, _, _ = env
+    c.put(f"/v1/matters/{matter['id']}/acl", json={"user_id": "second-admin", "perm": "admin"})
+    r = c.request(
+        "DELETE",
+        f"/v1/matters/{matter['id']}/acl",
+        json={"user_id": "second-admin", "perm": "admin"},
+    )
+    assert r.status_code == 200
+    grants = c.get(f"/v1/matters/{matter['id']}/acl").json()["grants"]
+    assert not any(g["user_id"] == "second-admin" for g in grants)
+
+
 def test_revoke_allows_removing_admin_when_another_admin_remains(env):
     c, matter, _, _, _ = env
     c.put(f"/v1/matters/{matter['id']}/acl", json={"user_id": "second-admin", "perm": "admin"})

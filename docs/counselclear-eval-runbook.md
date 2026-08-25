@@ -91,12 +91,19 @@ State exact scope — narrow runs are labeled narrow, not "verified":
 # frontend, from web/
 npx tsc --noEmit          # clean
 npm run lint               # clean
+npm run test                # vitest — pure-logic unit tests (web/lib/**/*.test.ts)
 NODE_ENV=production npx next build   # clean static export
 
 # backend, from repo root with .venv active
 ruff check service/ tools/           # clean
 python3 -m pytest -q                 # full suite — see PR/commit notes for pass count
 ```
+
+`npm run test` runs Vitest against `web/lib/**/*.test.ts` only — pure logic
+(e.g. `productionReview.ts`'s per-finding-review gate), not component
+rendering. There's no jsdom/React Testing Library setup; page/component
+behavior is verified live in the browser instead, per this project's
+standing practice, not through a rendering test harness.
 
 ## 6. Known, documented limitations (not bugs)
 
