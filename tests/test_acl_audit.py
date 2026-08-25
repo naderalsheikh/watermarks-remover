@@ -76,6 +76,16 @@ def test_audit_chain_is_intact_and_ordered(env):
     assert "job.sanitize" in kinds
 
 
+def test_audit_document_upload_carries_document_id(env):
+    """The audit timeline's document cross-link (web/app/matters/audit/
+    page.tsx) needs a document_id to link to -- it was missing from this
+    payload entirely before this test's fix."""
+    c, matter, doc, _, _ = env
+    events = _audit(c, matter["id"])["events"]
+    upload_event = next(e for e in events if e["action"] == "document.upload")
+    assert upload_event["payload"]["document_id"] == doc["id"]
+
+
 def test_audit_chain_detects_tampering(env):
     c, matter, _, _, db_path = env
 

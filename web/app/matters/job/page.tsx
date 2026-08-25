@@ -270,6 +270,68 @@ function SanitizeManifestView({ manifest }: { manifest: Manifest }) {
   );
 }
 
+// Itemizes the real zip contents (service/app/main.py's job_bundle route)
+// rather than a vague "contains a manifest and the file" line — and points
+// each item at what's already shown above instead of re-deriving it, so
+// this can't quietly drift out of sync with NoDecisionWarning/
+// EmbeddedImageNotice/the verification-checks list.
+function BundleContents({
+  manifest,
+  includeOriginal,
+}: {
+  manifest: Manifest;
+  includeOriginal: boolean;
+}) {
+  const hasKeptWithoutReview = manifest.actions.some((a) => a.includes(NO_DECISION_MARKER));
+  return (
+    <div className="mt-3 text-xs text-muted">
+      <p className="font-medium text-foreground">What&apos;s in this zip</p>
+      <ul className="mt-1 list-inside list-disc space-y-1">
+        <li>
+          <code className="font-mono">manifest.json</code> — the full custody record shown
+          above: policy, every finding, every action taken (including anything kept without
+          review), and the verification results.
+        </li>
+        <li>
+          <code className="font-mono">derivative/{manifest.derivative.filename}</code> — the
+          sanitized output.
+        </li>
+        <li>
+          <code className="font-mono">report.json</code> — a smaller extract: verification
+          results and the pre-sanitize findings list only, not the full action-by-action record
+          (that&apos;s manifest.json).
+        </li>
+        {includeOriginal && (
+          <li>
+            <code className="font-mono">original/{manifest.original.filename}</code> — the
+            write-once original.
+          </li>
+        )}
+      </ul>
+      <p className="mt-2">
+        Verification{" "}
+        <span className={manifest.verification.pass ? "text-emerald-600" : "text-red-600"}>
+          {manifest.verification.pass ? "passed" : "failed"}
+        </span>
+        {hasKeptWithoutReview ? (
+          <>
+            {" "}
+            — but see the findings-kept-without-review notice above:{" "}
+            <span className="font-medium text-red-600">
+              a passed verification does not mean every finding was reviewed
+            </span>
+            .
+          </>
+        ) : (
+          "."
+        )}{" "}
+        Every hash referenced above (original, derivative) is recorded inside
+        manifest.json — nothing in this zip depends on trusting this page.
+      </p>
+    </div>
+  );
+}
+
 function JobSkeleton() {
   return (
     <div className="animate-pulse space-y-4">
@@ -380,6 +442,20 @@ function JobView({ matterId, jobId }: { matterId: string; jobId: string }) {
               )}
             </div>
 
+            {job.kind === "inspect" && (
+              <>
+                <h2 className="mb-3 text-lg font-semibold tracking-tight">Findings</h2>
+                <RiskSummary findings={job.result?.findings ?? []} />
+                <FindingsByCategory findings={job.result?.findings ?? []} />
+              </>
+            )}
+            {job.kind === "sanitize" && manifest && (
+              <>
+                <h2 className="mb-3 text-lg font-semibold tracking-tight">Manifest</h2>
+                <SanitizeManifestView manifest={manifest} />
+              </>
+            )}
+
             {job.status === "done" && job.kind === "sanitize" && (
               <div className="mb-6 rounded-md border border-border p-4">
                 <div className="flex flex-wrap items-center gap-3">
@@ -398,25 +474,10 @@ function JobView({ matterId, jobId }: { matterId: string; jobId: string }) {
                     Download bundle
                   </a>
                 </div>
-                <p className="mt-2 text-xs text-muted">
-                  Contains manifest.json (this custody record), the derivative,
-                  and report.json{includeOriginal ? " — plus the write-once original" : ""}.
-                </p>
+                {manifest && (
+                  <BundleContents manifest={manifest} includeOriginal={includeOriginal} />
+                )}
               </div>
-            )}
-
-            {job.kind === "inspect" && (
-              <>
-                <h2 className="mb-3 text-lg font-semibold tracking-tight">Findings</h2>
-                <RiskSummary findings={job.result?.findings ?? []} />
-                <FindingsByCategory findings={job.result?.findings ?? []} />
-              </>
-            )}
-            {job.kind === "sanitize" && manifest && (
-              <>
-                <h2 className="mb-3 text-lg font-semibold tracking-tight">Manifest</h2>
-                <SanitizeManifestView manifest={manifest} />
-              </>
             )}
           </>
         )}

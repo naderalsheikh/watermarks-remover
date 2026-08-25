@@ -704,7 +704,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             matter_id=matter_id,
             actor_id=user,
             action="document.upload",
-            payload={"filename_ext": Path(name).suffix, "sha256": doc.sha256, "bytes": doc.bytes},
+            payload={
+                "document_id": doc.id,
+                "filename_ext": Path(name).suffix,
+                "sha256": doc.sha256,
+                "bytes": doc.bytes,
+            },
         )
         s.commit()
         return _doc_dict(doc)

@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
@@ -295,20 +295,27 @@ function DocumentRow({
   jobs,
   policies,
   onJobStarted,
+  highlighted,
 }: {
   matterId: string;
   doc: Document;
   jobs: Job[];
   policies: Policy[];
   onJobStarted: () => void;
+  highlighted: boolean;
 }) {
   const [sanitizing, setSanitizing] = useState(false);
   const [inspecting, setInspecting] = useState(false);
   const [inspectError, setInspectError] = useState<string | null>(null);
+  const rowRef = useRef<HTMLLIElement>(null);
   const docJobs = jobs
     .filter((j) => j.document_id === doc.id)
     .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
   const nextStep = documentNextStep(docJobs);
+
+  useEffect(() => {
+    if (highlighted) rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlighted]);
 
   async function inspect() {
     setInspecting(true);
@@ -324,7 +331,10 @@ function DocumentRow({
   }
 
   return (
-    <li className="px-4 py-3">
+    <li
+      ref={rowRef}
+      className={`px-4 py-3 ${highlighted ? "bg-accent/10 ring-1 ring-inset ring-accent" : ""}`}
+    >
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <p className="truncate font-medium">{doc.filename}</p>
@@ -423,7 +433,13 @@ function MatterStats({ documents, jobs }: { documents: Document[]; jobs: Job[] }
   );
 }
 
-function MatterView({ matterId }: { matterId: string }) {
+function MatterView({
+  matterId,
+  highlightDocId,
+}: {
+  matterId: string;
+  highlightDocId: string | null;
+}) {
   const matterQ = useApiData(() => api.get<Matter>(`/v1/matters/${matterId}`), `matter:${matterId}`);
   const docsQ = useApiData(
     () => api.get<{ documents: Document[]; total: number }>(`/v1/matters/${matterId}/documents`),
@@ -591,6 +607,7 @@ function MatterView({ matterId }: { matterId: string }) {
                   jobs={jobsQ.data?.jobs ?? []}
                   policies={policiesQ.data?.policies ?? []}
                   onJobStarted={jobsQ.reload}
+                  highlighted={doc.id === highlightDocId}
                 />
               ))}
             </ul>
@@ -602,11 +619,15 @@ function MatterView({ matterId }: { matterId: string }) {
 }
 
 function MatterViewInner() {
-  const id = useSearchParams().get("id");
+  const params = useSearchParams();
+  const id = params.get("id");
   if (!id) {
     return <main className="mx-auto max-w-5xl flex-1 px-6 py-8 text-sm text-red-600">Missing matter id.</main>;
   }
-  return <MatterView matterId={id} />;
+  // Audit-log document cross-links (web/app/matters/audit/page.tsx) land
+  // here with ?doc= — scrolled to and highlighted in DocumentRow below,
+  // since there's no separate per-document page to link to instead.
+  return <MatterView matterId={id} highlightDocId={params.get("doc")} />;
 }
 
 export default function MatterViewPage() {
