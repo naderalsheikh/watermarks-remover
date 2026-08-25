@@ -33,7 +33,7 @@ function EventRow({ ev }: { ev: AuditEvent }) {
       <td className="px-3 py-2">
         <PayloadCell payload={ev.payload} />
       </td>
-      <td className="px-3 py-2 font-mono text-xs text-muted" title={`${ev.prev_hash} → ${ev.row_hash}`}>
+      <td className="px-3 py-2 font-mono text-xs text-muted" title={ev.prev_hash}>
         {shortHash(ev.prev_hash)}
       </td>
       <td className="px-3 py-2 font-mono text-xs text-muted" title={ev.row_hash}>
@@ -62,6 +62,7 @@ function AuditView({ matterId }: { matterId: string }) {
       <p className="mb-6 text-sm text-muted">
         {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
       </p>
+      {matterQ.error && <p className="mb-6 text-sm text-red-600">{matterQ.error}</p>}
 
       {auditQ.loading && <p className="text-sm text-muted">Loading audit chain…</p>}
       {auditQ.error && <p className="text-sm text-red-600">{auditQ.error}</p>}
