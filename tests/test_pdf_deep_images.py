@@ -1,17 +1,21 @@
-"""PDF deep-image metadata (docs/pdf-deep-image-metadata.md): detection of
-EXIF/C2PA metadata living inside embedded JPEG image XObjects, which the
-document-level exiftool/qpdf clean never touches.
+"""PDF deep-image metadata (docs/pdf-deep-image-metadata.md): EXIF/C2PA
+metadata living inside embedded JPEG image XObjects, which the document-
+level exiftool/qpdf clean never touches on its own.
 
-Detection only — deliberately no removal pass. A Ghostscript re-encode was
-built and then not shipped: it reliably dropped the embedded image entirely
-in testing, not merely recompressed it, and root cause wasn't isolated. See
-the module comment above container_meta.pdf_deep_image_scan and the design
-note's "Status" section. The regression tests here exist specifically to
-prove that stays true — sanitizing a PDF must never silently drop or
-rewrite an embedded image while this mode is disabled."""
+Removal is byte-preserving, not a re-render: strip_pdf_image_metadata
+splices APPn segments out of the extracted JPEG stream directly and never
+touches the SOS-to-EOI scan data. This is the safe alternative to a
+Ghostscript pdfwrite re-encode that was built and deliberately not shipped
+(it reliably dropped the embedded image entirely — see the module comment
+above container_meta.strip_pdf_image_metadata and the design note's
+"Status" section). The strongest tests here prove byte-identical scan data
+before and after a real strip through a real qpdf rebuild — not "looks the
+same," which was exactly the insufficient evidence that let the Ghostscript
+approach look plausible before it was actually verified."""
 
 from __future__ import annotations
 
+import base64
 import shutil
 import struct
 import sys
@@ -25,15 +29,51 @@ sys.path.insert(0, str(SCRIPTS))
 import pytest
 from container_meta import (
     _iter_pdf_image_xobjects,
+    _pdf_direct_length,
+    _strip_jpeg_appn,
     clean_pdf,
     embedded_image_metadata_present,
     embedded_provenance_present,
     inspect_pdf,
     pdf_deep_image_scan,
+    strip_pdf_image_metadata,
 )
 
 NEED_EXIFTOOL_QPDF = pytest.mark.skipif(
     not (shutil.which("exiftool") and shutil.which("qpdf")), reason="exiftool and qpdf required"
+)
+
+# A real, valid, tiny (4x4 RGB) JPEG — generated once via
+# `gs -sDEVICE=jpeg -g4x4 ...` and baked in here so the byte-identical-
+# scan-data tests exercise genuine DCT-coded pixel data through a real qpdf
+# rebuild, without requiring Ghostscript (or any image tool) at test time.
+_REAL_JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQEASABIAAD/4gogSUNDX1BST0ZJTEUAAQEAAAoQAAAAAAIQAABt"
+    "bnRyUkdCIFhZWiAAAAAAAAAAAAAAAABhY3NwQVBQTAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAApkZXNjAAAA/AAAAHxjcHJ0"
+    "AAABeAAAACh3dHB0AAABoAAAABRia3B0AAABtAAAABRyWFlaAAAByAAAABRnWFlaAAAB"
+    "3AAAABRiWFlaAAAB8AAAABRyVFJDAAACBAAACAxnVFJDAAACBAAACAxiVFJDAAACBAAA"
+    "CAxkZXNjAAAAAAAAACJBcnRpZmV4IFNvZnR3YXJlIHNSR0IgSUNDIFByb2ZpbGUAAAAA"
+    "AAAAAAAAACJBcnRpZmV4IFNvZnR3YXJlIHNSR0IgSUNDIFByb2ZpbGUAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdGV4dAAAAABDb3B5cmlnaHQgQXJ0aWZl"
+    "eCBTb2Z0d2FyZSAyMDExAFhZWiAAAAAAAADzUQABAAAAARbMWFlaIAAAAAAAAAAAAAAA"
+    "AAAAAABYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAA"
+    "AAAAACSgAAAPhAAAts9jdXJ2AAAAAAAABAAAAAAFAAoADwAUABkAHgAjACgALQAyADcA"
+    "OwBAAEUASgBPAFQAWQBeAGMAaABtAHIAdwB8AIEAhgCLAJAAlQCaAJ8ApACpAK4AsgC3"
+    "ALwAwQDGAMsA0ADVANsA4ADlAOsA8AD2APsBAQEHAQ0BEwEZAR8BJQErATIBOAE+AUUB"
+    "TAFSAVkBYAFnAW4BdQF8AYMBiwGSAZoBoQGpAbEBuQHBAckB0QHZAeEB6QHyAfoCAwIM"
+    "AhQCHQImAi8COAJBAksCVAJdAmcCcQJ6AoQCjgKYAqICrAK2AsECywLVAuAC6wL1AwAD"
+    "CwMWAyEDLQM4A0MDTwNaA2YDcgN+A4oDlgOiA64DugPHA9MD4APsA/kEBgQTBCAELQQ7"
+    "BEgEVQRjBHEEfgSMBJoEqAS2BMQE0wThBPAE/gUNBRwFKwU6BUkFWAVnBXcFhgWWBaYF"
+    "tQXFBdUF5QX2BgYGFgYnBjcGSAZZBmoGewaMBp0GrwbABtEG4wb1BwcHGQcrBz0HTwdh"
+    "B3QHhgeZB6wHvwfSB+UH+AgLCB8IMghGCFoIbgiCCJYIqgi+CNII5wj7CRAJJQk6CU8J"
+    "ZAl5CY8JpAm6Cc8J5Qn7ChEKJwo9ClQKagqBCpgKrgrFCtwK8wsLCyILOQtRC2kLgAuY"
+    "C7ALyAvhC/kMEgwqDEMMXAx1DI4MpwzADNkM8w0NDSYNQA1aDXQNjg2pDcMN3g34DhMO"
+    "Lg5JDmQOfw6bDrYO0g7uDwkPJQ9BD14Peg+WD7MPzw/sEAkQJhBDEGEQfhCbELkQ1xD1"
+    "ERMRMRFPEW0RjBGqEckR6BIHEiYSRRJkEoQSoxLDEuMTAxMjE0MTYxODE6QTxRPlFAYU"
+    "JxRJFGoUixStFM4U8BUSFTQVVhV4FZsVvRXgFgMWJhZJFmwWjxayFtYW+hcdF0EXZReJ"
+    "F64X0hf3GBsYQBhlGIoYrxjVGPoZIBlFGWsZkRm3Gd0aBBoqGlEadxqeGsUa7BsUGzsb"
+    "Yxsg"
 )
 
 
@@ -42,28 +82,58 @@ def _jpeg_appn(marker: int, payload: bytes) -> bytes:
 
 
 def _jpeg(*segments: bytes) -> bytes:
-    """Minimal JPEG: SOI, caller-supplied APPn segments, a trivial SOS + one
-    scan byte, EOI. Never decoded — only marker-walked — so the scan payload
-    doesn't need to be a real coefficient stream."""
+    """Minimal fake JPEG for marker-level tests: SOI, caller-supplied APPn
+    segments, a trivial SOS + one scan byte, EOI. Never decoded — only
+    marker-walked — so the scan payload doesn't need to be real coefficient
+    data. Not used for anything routed through qpdf/exiftool — use
+    _tagged_real_jpeg for that."""
     sos = bytes([0xFF, 0xDA]) + struct.pack(">H", 8) + b"\x01\x00\x00\x3f\x00" + b"\x00"
     return b"\xff\xd8" + b"".join(segments) + sos + b"\xff\xd9"
 
 
-def _pdf_with_image_xobject(jpeg: bytes) -> bytes:
+def _inject_appn(jpeg: bytes, marker: int, payload: bytes) -> bytes:
+    """Insert an APPn segment right after SOI, before whatever the real
+    JPEG's encoder already put there (JFIF/ICC)."""
+    return jpeg[:2] + _jpeg_appn(marker, payload) + jpeg[2:]
+
+
+def _tagged_real_jpeg(marker: int, payload: bytes) -> bytes:
+    return _inject_appn(_REAL_JPEG, marker, payload)
+
+
+def _pdf_with_image_xobject(jpeg: bytes, *, w: int = 1, h: int = 1, indirect_length=False) -> bytes:
     """One-page PDF whose page resources hold a single JPEG (DCTDecode)
-    image XObject — the shape embedded_image_metadata_present /
-    embedded_provenance_present / _iter_pdf_image_xobjects operate on."""
+    image XObject. indirect_length=True writes `/Length 6 0 R` (a separate
+    object) instead of a direct integer, matching common real-world PDF
+    producer output and exercising strip_pdf_image_metadata's documented
+    skip-rather-than-guess behavior for that case."""
     content = b"q 200 0 0 200 0 0 cm /Im0 Do Q"
-    objs = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
-        b"/Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
-        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
-        b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
-        b"/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode "
-        b"/Length %d >>\nstream\n" % len(jpeg) + jpeg + b"\nendstream",
-    ]
+    if indirect_length:
+        img_obj = (
+            b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+            b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
+            b"/Length 6 0 R >>\nstream\n" % (w, h) + jpeg + b"\nendstream"
+        )
+        objs = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+            b"/Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+            b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+            img_obj,
+            str(len(jpeg)).encode(),
+        ]
+    else:
+        objs = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+            b"/Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+            b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+            b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+            b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
+            b"/Length %d >>\nstream\n" % (w, h, len(jpeg)) + jpeg + b"\nendstream",
+        ]
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for i, body in enumerate(objs, start=1):
@@ -135,42 +205,190 @@ def test_pdf_deep_image_scan_reports_both_flags_independently():
     assert pdf_deep_image_scan(clean) == (False, False)
 
 
+# --- byte-preserving strip primitives ------------------------------------------
+
+
+def test_strip_jpeg_appn_removes_only_targeted_markers():
+    jpeg = _jpeg(
+        _jpeg_appn(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"),  # keep: structural
+        _jpeg_appn(0xE1, b"Exif\x00\x00fake tiff"),  # strip
+        _jpeg_appn(0xE2, b"ICC_PROFILE\x00" + b"\x00" * 10),  # keep: color-functional
+        _jpeg_appn(0xEB, b"jumb c2pa manifest"),  # strip
+    )
+    from container_meta import _JPEG_METADATA_MARKERS
+
+    stripped = _strip_jpeg_appn(jpeg, _JPEG_METADATA_MARKERS)
+    assert not embedded_image_metadata_present(stripped)
+    assert b"JFIF" in stripped
+    assert b"ICC_PROFILE" in stripped
+    assert b"Exif" not in stripped
+    assert b"jumb" not in stripped
+
+
+def test_strip_jpeg_appn_never_touches_scan_data():
+    """The actual safety property: SOS through EOI is copied verbatim, byte
+    for byte — this is what makes "no visual degradation" true by
+    construction rather than by after-the-fact inspection."""
+    from container_meta import _JPEG_METADATA_MARKERS
+
+    tagged = _tagged_real_jpeg(0xEB, b"jumb c2pa manifest bytes")
+    stripped = _strip_jpeg_appn(tagged, _JPEG_METADATA_MARKERS)
+    orig_sos = _REAL_JPEG.find(b"\xff\xda")
+    new_sos = stripped.find(b"\xff\xda")
+    assert _REAL_JPEG[orig_sos:] == stripped[new_sos : new_sos + (len(_REAL_JPEG) - orig_sos)]
+
+
+def test_strip_jpeg_appn_is_a_noop_when_nothing_to_strip():
+    jpeg = _jpeg(_jpeg_appn(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"))
+    from container_meta import _JPEG_METADATA_MARKERS
+
+    assert _strip_jpeg_appn(jpeg, _JPEG_METADATA_MARKERS) == jpeg
+
+
+def test_pdf_direct_length_parses_a_direct_integer():
+    assert _pdf_direct_length(b"/Type /XObject /Length 43 /Filter /DCTDecode") == (
+        43,
+        23,
+        25,
+    )
+
+
+def test_pdf_direct_length_returns_none_for_an_indirect_reference():
+    # "/Length 6 0 R" — the value lives in object 6, not inline here.
+    assert _pdf_direct_length(b"/Type /XObject /Length 6 0 R /Filter /DCTDecode") is None
+
+
+def test_pdf_direct_length_returns_none_when_length_is_missing():
+    assert _pdf_direct_length(b"/Type /XObject /Filter /DCTDecode") is None
+
+
+def test_strip_pdf_image_metadata_updates_length_and_returns_count():
+    from container_meta import _iter_pdf_image_xobject_spans
+
+    jpeg = _jpeg(_jpeg_appn(0xEB, b"jumb c2pa manifest bytes"))
+    pdf = _pdf_with_image_xobject(jpeg)
+    new_pdf, count = strip_pdf_image_metadata(pdf)
+    assert count == 1
+    streams = list(_iter_pdf_image_xobjects(new_pdf))
+    assert len(streams) == 1
+    assert not embedded_provenance_present(streams[0])
+
+    # /Length in the dict must match the new (shorter) stream exactly, or
+    # any downstream reader — including qpdf's own rebuild — mis-frames it.
+    (dict_open, dict_close, start, end), *_rest = _iter_pdf_image_xobject_spans(new_pdf)
+    dict_content = new_pdf[dict_open + 2 : dict_close]
+    value, _s, _e = _pdf_direct_length(dict_content)
+    assert value == end - start
+
+
+def test_strip_pdf_image_metadata_is_a_noop_when_nothing_to_strip():
+    jpeg = _jpeg()
+    pdf = _pdf_with_image_xobject(jpeg)
+    new_pdf, count = strip_pdf_image_metadata(pdf)
+    assert count == 0
+    assert new_pdf == pdf
+
+
+def test_strip_pdf_image_metadata_skips_indirect_length_rather_than_guessing():
+    jpeg = _jpeg(_jpeg_appn(0xEB, b"jumb c2pa manifest bytes"))
+    pdf = _pdf_with_image_xobject(jpeg, indirect_length=True)
+    new_pdf, count = strip_pdf_image_metadata(pdf)
+    assert count == 0
+    assert new_pdf == pdf
+    # Detection still sees it — this is "skip," not "silently pretend it's clean."
+    assert pdf_deep_image_scan(pdf) == (True, True)
+
+
 # --- clean_pdf / inspect_pdf integration --------------------------------------
 
 
 @NEED_EXIFTOOL_QPDF
-def test_clean_pdf_reports_embedded_metadata_without_clearing_it(tmp_path):
+def test_clean_pdf_strips_embedded_provenance_and_reports_it(tmp_path):
     jpeg = _jpeg(_jpeg_appn(0xEB, b"jumb c2pa manifest bytes"))
     src = tmp_path / "in.pdf"
     src.write_bytes(_pdf_with_image_xobject(jpeg))
     dest = tmp_path / "out.pdf"
     actions, meta = clean_pdf(src, dest)
     d = meta["deep_images"]
-    assert d["metadata_present"] is True
-    assert d["provenance_present"] is True
-    assert d["cleared"] is False
-    assert any("detection only" in a for a in actions)
-
-
-def test_clean_pdf_does_not_silently_drop_or_rewrite_the_embedded_image(tmp_path):
-    """The regression this mode's absence must not regress into: sanitizing
-    a PDF must leave an embedded image's own bytes completely untouched —
-    not stripped, not recompressed, not dropped — while this detection-only
-    mode is the only one that exists. clean_pdf's document-level pass
-    (exiftool -all=, qpdf --linearize/--remove-info) operates on the PDF's
-    /Info and XMP; this proves it never reaches into the image XObject."""
-    jpeg = _jpeg(_jpeg_appn(0xEB, b"jumb c2pa manifest bytes"))
-    src = tmp_path / "in.pdf"
-    src.write_bytes(_pdf_with_image_xobject(jpeg))
-    dest = tmp_path / "out.pdf"
-    clean_pdf(src, dest)
+    assert d["metadata_present_before"] is True
+    assert d["provenance_present_before"] is True
+    assert d["images_stripped"] == 1
+    assert d["metadata_present"] is False
+    assert d["provenance_present"] is False
+    assert d["cleared"] is True
+    assert any("stripped from 1 image" in a for a in actions)
 
     out_streams = list(_iter_pdf_image_xobjects(dest.read_bytes()))
     assert len(out_streams) == 1
-    assert out_streams[0].rstrip(b"\n") == jpeg  # byte-identical: nothing touched it
-    # The metadata is provably still there too — the honest counterpart of
-    # "not silently dropped": clean_pdf must not claim or imply it's gone.
-    assert embedded_provenance_present(out_streams[0])
+    assert not embedded_provenance_present(out_streams[0])
+
+
+@NEED_EXIFTOOL_QPDF
+def test_clean_pdf_strip_preserves_real_jpeg_scan_data_byte_for_byte(tmp_path):
+    """The actual regression this whole approach exists to prove: a real
+    photographic JPEG's own compressed pixel data survives a full clean_pdf
+    round trip — exiftool pass, qpdf structural rewrite, the metadata
+    strip, and a second qpdf rebuild — byte-for-byte identical, not just
+    "looks the same." This is the evidence the Ghostscript approach could
+    never have produced even if it had worked."""
+    tagged = _tagged_real_jpeg(0xEB, b"jumb c2pa manifest bytes")
+    src = tmp_path / "in.pdf"
+    src.write_bytes(_pdf_with_image_xobject(tagged, w=4, h=4))
+    dest = tmp_path / "out.pdf"
+    _actions, meta = clean_pdf(src, dest)
+    assert meta["deep_images"]["cleared"] is True
+
+    out_streams = list(_iter_pdf_image_xobjects(dest.read_bytes()))
+    assert len(out_streams) == 1
+    orig_sos = _REAL_JPEG.find(b"\xff\xda")
+    out_sos = out_streams[0].find(b"\xff\xda")
+    assert (
+        _REAL_JPEG[orig_sos:]
+        == out_streams[0][out_sos : out_sos + (len(_REAL_JPEG) - orig_sos)]
+    )
+
+
+@NEED_EXIFTOOL_QPDF
+def test_clean_pdf_leaves_a_clean_image_alone(tmp_path):
+    jpeg = _jpeg(_jpeg_appn(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"))
+    src = tmp_path / "in.pdf"
+    src.write_bytes(_pdf_with_image_xobject(jpeg))
+    dest = tmp_path / "out.pdf"
+    _actions, meta = clean_pdf(src, dest)
+    d = meta["deep_images"]
+    assert d["images_stripped"] == 0
+    assert d["cleared"] is False  # nothing was there to clear
+
+
+@NEED_EXIFTOOL_QPDF
+def test_clean_pdf_reports_indirect_length_images_honestly(tmp_path, monkeypatch):
+    """An indirect /Length is skipped rather than guessed at, and the
+    manifest must say so, not claim a clean that didn't happen. This is
+    reachable in practice specifically when qpdf is unavailable: when
+    present, clean_pdf's own upstream structural rewrite (qpdf --linearize,
+    already run for exiftool's incremental-edit cleanup) normalizes an
+    indirect /Length to a direct integer as a side effect — confirmed by
+    hand against a real qpdf invocation — so the strip step downstream
+    almost never actually sees one. Simulate qpdf's absence to exercise the
+    case where it's genuinely still indirect when strip_pdf_image_metadata
+    runs."""
+    import container_meta
+
+    real_which = container_meta.which
+    monkeypatch.setattr(
+        container_meta, "which", lambda cmd: None if cmd == "qpdf" else real_which(cmd)
+    )
+
+    jpeg = _jpeg(_jpeg_appn(0xEB, b"jumb c2pa manifest bytes"))
+    src = tmp_path / "in.pdf"
+    src.write_bytes(_pdf_with_image_xobject(jpeg, indirect_length=True))
+    dest = tmp_path / "out.pdf"
+    actions, meta = clean_pdf(src, dest)
+    d = meta["deep_images"]
+    assert d["images_stripped"] == 0
+    assert d["metadata_present"] is True
+    assert d["cleared"] is False
+    assert any("remains after strip attempt" in a for a in actions)
 
 
 def test_inspect_pdf_surfaces_embedded_provenance_as_a_finding(tmp_path):

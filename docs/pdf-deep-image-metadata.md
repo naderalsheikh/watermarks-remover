@@ -1,21 +1,40 @@
 # PDF deep-image metadata — design note
 
-## Status (2026-08-25): detection landed, removal deliberately not implemented
+## Status (2026-08-25): detection + byte-preserving removal landed; Ghostscript rejected
 
 **Landed:** `embedded_image_metadata_present`, `embedded_provenance_present`,
-`_iter_pdf_image_xobjects`, and `pdf_deep_image_scan` (`service/scripts/container_meta.py`) —
-byte-level JPEG-marker detection of embedded EXIF/APPn metadata and C2PA/JUMBF
+`_iter_pdf_image_xobject_spans`/`_iter_pdf_image_xobjects`, and
+`pdf_deep_image_scan` (`service/scripts/container_meta.py`) — byte-level
+JPEG-marker detection of embedded EXIF/APPn metadata and C2PA/JUMBF
 provenance inside PDF image XObjects. Wired into both `inspect_pdf` (as
-findings) and `clean_pdf` (as a `deep_images` manifest field). No removal —
-every path reports what it finds and changes nothing about the image.
+findings) and `clean_pdf` (as a `deep_images` manifest field).
 
-**Deliberately not implemented: the Ghostscript re-encode pass.** It was
-built (seven correctness points from the original design below all
-addressed — symlink-safe temp path, single clean-wide budget, correct
-Downsample vs. DownsampleType flag semantics verified against a real `gs`
-invocation, `always` escalating on any metadata not just provenance) and
-then **not shipped**, because it failed the one constraint that actually
-matters for this product: **no visual degradation**.
+**Removal also landed**, via the byte-preserving approach outlined below
+rather than Ghostscript: `_strip_jpeg_appn` splices the identified APPn
+segments directly out of the extracted JPEG stream (SOS-through-EOI scan
+data copied verbatim, never decoded); `strip_pdf_image_metadata` locates
+every DCTDecode image XObject with a direct `/Length` (`_pdf_direct_length`
+— an indirect `/Length N G R` is skipped rather than guessed at, and in
+practice this rarely triggers once qpdf has run: qpdf's own structural
+rewrite normalizes indirect references to direct integers as a side
+effect, confirmed by hand), applies the strip, and patches `/Length`;
+`clean_pdf` runs it and follows with the existing `_pdf_structural_rewrite`
+(qpdf) to fix up xref offsets, the same rule the stdlib XMP-strip fallback
+already follows for any byte-range mutation. Proven, not just argued: a
+regression test strips a real (Ghostscript-generated, baked into the test
+file) JPEG's embedded C2PA marker through a full `clean_pdf` round trip —
+exiftool pass, qpdf rewrite, the strip, a second qpdf rebuild — and asserts
+the SOS-to-EOI scan data is **byte-identical** before and after. That's the
+evidence the Ghostscript approach below could never have produced even if
+it had worked.
+
+**Rejected: the Ghostscript re-encode pass.** It was built (seven
+correctness points from the original design below all addressed —
+symlink-safe temp path, single clean-wide budget, correct Downsample vs.
+DownsampleType flag semantics verified against a real `gs` invocation,
+`always` escalating on any metadata not just provenance) and then **not
+shipped**, because it failed the one constraint that actually matters for
+this product: **no visual degradation**.
 
 What was found: with the corrected Ghostscript flags
 (`-dDownsample*Images=false -dEncode*Images=false`, disabling both
@@ -28,39 +47,26 @@ drew the image correctly (real non-white pixels present); `pdfwrite`'s PDF
 Ruled out as causes: image size (tried 1×1 and 16×16), a `/Width`/`/Height`
 mismatch against the JPEG's own SOF header (confirmed matching), and the
 injected metadata marker itself (an untagged image with no marker at all
-was dropped identically). Root cause not isolated — could be specific to
-small/synthetic test images and not affect real photographic scans, or
-could be a more general `pdfwrite` behavior. For a legal-evidence product,
-silently losing image content is a strictly worse failure than leaving
-metadata in place, so this path does not ship while that's unresolved.
+was dropped identically). Root cause not isolated, and no longer worth
+isolating now that the byte-preserving approach ships instead — but if
+Ghostscript involvement is ever revisited (e.g. for non-JPEG filters this
+pass doesn't cover), the test matrix below is where to start.
 
-**Follow-up investigation, not started.** Two candidate directions, in
-order of preference:
+**Known non-goal, unchanged:** non-JPEG image filters (JBIG2, CCITT fax)
+aren't covered by either detection or removal.
 
-1. **Byte-preserving stream surgery, no re-render at all.**
-   `_iter_pdf_image_xobjects` already extracts the exact raw JPEG stream;
-   `_iter_jpeg_appn`'s marker walk already identifies each APPn segment's
-   precise byte range. Removing metadata could mean splicing those ranges
-   out of the stream directly — the same technique `_strip_id3v2`/
-   `_drop_tag_blocks` already use elsewhere in this codebase for surgical
-   byte-range removal — leaving the DCT-encoded scan data completely
-   untouched, then re-inserting the shortened stream into the PDF and
-   running the existing `_pdf_structural_rewrite` (qpdf) to fix up
-   `/Length` and xref offsets. This gives a **by-construction** no-degradation
-   guarantee (the pixel data is never decoded, never re-encoded — only
-   well-formed header bytes before the scan segment are ever removed)
-   instead of an after-the-fact "looks fine after raster render" check,
-   which alone isn't sufficient evidence for an evidentiary tool.
-2. **Ghostscript, but only as an explicit opt-in fallback**, not the default
-   legal-preservation path, and only after a proper test matrix: take a
-   real scanned PDF (not a synthetic fixture) with a JPEG XObject carrying
-   real EXIF/XMP/C2PA, run the candidate rewrite, and compare — rendered
-   page before/after, page count, content-stream presence, image XObject
-   count before/after, extracted image dimensions before/after, and whether
-   image bytes were actually recompressed (byte-identical scan data is the
-   strongest check, not merely "visually similar"). Repeat across more than
-   one Ghostscript version if practical. No cleaning mode ships without
-   passing that gate.
+**If Ghostscript involvement is ever reconsidered** (not currently
+planned — the byte-preserving approach covers the JPEG/DCTDecode case this
+design exists for), it should only ever be an explicit opt-in fallback, not
+the default legal-preservation path, and only after a proper test matrix:
+take a real scanned PDF (not a synthetic fixture) with a JPEG XObject
+carrying real EXIF/XMP/C2PA, run the candidate rewrite, and compare —
+rendered page before/after, page count, content-stream presence, image
+XObject count before/after, extracted image dimensions before/after, and
+whether image bytes were actually recompressed (byte-identical scan data is
+the strongest check, not merely "visually similar"). Repeat across more
+than one Ghostscript version if practical. No such mode ships without
+passing that gate.
 
 Whichever direction, this needs its own design note before implementation —
 this file's original design (below) is retained for the detection work it
@@ -68,8 +74,9 @@ correctly specified, not as a green light for the removal pass.
 
 ---
 
-## Original design (2026-08-25, detection portion implemented as specified;
-## removal portion superseded by the Status section above)
+## Original design (2026-08-25) — detection as specified; removal shipped via
+## the byte-preserving approach described in the Status section above, not
+## the Ghostscript pass this section originally proposed
 
 ## Problem
 

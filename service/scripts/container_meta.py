@@ -3049,46 +3049,52 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     if probe_note:
         findings.append(probe_note)
 
-    # Embedded-image metadata (JPEG XObjects) — detection only, see
-    # pdf_deep_image_scan's docstring and docs/pdf-deep-image-metadata.md.
+    # Embedded-image metadata (JPEG XObjects) — see pdf_deep_image_scan's
+    # docstring and docs/pdf-deep-image-metadata.md. clean_pdf strips this
+    # byte-preservingly except when the image's /Length is an indirect
+    # reference (skipped rather than guessed at).
     metadata_present, provenance_present = pdf_deep_image_scan(data)
     if provenance_present:
         has_c2pa = True
         findings.append(
-            "embedded-image provenance: an image XObject carries a C2PA/JUMBF "
-            "marker (detection only — not removed by clean)"
+            "embedded-image provenance: an image XObject carries a C2PA/JUMBF marker"
         )
     elif metadata_present:
-        findings.append(
-            "embedded-image metadata: an image XObject carries EXIF/APPn "
-            "metadata (detection only — not removed by clean)"
-        )
+        findings.append("embedded-image metadata: an image XObject carries EXIF/APPn metadata")
 
     return has_c2pa, has_ai or has_c2pa, findings, {"tools": tools, "pdf_legal": legal}
 
 
 # --- PDF deep-image metadata (docs/pdf-deep-image-metadata.md) ---------------
-# clean_pdf strips the document's own /Info and XMP but never touches image
-# XObjects — a PDF that's really a scanned/photographed JPEG keeps that
+# clean_pdf strips the document's own /Info and XMP but never touched image
+# XObjects — a PDF that's really a scanned/photographed JPEG kept that
 # JPEG's own EXIF/GPS/C2PA after a "successful" clean.
 #
-# Detection only. A Ghostscript re-encode pass (pdfwrite) was built and then
-# deliberately not shipped: it reliably dropped the embedded image entirely
-# in testing — not recompressed, not degraded, gone — even though a raster
-# render (-sDEVICE=ppmraw) proved Ghostscript's own interpreter drew the
-# same image correctly. Root cause wasn't isolated (ruled out image size,
-# a /Width vs. /Height mismatch against the JPEG's own SOF header, and the injected
-# marker itself as causes). For a legal-evidence product, silently losing
-# image content is a worse failure than leaving metadata in place, so this
-# mode is not implemented — see docs/pdf-deep-image-metadata.md "Status" for
-# the investigation notes and the follow-up plan (byte-preserving APPn
-# segment removal directly on the extracted stream + qpdf structural
-# rebuild, no re-render, is the more promising direction).
+# Removal is byte-preserving, not a re-render: strip_pdf_image_metadata
+# splices out the identified APPn segments directly from the extracted JPEG
+# stream (reusing the same marker walk as detection) and never touches the
+# SOS-to-EOI scan data — the actual DCT-coded pixels are never on a decode
+# path that could recompress them. This is the safe alternative to a
+# Ghostscript pdfwrite re-encode pass that was built and deliberately not
+# shipped: with every "don't degrade the image" flag Ghostscript offers set,
+# it reliably dropped the embedded image entirely — not recompressed,
+# gone — even though a raster render proved Ghostscript's own interpreter
+# drew the same image correctly. Root cause was never isolated. See
+# docs/pdf-deep-image-metadata.md "Status" for the full investigation; the
+# regression test here proves byte-identical scan data before and after a
+# real strip, not just "looks the same," as the actual safety property.
 #
-# What ships here: embedded-image metadata/provenance is detected and
-# reported (clean_pdf's manifest, inspect_pdf's findings) but never removed.
-# Every clean_pdf/inspect_pdf call path is a no-op for this class of content
-# — see the regression test proving that.
+# Known limitation: an image XObject whose /Length is an indirect reference
+# (`/Length 6 0 R`, common from PDF producers that write it as its own
+# object) is left untouched rather than guessed at — see
+# _pdf_direct_length. clean_pdf's manifest reports this explicitly via
+# metadata_present/provenance_present staying true after a strip attempt.
+# In practice this rarely bites when qpdf is present: clean_pdf's own
+# upstream structural rewrite (_pdf_structural_rewrite, already run for
+# exiftool's incremental-edit cleanup) normalizes an indirect /Length to a
+# direct integer as a side effect of qpdf's object-graph reserialization —
+# confirmed by hand against a real qpdf invocation. It's mainly reachable
+# when qpdf itself is unavailable.
 
 # APP0 (JFIF header) and APP2 (ICC color profile) are structural/functional,
 # never "metadata to strip" — stripping either corrupts the file or its color
@@ -3174,8 +3180,12 @@ def _matching_dict_open(data: bytes, dict_close: int) -> int | None:
     return None
 
 
-def _iter_pdf_image_xobjects(data: bytes):
-    """Yield raw bytes of JPEG (DCTDecode) image streams embedded in a PDF.
+def _iter_pdf_image_xobject_spans(data: bytes):
+    """Yield (dict_open, dict_close, stream_data_start, stream_data_end) for
+    every JPEG (DCTDecode) image XObject in a PDF — byte offsets into
+    *data*, not copies, so a caller can splice a replacement in place
+    (strip_pdf_image_metadata) as well as just read the bytes
+    (_iter_pdf_image_xobjects).
 
     Best-effort byte scan for `stream ... endstream` blocks whose owning
     dictionary declares `/Subtype /Image` and `/Filter ... /DCTDecode`; not a
@@ -3214,17 +3224,23 @@ def _iter_pdf_image_xobjects(data: bytes):
             endstream_idx = data.find(b"endstream", pos)
             if endstream_idx == -1:
                 return  # malformed tail; nothing more to find
-            yield data[pos:endstream_idx]
+            yield dict_open, dict_close, pos, endstream_idx
             search_from = endstream_idx + len(b"endstream")
         else:
             search_from = stream_idx + 1
 
 
+def _iter_pdf_image_xobjects(data: bytes):
+    """Yield raw bytes of JPEG (DCTDecode) image streams embedded in a PDF —
+    see _iter_pdf_image_xobject_spans for what's actually being scanned."""
+    for _dict_open, _dict_close, start, end in _iter_pdf_image_xobject_spans(data):
+        yield data[start:end]
+
+
 def pdf_deep_image_scan(data: bytes) -> tuple[bool, bool]:
     """(metadata_present, provenance_present) across every JPEG XObject in a
-    PDF's bytes. Detection only — see the module comment above for why there
-    is deliberately no corresponding removal pass. Shared by inspect_pdf
-    (surfaces findings) and clean_pdf (surfaces the same in its manifest)."""
+    PDF's bytes. Shared by inspect_pdf (surfaces findings) and clean_pdf
+    (surfaces the same, pre- and post-strip, in its manifest)."""
     metadata_present = False
     provenance_present = False
     for stream in _iter_pdf_image_xobjects(data):
@@ -3235,6 +3251,134 @@ def pdf_deep_image_scan(data: bytes) -> tuple[bool, bool]:
         if metadata_present and provenance_present:
             break
     return metadata_present, provenance_present
+
+
+def _strip_jpeg_appn(jpeg: bytes, markers_to_strip: frozenset[int]) -> bytes:
+    """Remove every APPn segment whose marker is in markers_to_strip from a
+    JPEG byte string. SOI, DQT/DHT/SOF, any APPn *not* in markers_to_strip,
+    and — critically — the SOS marker plus every byte from there through EOI
+    (the actual DCT-coded scan data) are copied verbatim, in original order,
+    never decoded. This is what makes the "no visual degradation" guarantee
+    hold by construction rather than by inspection: the pixel data is never
+    on a code path that could recompress it."""
+    if not jpeg.startswith(b"\xff\xd8"):
+        return jpeg
+    out = bytearray(jpeg[:2])
+    i = 2
+    n = len(jpeg)
+    while i + 2 <= n:
+        if jpeg[i] != 0xFF:
+            out.append(jpeg[i])
+            i += 1
+            continue
+        fill_start = i
+        while i < n and jpeg[i] == 0xFF:
+            i += 1
+        if i >= n:
+            out += jpeg[fill_start:]
+            break
+        marker = jpeg[i]
+        i += 1
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            out += jpeg[fill_start:i]
+            continue
+        if marker == 0xDA:
+            # Scan data follows through EOI — copied verbatim, untouched.
+            out += jpeg[fill_start:]
+            break
+        if i + 2 > n:
+            out += jpeg[fill_start:]
+            break
+        seglen = struct.unpack(">H", jpeg[i : i + 2])[0]
+        if seglen < 2 or i + seglen > n:
+            out += jpeg[fill_start:]
+            break
+        seg_end = i + seglen
+        if not (0xE0 <= marker <= 0xEF and marker in markers_to_strip):
+            out += jpeg[fill_start:seg_end]
+        i = seg_end
+    return bytes(out)
+
+
+def _pdf_direct_length(dict_content: bytes) -> tuple[int, int, int] | None:
+    """Find a *direct* /Length value (`/Length 43`) in a PDF stream-object
+    dict. Returns (value, start, end) as offsets into dict_content, or None
+    if /Length is missing or is an indirect reference (`/Length 6 0 R` —
+    the value lives in a second object, which this best-effort pass doesn't
+    also locate and patch; that XObject is left untouched rather than
+    guessed at, matching this module's other non-goals)."""
+    m = re.search(rb"/Length\b", dict_content)
+    if not m:
+        return None
+    pos = m.end()
+    while pos < len(dict_content) and dict_content[pos : pos + 1].isspace():
+        pos += 1
+    digit_start = pos
+    while pos < len(dict_content) and dict_content[pos : pos + 1].isdigit():
+        pos += 1
+    if pos == digit_start:
+        return None
+    # An indirect reference continues "<space> <gen> R" — peek past the
+    # value for that shape before trusting it as a direct integer.
+    peek = pos
+    while peek < len(dict_content) and dict_content[peek : peek + 1].isspace():
+        peek += 1
+    gen_end = peek
+    while gen_end < len(dict_content) and dict_content[gen_end : gen_end + 1].isdigit():
+        gen_end += 1
+    if gen_end > peek:
+        after = gen_end
+        while after < len(dict_content) and dict_content[after : after + 1].isspace():
+            after += 1
+        if dict_content[after : after + 1] == b"R":
+            return None
+    return int(dict_content[digit_start:pos]), digit_start, pos
+
+
+def strip_pdf_image_metadata(
+    data: bytes, markers_to_strip: frozenset[int] = _JPEG_METADATA_MARKERS
+) -> tuple[bytes, int]:
+    """Remove embedded JPEG metadata (default: every APPn class
+    _JPEG_METADATA_MARKERS covers) from every DCTDecode image XObject in a
+    PDF, byte-preserving — see _strip_jpeg_appn. Returns (new_pdf_bytes,
+    images_modified). Caller is responsible for a structural rebuild
+    afterward (qpdf via _pdf_structural_rewrite): splicing a shorter stream
+    in place shifts every later byte offset, which breaks xref until
+    rebuilt — the same rule this file already follows for the stdlib XMP
+    strip fallback.
+
+    Images whose /Length is an indirect reference are left untouched
+    (_pdf_direct_length) rather than guessed at.
+    """
+    edits: list[tuple[int, int, bytes]] = []
+    for dict_open, dict_close, start, end in _iter_pdf_image_xobject_spans(data):
+        dict_content = data[dict_open + 2 : dict_close]
+        length_info = _pdf_direct_length(dict_content)
+        if length_info is None:
+            continue
+        _old_len, len_start, len_end = length_info
+        jpeg = data[start:end]
+        if not embedded_image_metadata_present(jpeg):
+            continue
+        stripped = _strip_jpeg_appn(jpeg, markers_to_strip)
+        if stripped == jpeg:
+            continue
+        new_dict_content = (
+            dict_content[:len_start] + str(len(stripped)).encode("ascii") + dict_content[len_end:]
+        )
+        replacement = (
+            b"<<" + new_dict_content + b">>" + data[dict_close + 2 : start] + stripped
+        )
+        edits.append((dict_open, end, replacement))
+    if not edits:
+        return data, 0
+    out = bytearray(data)
+    # Highest offset first: splicing a region only ever changes bytes at or
+    # after its own start, so earlier (lower-offset), not-yet-applied edits
+    # stay valid against their originally-computed offsets.
+    for start, end, replacement in sorted(edits, key=lambda e: e[0], reverse=True):
+        out[start:end] = replacement
+    return bytes(out), len(edits)
 
 
 def _pdf_structural_rewrite(dest: Path, actions: list[str]) -> bool:
@@ -3321,11 +3465,14 @@ def _pdf_info_clear(dest: Path, actions: list[str]) -> bool:
 def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
     """Best-effort PDF clean. Prefers exiftool; falls back to XMP strip warning.
 
-    Embedded-image metadata/provenance (JPEG XObjects) is detected and
-    reported in the returned dict's "deep_images" key but never removed —
-    see the module comment above pdf_deep_image_scan and
-    docs/pdf-deep-image-metadata.md. Callers/UI must not present
-    metadata_present or provenance_present as cleared.
+    Embedded-image metadata/provenance (JPEG XObjects) is detected and, when
+    found, stripped byte-preservingly (see the module comment above
+    strip_pdf_image_metadata and docs/pdf-deep-image-metadata.md) — the
+    returned dict's "deep_images" key reports before/after state and how
+    many images were actually modified. An image whose /Length is an
+    indirect reference is skipped rather than guessed at; deep_images
+    reflects that honestly (metadata_present stays true) rather than
+    claiming a clean that didn't happen.
     """
     actions: list[str] = []
     data = path.read_bytes()
@@ -3390,11 +3537,36 @@ def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
             mode_actual, degraded, rewritten = "copy", True, False
         info_clear = False
 
+    before_meta, before_prov = pdf_deep_image_scan(dest.read_bytes())
+    images_stripped = 0
+    if before_meta:
+        stripped_data, images_stripped = strip_pdf_image_metadata(dest.read_bytes())
+        if images_stripped:
+            safe_write_bytes(dest, stripped_data)
+            # Splicing a shorter stream in place shifts every later xref
+            # offset — always rebuilt afterward (same rule the stdlib
+            # XMP-strip fallback above already follows), independent of
+            # whether the exiftool branch already ran its own rewrite.
+            if _pdf_structural_rewrite(dest, actions):
+                actions.append(
+                    f"embedded-image metadata stripped from {images_stripped} image(s) "
+                    "(byte-preserving: scan data untouched, see "
+                    "docs/pdf-deep-image-metadata.md)"
+                )
+            else:
+                actions.append(
+                    "embedded-image metadata stripped but the post-strip structural "
+                    "rebuild failed; xref may be stale until qpdf is available"
+                )
+
     metadata_present, provenance_present = pdf_deep_image_scan(dest.read_bytes())
     if metadata_present or provenance_present:
+        # Reachable when strip_pdf_image_metadata skipped an image (an
+        # indirect /Length — see _pdf_direct_length; mainly happens when
+        # qpdf is unavailable, per the module comment above).
         actions.append(
-            "embedded-image metadata detected, not cleared (detection only — "
-            f"see docs/pdf-deep-image-metadata.md): metadata_present={metadata_present}, "
+            "embedded-image metadata remains after strip attempt (indirect /Length "
+            f"or unsupported structure): metadata_present={metadata_present}, "
             f"provenance_present={provenance_present}"
         )
 
@@ -3404,10 +3576,12 @@ def clean_pdf(path: Path, dest: Path) -> tuple[list[str], dict]:
         "info_clear": info_clear,
         "degraded": degraded,
         "deep_images": {
+            "metadata_present_before": before_meta,
+            "provenance_present_before": before_prov,
+            "images_stripped": images_stripped,
             "metadata_present": metadata_present,
             "provenance_present": provenance_present,
-            "cleared": False,
-            "note": "detection only; embedded-image metadata is not removed",
+            "cleared": before_meta and not metadata_present,
         },
     }
 
