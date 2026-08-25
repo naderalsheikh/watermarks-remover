@@ -409,3 +409,54 @@ def test_inspect_pdf_surfaces_embedded_metadata_without_provenance(tmp_path):
     _has_c2pa, _has_ai, findings, _details = inspect_pdf(p, data)
     assert any("embedded-image metadata" in f for f in findings)
     assert not any("embedded-image provenance" in f for f in findings)
+
+
+def test_embedded_image_findings_reach_the_structured_finding_list(tmp_path):
+    """findings_for_report's container dispatch is a strict prefix match
+    with no fallback — a raw finding string that doesn't match a known
+    prefix is silently dropped, never reaching job.result["findings"] (what
+    the product UI actually renders). Regression: "embedded-image
+    metadata:"/"embedded-image provenance:" must have their own prefix
+    branches, not just exist in the raw inspect_pdf string list."""
+    from findings import findings_for_report
+
+    jpeg = _jpeg(_jpeg_appn(0xE1, b"Exif\x00\x00camera-only, no provenance"))
+    data = _pdf_with_image_xobject(jpeg)
+    p = tmp_path / "in.pdf"
+    p.write_bytes(data)
+    has_c2pa, has_ai, raw_findings, _details = inspect_pdf(p, data)
+    report = {
+        "format": "pdf",
+        "has_c2pa": has_c2pa,
+        "has_ai_metadata": has_ai,
+        "findings": raw_findings,
+    }
+    structured = findings_for_report("container", report)
+    matches = [f for f in structured if f.subtype == "embedded_image_metadata"]
+    assert len(matches) == 1
+    assert matches[0].category == "file_metadata"
+    assert not any(f.subtype == "embedded_image_provenance" for f in structured)
+
+
+def test_embedded_image_provenance_finding_is_distinct_from_generic_c2pa(tmp_path):
+    """A provenance marker inside an image must be identifiable as such —
+    not indistinguishable from a document-level C2PA manifest — since only
+    the embedded-image case has the indirect-/Length removal caveat."""
+    from findings import findings_for_report
+
+    jpeg = _jpeg(_jpeg_appn(0xEB, b"jumb c2pa manifest bytes"))
+    data = _pdf_with_image_xobject(jpeg)
+    p = tmp_path / "in.pdf"
+    p.write_bytes(data)
+    has_c2pa, has_ai, raw_findings, _details = inspect_pdf(p, data)
+    report = {
+        "format": "pdf",
+        "has_c2pa": has_c2pa,
+        "has_ai_metadata": has_ai,
+        "findings": raw_findings,
+    }
+    structured = findings_for_report("container", report)
+    embedded = [f for f in structured if f.subtype == "embedded_image_provenance"]
+    assert len(embedded) == 1
+    assert embedded[0].category == "provenance_metadata"
+    assert "not the document's own manifest" in embedded[0].notes

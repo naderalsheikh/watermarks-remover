@@ -556,6 +556,53 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                     value_redacted=text,
                 )
             )
+        # PDF embedded-image metadata/provenance (docs/pdf-deep-image-metadata.md):
+        # distinct subtypes from the generic has_c2pa-driven "c2pa" finding
+        # above — a reviewer needs to know a C2PA marker was found *inside an
+        # embedded image*, not the document's own top-level manifest, since
+        # clean_pdf's removal path and its indirect-/Length limitation are
+        # specific to this case. strip_pdf_image_metadata handles both; the
+        # only reason either survives to a re-inspect is an indirect /Length
+        # (see container_meta._pdf_direct_length).
+        elif text.startswith("embedded-image provenance:"):
+            out.append(
+                Finding(
+                    category="provenance_metadata",
+                    subtype="embedded_image_provenance",
+                    format=fmt,
+                    risk_level="high",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="other"),
+                    action_recommended="strip",
+                    action_allowed_by_policy=("strip", "keep"),
+                    value_redacted=text,
+                    notes=(
+                        "C2PA/JUMBF marker inside an embedded image XObject, not the "
+                        "document's own manifest; removed byte-preservingly unless the "
+                        "image's /Length is an indirect reference (see the manifest's "
+                        "deep_images field)"
+                    ),
+                )
+            )
+        elif text.startswith("embedded-image metadata:"):
+            out.append(
+                Finding(
+                    category="file_metadata",
+                    subtype="embedded_image_metadata",
+                    format=fmt,
+                    risk_level="medium",
+                    confidence="confirmed",
+                    location=FindingLocation(pane="other"),
+                    action_recommended="strip",
+                    action_allowed_by_policy=("strip", "keep"),
+                    value_redacted=text,
+                    notes=(
+                        "EXIF/APPn metadata inside an embedded image XObject; removed "
+                        "byte-preservingly unless the image's /Length is an indirect "
+                        "reference (see the manifest's deep_images field)"
+                    ),
+                )
+            )
     return out
 
 
