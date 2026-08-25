@@ -18,11 +18,8 @@ function permLabel(perm: string): string {
 // hand an admin, and grant-by-principal-ID is unusable in practice even
 // though the backend endpoint works. GET /v1/auth/me is the same value
 // already visible in every audit event's actor_id — not new exposure.
-function YourPrincipal({ oidc }: { oidc: boolean }) {
-  const meQ = useApiData<{ principal: string }>(() => api.get("/v1/auth/me"), "auth-me");
+function YourPrincipal({ oidc, principal }: { oidc: boolean; principal: string }) {
   const [copied, setCopied] = useState(false);
-  if (meQ.loading || !meQ.data) return null;
-  const principal = meQ.data.principal;
   return (
     <div className="mb-6 rounded-md border border-border p-3 text-sm">
       <p className="text-xs font-medium uppercase tracking-wide text-muted">Your principal ID</p>
@@ -159,10 +156,12 @@ function AccessView({ matterId }: { matterId: string }) {
     `matter:${matterId}`,
   );
   const authQ = useApiData<AuthConfig>(() => api.get("/v1/auth/config"), "auth-config");
+  const meQ = useApiData<{ principal: string }>(() => api.get("/v1/auth/me"), "auth-me");
   const aclQ = useApiData<{ grants: AclGrant[] }>(
     () => api.get(`/v1/matters/${matterId}/acl`),
     `acl:${matterId}`,
   );
+  const [revokeError, setRevokeError] = useState<string | null>(null);
 
   const oidc = authQ.data?.oidc_enabled ?? false;
 
@@ -172,8 +171,36 @@ function AccessView({ matterId }: { matterId: string }) {
   }
 
   async function revoke(userId: string, perm: string) {
-    await api.del(`/v1/matters/${matterId}/acl`, { user_id: userId, perm });
-    aclQ.reload();
+    setRevokeError(null);
+    // Self-revoking admin/read is a real self-lockout risk (losing
+    // control over, or visibility into, this matter) -- the backend
+    // refuses it without an explicit confirm_self_revoke flag
+    // (service/app/main.py's delete_acl), so this dialog is what actually
+    // produces that flag, not just UI decoration on top of a backend that
+    // would allow it either way.
+    const isSelf = meQ.data?.principal === userId;
+    let confirmSelfRevoke = false;
+    if (isSelf && (perm === "admin" || perm === "read")) {
+      const ok = window.confirm(
+        `Revoke your own ${perm} access to this matter? ` +
+          (perm === "admin"
+            ? "You may lose the ability to manage access here — another admin would need to grant it back."
+            : "You may lose visibility into this matter.") +
+          " This cannot be undone from this page.",
+      );
+      if (!ok) return;
+      confirmSelfRevoke = true;
+    }
+    try {
+      await api.del(`/v1/matters/${matterId}/acl`, {
+        user_id: userId,
+        perm,
+        confirm_self_revoke: confirmSelfRevoke,
+      });
+      aclQ.reload();
+    } catch (err) {
+      setRevokeError(err instanceof Error ? err.message : "Revoke failed");
+    }
   }
 
   return (
@@ -211,7 +238,7 @@ function AccessView({ matterId }: { matterId: string }) {
         </p>
       )}
 
-      {!authQ.loading && <YourPrincipal oidc={oidc} />}
+      {!authQ.loading && meQ.data && <YourPrincipal oidc={oidc} principal={meQ.data.principal} />}
 
       {aclQ.loading && (
         <div className="animate-pulse space-y-2">
@@ -220,6 +247,11 @@ function AccessView({ matterId }: { matterId: string }) {
         </div>
       )}
       {aclQ.error && <p className="text-sm text-red-600">{aclQ.error}</p>}
+      {revokeError && (
+        <p className="mb-3 rounded-md border border-red-600/30 bg-red-600/5 px-3 py-2 text-sm text-red-600">
+          {revokeError}
+        </p>
+      )}
 
       {aclQ.data && (
         <>

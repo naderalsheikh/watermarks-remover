@@ -4,6 +4,7 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
+import { computeProductionReviewState } from "@/lib/productionReview";
 import { useApiData } from "@/lib/useApi";
 import type { Document, Job, Matter, Policy } from "@/lib/types";
 import { Header } from "@/components/Header";
@@ -66,15 +67,8 @@ function SanitizePanel({
         : Promise.resolve(null),
     `inspect-for-decisions:${matterId}:${docId}:${isProduction}:${latestInspectJob?.id ?? ""}`,
   );
-  const approveSubtypeCounts = new Map<string, number>();
-  for (const f of inspectQ.data?.result?.findings ?? []) {
-    if (f.requires_approval && f.policy_subtype) {
-      approveSubtypeCounts.set(f.policy_subtype, (approveSubtypeCounts.get(f.policy_subtype) ?? 0) + 1);
-    }
-  }
-  const approveSubtypes = [...approveSubtypeCounts.keys()].sort();
-  const hasPerFindingReview = isProduction && !!latestInspectJob && !inspectQ.loading;
-  const needsFallbackGate = isProduction && !hasPerFindingReview;
+  const { hasPerFindingReview, needsFallbackGate, approveSubtypeCounts, approveSubtypes } =
+    computeProductionReviewState(isProduction, !!latestInspectJob, inspectQ);
 
   async function submit() {
     setSubmitting(true);
@@ -120,16 +114,24 @@ function SanitizePanel({
       {needsFallbackGate && (
         <div className="rounded-md border border-amber-600/40 bg-amber-600/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
           <p className="font-medium">
-            {latestInspectJob
-              ? "Loading findings for per-finding review…"
-              : "No inspect results yet, so per-finding review isn't available."}
+            {!latestInspectJob
+              ? "No inspect results yet, so per-finding review isn't available."
+              : inspectQ.loading
+                ? "Loading findings for per-finding review…"
+                : "Couldn't load findings for per-finding review."}
           </p>
+          {latestInspectJob && !inspectQ.loading && inspectQ.error && (
+            <p className="mt-1 font-mono text-red-700 dark:text-red-400">{inspectQ.error}</p>
+          )}
           <p className="mt-1">
             Findings this policy marks &quot;approve&quot; (comments, tracked changes, hidden
             content, embedded objects, attachments, links, and more) will be{" "}
             <strong>kept as-is</strong>, not reviewed one by one. Each one will be listed
             explicitly in the resulting manifest — the derivative will not silently look
-            cleaner than it is. Run Inspect first to review findings individually instead.
+            cleaner than it is.{" "}
+            {latestInspectJob && !inspectQ.loading && inspectQ.error
+              ? "Retry loading findings, or proceed only once you accept that below."
+              : "Run Inspect first to review findings individually instead."}
           </p>
           <label className="mt-2 flex items-center gap-2">
             <input

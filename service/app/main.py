@@ -145,6 +145,12 @@ class AclBody(BaseModel):
     # "operator", or another principal's "oidc:<hash>" subject.
     user_id: str = OPERATOR
     perm: str
+    # DELETE only: revoking your own admin/read grant is a self-lockout
+    # risk (losing visibility into, or control over, a matter you may
+    # still need). Not an outright block like the last-admin case in
+    # acl.revoke -- an admin may legitimately want to step back after
+    # handing off -- but it must be a deliberate act, not a stray click.
+    confirm_self_revoke: bool = False
 
 
 log = logging.getLogger("counselclear")
@@ -1033,7 +1039,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     ):
         _require(matter_id, "admin", s, user)
         _matter(matter_id, s)
-        revoke(s, matter_id, body.user_id, body.perm)
+        if (
+            body.user_id == user
+            and body.perm in ("admin", "read")
+            and not body.confirm_self_revoke
+        ):
+            raise HTTPException(
+                400,
+                f"revoking your own {body.perm!r} grant requires confirm_self_revoke=true "
+                "(self-lockout guard)",
+            )
+        try:
+            revoke(s, matter_id, body.user_id, body.perm)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
         append_event(
             s,
             matter_id=matter_id,

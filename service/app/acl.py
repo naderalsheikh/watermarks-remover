@@ -35,6 +35,21 @@ def grant(s: Session, matter_id: str, user_id: str, perm: str) -> None:
 
 
 def revoke(s: Session, matter_id: str, user_id: str, perm: str) -> None:
+    """Delete one (matter, user, perm) grant.
+
+    Refuses to remove the matter's *last* admin grant, full stop -- no
+    confirmation flag overrides this (see app.main.delete_acl for that;
+    it's a separate, narrower self-lockout guard). Granting admin itself
+    requires the admin perm (app.main.put_acl's _require call), so a
+    matter that ever reaches zero admin grants can never have one added
+    back through the API again -- permanently locking out ACL management
+    on that matter. Enforced here, at the function callers actually use,
+    rather than only in the one route that calls it today.
+    """
+    if perm == "admin" and has_perm(s, matter_id, user_id, "admin"):
+        admin_count = s.query(MatterAcl).filter_by(matter_id=matter_id, perm="admin").count()
+        if admin_count <= 1:
+            raise ValueError("cannot revoke the last admin grant on this matter")
     s.query(MatterAcl).filter_by(matter_id=matter_id, user_id=user_id, perm=perm).delete()
     s.commit()
 

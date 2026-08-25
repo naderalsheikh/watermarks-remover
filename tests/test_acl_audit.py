@@ -147,6 +147,80 @@ def test_grant_unknown_perm_is_400(env):
     assert r.status_code == 400
 
 
+def test_revoke_rejects_removing_the_last_admin_grant(env):
+    """acl.revoke must never let a matter's admin-grant count reach zero:
+    granting admin itself requires the admin perm (put_acl's _require), so
+    a matter that ever hits zero admins could never have one added back
+    through the API again -- permanently locking out ACL management on
+    that matter."""
+    c, matter, _, _, _ = env
+    # operator is the sole admin here (bootstrap_operator on matter create).
+    r = c.request(
+        "DELETE",
+        f"/v1/matters/{matter['id']}/acl",
+        json={"user_id": "operator", "perm": "admin", "confirm_self_revoke": True},
+    )
+    assert r.status_code == 400
+    assert "last admin" in r.json()["detail"]
+    # refused, not silently no-op'd -- operator still has admin.
+    grants = c.get(f"/v1/matters/{matter['id']}/acl").json()["grants"]
+    operator_row = next(g for g in grants if g["user_id"] == "operator")
+    assert "admin" in operator_row["perms"]
+
+
+def test_revoke_allows_removing_admin_when_another_admin_remains(env):
+    c, matter, _, _, _ = env
+    c.put(f"/v1/matters/{matter['id']}/acl", json={"user_id": "second-admin", "perm": "admin"})
+    r = c.request(
+        "DELETE",
+        f"/v1/matters/{matter['id']}/acl",
+        json={"user_id": "operator", "perm": "admin", "confirm_self_revoke": True},
+    )
+    assert r.status_code == 200
+    # operator really did lose admin -- proven by losing access to the
+    # admin-gated ACL listing itself, not by re-reading it as operator
+    # (which would no longer be authorized to).
+    assert c.get(f"/v1/matters/{matter['id']}/acl").status_code == 403
+
+
+def test_revoking_own_admin_or_read_requires_confirmation(env):
+    """A self-revoke of admin/read must be a deliberate act, not a stray
+    click -- distinct from the last-admin case above, which is refused
+    outright with no override at all."""
+    c, matter, _, _, _ = env
+    c.put(f"/v1/matters/{matter['id']}/acl", json={"user_id": "second-admin", "perm": "admin"})
+
+    without_confirm = c.request(
+        "DELETE",
+        f"/v1/matters/{matter['id']}/acl",
+        json={"user_id": "operator", "perm": "read"},
+    )
+    assert without_confirm.status_code == 400
+    assert "confirm_self_revoke" in without_confirm.json()["detail"]
+    grants = c.get(f"/v1/matters/{matter['id']}/acl").json()["grants"]
+    assert "read" in next(g for g in grants if g["user_id"] == "operator")["perms"]
+
+    with_confirm = c.request(
+        "DELETE",
+        f"/v1/matters/{matter['id']}/acl",
+        json={"user_id": "operator", "perm": "read", "confirm_self_revoke": True},
+    )
+    assert with_confirm.status_code == 200
+
+
+def test_revoking_someone_elses_read_needs_no_self_confirmation(env):
+    """The confirmation gate is specifically about self-revocation --
+    an admin revoking another principal's read access is unaffected."""
+    c, matter, _, _, _ = env
+    c.put(f"/v1/matters/{matter['id']}/acl", json={"user_id": "paralegal", "perm": "read"})
+    r = c.request(
+        "DELETE",
+        f"/v1/matters/{matter['id']}/acl",
+        json={"user_id": "paralegal", "perm": "read"},
+    )
+    assert r.status_code == 200
+
+
 def test_get_acl_lists_current_grants(env):
     """The Access panel (web/app/matters/access/page.tsx) needs to show
     who currently has what -- there was no read endpoint for that at all
