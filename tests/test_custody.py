@@ -169,6 +169,37 @@ def test_emit_manifest_shape():
     assert "operator" not in minimal and "matter" not in minimal
 
 
+def test_emit_manifest_layer_b_strips_cleaned_bytes():
+    """Regression: PR 20's _layer_b_rewrite() return value carries the
+    rewritten bytes under "cleaned" (reused by clean_to_bundle as the
+    derivative payload) alongside JSON-safe metadata. emit_manifest must
+    never persist that payload into the manifest — it isn't manifest
+    content, and json.dumps on it crashes the job outright (caught live:
+    "TypeError: Object of type bytes is not JSON serializable" on every
+    real Layer B run before this fix)."""
+    m = emit_manifest(
+        original_name="x.txt",
+        original_sha256="0" * 64,
+        original_bytes=1,
+        derivative_name_="x.external.txt",
+        derivative_sha256="1" * 64,
+        derivative_bytes=1,
+        policy_id="external_sharing",
+        actions=[],
+        processor={},
+        layer_b={
+            "cleaned": b"rewritten bytes should never reach the manifest",
+            "strength": "preserve",
+            "backend": "ollama",
+            "mode": "rewritten",
+            "meaning_lock_ok": True,
+        },
+    )
+    assert "cleaned" not in m["layer_b"]
+    assert m["layer_b"]["strength"] == "preserve"
+    json.dumps(m)  # must not raise
+
+
 def test_write_manifest_is_write_once(tmp_path):
     m = {"manifest_version": 1}
     p1, c1 = write_manifest(tmp_path, m)

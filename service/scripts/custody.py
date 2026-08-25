@@ -151,7 +151,10 @@ def emit_manifest(
         "attestation_kind": attestation_kind,
     }
     if layer_b is not None:
-        manifest["layer_b"] = dict(layer_b)
+        # "cleaned" carries the rewritten bytes themselves (engine_api._layer_b_rewrite's
+        # return value, reused as the derivative payload upstream of here) — never
+        # manifest content, and not JSON-serializable in the first place.
+        manifest["layer_b"] = {k: v for k, v in layer_b.items() if k != "cleaned"}
     if operator_id is not None:
         manifest["operator"] = {"id": str(operator_id)}
     if matter_id is not None:
