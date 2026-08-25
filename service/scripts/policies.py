@@ -627,28 +627,42 @@ NO_DECISION_MARKER = "no operator decision was supplied"
 # audit no_decision_count) would be dishonest in the opposite direction, so
 # the UI must be able to tell the two apart by string.
 OPERATOR_KEPT_MARKER = "reviewed and kept by operator"
+# A third, narrower case: _APPROVE_RESOLVES_TO maps every approve-default
+# subtype to the sharing-path action for that subtype -- for exactly one,
+# layer_a_non_body, that's itself "keep" (external_sharing's own row keeps
+# it). An operator who explicitly approves that subtype -- choosing strip,
+# not keep -- still ends up with reason "operator_approved" and action
+# "keep": a structural no-op the operator didn't ask for and wouldn't
+# expect from clicking "Approve". Confirmed by checking every
+# _APPROVE_RESOLVES_TO value directly, not assumed: layer_a_non_body is
+# the only subtype where this can happen.
+APPROVED_BUT_NO_OP_MARKER = "approved, but this subtype has no strip action under this policy"
 
 
 def _approve_default_keep_records(plan: ActionPlan) -> list[ActionRecord]:
     """Explicit record for every present subtype whose approve-default
     resolved to "keep" -- whether because no operator decision was
-    supplied (plan_actions: reason "no_decision") or because the operator
-    explicitly chose to keep it (reason "operator_kept"). Without this, a
-    subtype like tracked_changes or comments_and_notes that was found but
-    resolved to "keep" produces *no* ActionRecord at all -- the manifest's
-    actions list simply omits it, while findings_before still lists it and
+    supplied (reason "no_decision"), the operator explicitly chose to
+    keep it (reason "operator_kept"), or the operator approved it but
+    that subtype's approve-resolution is itself "keep" (reason
+    "operator_approved" with action "keep" -- see
+    APPROVED_BUT_NO_OP_MARKER). Without this, a subtype like
+    tracked_changes or comments_and_notes that was found but resolved to
+    "keep" produces *no* ActionRecord at all -- the manifest's actions
+    list simply omits it, while findings_before still lists it and
     verification.pass can still read true (reinspect_targeted_gone
     trivially holds when nothing was targeted). That combination -- a
     done, verification-passed sanitize job whose derivative still contains
     a high-consequence finding, with nothing in the manifest saying so --
     is exactly the silently-wrong outcome this product's own trust bar
-    forbids, for an undecided finding and a reviewed-and-kept one alike.
-    Single choke point in apply_actions rather than one fix per (kind,
-    format) branch, so it covers every document kind uniformly, including
-    ones added later."""
+    forbids, for an undecided finding, a reviewed-and-kept one, and an
+    approved-but-structurally-inert one alike. Single choke point in
+    apply_actions rather than one fix per (kind, format) branch, so it
+    covers every document kind uniformly, including ones added later."""
     records = []
     for st in sorted(plan.present_subtypes):
-        reason = plan.actions.get(st, {}).get("reason")
+        eff = plan.actions.get(st, {})
+        reason, action = eff.get("reason"), eff.get("action")
         if reason == "no_decision":
             records.append(
                 ActionRecord(
@@ -664,6 +678,14 @@ def _approve_default_keep_records(plan: ActionPlan) -> list[ActionRecord]:
                     st,
                     "keep",
                     f"kept: {OPERATOR_KEPT_MARKER} for this approve-default finding",
+                )
+            )
+        elif reason == "operator_approved" and action == "keep":
+            records.append(
+                ActionRecord(
+                    st,
+                    "keep",
+                    f"kept: {APPROVED_BUT_NO_OP_MARKER} ({st})",
                 )
             )
     return records

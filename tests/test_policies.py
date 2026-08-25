@@ -159,6 +159,47 @@ def test_operator_decisions_are_honored():
         plan_actions(res, "production", decisions={"made_up_subtype": "approve"})
 
 
+def test_operator_approved_subtype_that_resolves_to_keep_is_disclosed():
+    """layer_a_non_body is the one approve-default subtype whose
+    _APPROVE_RESOLVES_TO value is itself "keep" (external_sharing's own
+    row keeps it -- confirmed by checking every _APPROVE_RESOLVES_TO
+    value directly, not assumed). An operator who explicitly approves it
+    -- choosing strip, not keep -- still ends up with action "keep": a
+    structural no-op the operator didn't ask for and wouldn't expect from
+    clicking "Approve". Before this test's fix, that combination (reason
+    "operator_approved", action "keep") produced no ActionRecord at all
+    -- neither the no_decision nor operator_kept branches of
+    _approve_default_keep_records matched it, so it was invisible in the
+    manifest exactly like the other two silent-omission cases this file
+    already covers."""
+    from findings import Finding, FindingLocation
+    from policies import _approve_default_keep_records
+
+    finding = Finding(
+        category="invisible_text",
+        subtype="layer_a_non_body",
+        format="docx",
+        location=FindingLocation(pane="other"),
+        risk_level="high",
+        confidence="probable",
+        action_recommended="flag",
+    )
+    result = {"kind": "container", "report": None, "findings": [finding]}
+    plan = plan_actions(
+        result,
+        "production",
+        decisions={"layer_a_non_body": "approve"},
+        source_sha256="0" * 64,
+    )
+    assert plan.actions["layer_a_non_body"] == {"action": "keep", "reason": "operator_approved"}
+
+    records = _approve_default_keep_records(plan)
+    assert len(records) == 1
+    assert records[0].subtype == "layer_a_non_body"
+    assert records[0].action == "keep"
+    assert "approved, but this subtype has no strip action" in records[0].detail
+
+
 def test_signed_pdf_requires_attestation():
     res = inspect_bytes(_load("signed.pdf"), "signed.pdf")
     with pytest.raises(PolicyError, match="attestation"):
