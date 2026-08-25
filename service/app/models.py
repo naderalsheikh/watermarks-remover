@@ -128,3 +128,27 @@ class Job(Base):
     worker_image: Mapped[str] = mapped_column(String(200), default="")
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class AttestationUse(Base):
+    """Durable, race-free single-use record for a Layer B attestation jti.
+
+    A dedicated table (rather than a uniqueness check against
+    Job.layer_b->>'jti') so the guarantee is a real database constraint:
+    the jti is the primary key, so a second INSERT for the same token
+    raises IntegrityError instead of racing a read-then-write check across
+    threads, gunicorn workers, or process restarts (app.security's
+    _consumed_jtis in-memory set is only the fast path for the common
+    single-process case). Written in the same transaction as the Job row
+    it authorizes (see app.main.sanitize_job) so the two can never diverge:
+    either both commit or neither does. Job.layer_b keeps carrying the jti
+    too — this table is purely the uniqueness backstop, not a replacement
+    for the audit-facing column.
+    """
+
+    __tablename__ = "attestation_uses"
+
+    jti: Mapped[str] = mapped_column(String(32), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), index=True)
+    matter_id: Mapped[str] = mapped_column(String(16), index=True)
+    created_utc: Mapped[str] = mapped_column(String(32), default=_now)

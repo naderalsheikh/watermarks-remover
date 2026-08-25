@@ -130,9 +130,12 @@ ATTEST_LABEL = "content_altering"
 ATTEST_STRENGTHS = ("preserve", "paraphrase")
 
 # Single-use jti tracking. In-memory: like LoginThrottle, this process owns
-# the fast path; the durable single-use record is the Job.layer_b.jti column
-# (an issued jti that already backs a job is refused at the route) and the
-# audit chain. A process restart clears the set — the DB record remains.
+# the fast path only — the durable, race-free record is the attestation_uses
+# table (app.models.AttestationUse; jti is its primary key), written in the
+# same transaction as the job it authorizes (app.main.sanitize_job). A
+# process restart clears this set; the DB row is what actually survives a
+# restart or a second worker process and makes a duplicate INSERT fail
+# instead of racing a read-then-write check.
 _consumed_jtis: set[str] = set()
 
 
