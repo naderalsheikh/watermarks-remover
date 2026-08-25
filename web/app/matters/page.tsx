@@ -15,6 +15,14 @@ export default function MattersPage() {
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  // Filters only the matters this page already fetched (server-capped at
+  // `limit`, default 100) — not a server-side search across every matter.
+  // The "Showing N of M" line below still applies on top of this, so the
+  // two don't silently combine into a claim of completeness neither one
+  // makes on its own.
+  const filtered =
+    data?.matters.filter((m) => m.name.toLowerCase().includes(search.trim().toLowerCase())) ?? [];
 
   async function createMatter(e: React.FormEvent) {
     e.preventDefault();
@@ -87,25 +95,42 @@ export default function MattersPage() {
           <>
             {data.total > data.matters.length && (
               <p className="mb-2 text-xs text-muted">
-                Showing {data.matters.length} of {data.total} matters — narrow with a name filter
-                to see more (not yet available).
+                Loaded {data.matters.length} of {data.total} matters — search below only covers
+                what&apos;s loaded.
               </p>
             )}
-            <ul className="divide-y divide-border rounded-md border border-border">
-              {data.matters.map((m) => (
-                <li key={m.id}>
-                  <Link
-                    href={`/matters/view?id=${m.id}`}
-                    className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-                  >
-                    <span className="font-medium">{m.name}</span>
-                    <span className="text-xs text-muted">
-                      {new Date(m.created_utc).toLocaleDateString()}
-                    </span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search matters by name…"
+              className="mb-3 w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-accent"
+            />
+            {filtered.length === 0 ? (
+              <p className="text-sm text-muted">No matters match &quot;{search}&quot;.</p>
+            ) : (
+              <>
+                {search.trim() && filtered.length < data.matters.length && (
+                  <p className="mb-2 text-xs text-muted">
+                    {filtered.length} of {data.matters.length} loaded matters match.
+                  </p>
+                )}
+                <ul className="divide-y divide-border rounded-md border border-border">
+                  {filtered.map((m) => (
+                    <li key={m.id}>
+                      <Link
+                        href={`/matters/view?id=${m.id}`}
+                        className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                      >
+                        <span className="font-medium">{m.name}</span>
+                        <span className="text-xs text-muted">
+                          {new Date(m.created_utc).toLocaleDateString()}
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
           </>
         )}
       </main>

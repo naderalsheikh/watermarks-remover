@@ -14,7 +14,14 @@ export type Document = {
 export type Policy = { id: string; label: string; description: string };
 
 export type JobKind = "inspect" | "sanitize";
-export type JobStatus = "queued" | "running" | "done" | "failed";
+// service/app/runner.py's terminal set is ("done", "refused", "failed") —
+// "refused" is a distinct, correct outcome (policy declined to produce a
+// derivative, e.g. a macro-enabled file under a mutating policy), not a
+// bug or a plain failure. It was missing here entirely until this fix,
+// which meant a refused job rendered with an undefined StatusBadge style
+// — exactly the kind of silent-wrong presentation this product's trust
+// bar exists to catch.
+export type JobStatus = "queued" | "running" | "done" | "failed" | "refused";
 
 export type FindingLocation = {
   part: string | null;

@@ -216,6 +216,79 @@ function SanitizePanel({
   );
 }
 
+type StatusTone = "muted" | "amber" | "emerald" | "red" | "orange";
+
+const STATUS_TONE_CLASS: Record<StatusTone, string> = {
+  muted: "text-muted",
+  amber: "text-amber-700 dark:text-amber-400",
+  emerald: "text-emerald-600",
+  red: "text-red-600",
+  orange: "text-orange-700 dark:text-orange-400",
+};
+
+const STATUS_TONE_LABEL: Record<StatusTone, string> = {
+  muted: "Not reviewed",
+  amber: "In progress / needs sanitize",
+  emerald: "Sanitized",
+  red: "Failed",
+  orange: "Refused",
+};
+
+// The single "where are we, what's next" line for a document — the point
+// isn't just showing the latest job's raw status (already visible in the
+// job list below), it's translating that into what a reviewer should
+// actually do next. "Sanitized with <policy>" is deliberately the
+// strongest claim made here: never "clean" or "safe", since a sanitize
+// job can still have kept findings without review (see NoDecisionWarning
+// on the job page) — this line just points at the job, it doesn't
+// re-assert an outcome the job page itself has to qualify.
+function documentNextStep(docJobs: Job[]): { tone: StatusTone; label: string; detail: string } {
+  if (docJobs.length === 0) {
+    return {
+      tone: "muted",
+      label: "Not yet reviewed",
+      detail: "Inspect to see what's inside, or sanitize directly.",
+    };
+  }
+  const latest = docJobs[0];
+  if (latest.status === "queued" || latest.status === "running") {
+    return {
+      tone: "amber",
+      label: `${latest.kind === "sanitize" ? "Sanitize" : "Inspect"} in progress`,
+      detail: "Checking again automatically.",
+    };
+  }
+  if (latest.status === "failed") {
+    return { tone: "red", label: "Last job failed", detail: "See job details below." };
+  }
+  if (latest.status === "refused") {
+    return {
+      tone: "orange",
+      label: "Refused by policy",
+      detail: "No derivative was produced — see job details below.",
+    };
+  }
+  if (latest.kind === "sanitize") {
+    return {
+      tone: "emerald",
+      label: `Sanitized with ${latest.policy_id}`,
+      detail: "Open the job for findings, custody, and what was kept.",
+    };
+  }
+  const hasDoneSanitize = docJobs.some((j) => j.kind === "sanitize" && j.status === "done");
+  return hasDoneSanitize
+    ? {
+        tone: "amber",
+        label: "Inspected again since last sanitize",
+        detail: "The earlier sanitize predates this inspection — review before relying on it.",
+      }
+    : {
+        tone: "amber",
+        label: "Inspected — not yet sanitized",
+        detail: "Choose a policy and sanitize when ready.",
+      };
+}
+
 function DocumentRow({
   matterId,
   doc,
@@ -235,6 +308,7 @@ function DocumentRow({
   const docJobs = jobs
     .filter((j) => j.document_id === doc.id)
     .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
+  const nextStep = documentNextStep(docJobs);
 
   async function inspect() {
     setInspecting(true);
@@ -256,6 +330,10 @@ function DocumentRow({
           <p className="truncate font-medium">{doc.filename}</p>
           <p className="truncate font-mono text-xs text-muted" title={doc.sha256}>
             {formatBytes(doc.bytes)} · sha256:{doc.sha256.slice(0, 16)}…
+          </p>
+          <p className={`mt-1 text-xs ${STATUS_TONE_CLASS[nextStep.tone]}`}>
+            <span className="font-medium">{nextStep.label}</span>
+            <span className="text-muted"> — {nextStep.detail}</span>
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
@@ -312,6 +390,10 @@ function MatterStats({ documents, jobs }: { documents: Document[]; jobs: Job[] }
   const done = jobs.filter((j) => j.status === "done").length;
   const running = jobs.filter((j) => j.status === "queued" || j.status === "running").length;
   const failed = jobs.filter((j) => j.status === "failed").length;
+  // "refused" (a policy correctly declining to produce a derivative, e.g.
+  // a macro-enabled file) previously fell through every bucket here —
+  // uncounted, so the summary looked tidier than it actually was.
+  const refused = jobs.filter((j) => j.status === "refused").length;
   return (
     <div className="mb-6 flex flex-wrap gap-4 text-sm text-muted">
       <span>
@@ -330,6 +412,11 @@ function MatterStats({ documents, jobs }: { documents: Document[]; jobs: Job[] }
       {failed > 0 && (
         <span className="text-red-600">
           <span className="font-medium">{failed}</span> failed
+        </span>
+      )}
+      {refused > 0 && (
+        <span className="text-orange-700 dark:text-orange-400">
+          <span className="font-medium">{refused}</span> refused by policy
         </span>
       )}
     </div>
@@ -369,6 +456,24 @@ function MatterView({ matterId }: { matterId: string }) {
       setUploading(false);
     }
   }
+
+  const [docSearch, setDocSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | StatusTone>("all");
+  // Both filters run only against the documents/jobs already fetched
+  // (server-capped at `limit`) — same "loaded, not the whole matter"
+  // scope as the matters-list search.
+  const filteredDocs = (docsQ.data?.documents ?? []).filter((doc) => {
+    if (docSearch.trim() && !doc.filename.toLowerCase().includes(docSearch.trim().toLowerCase())) {
+      return false;
+    }
+    if (statusFilter !== "all") {
+      const docJobs = (jobsQ.data?.jobs ?? [])
+        .filter((j) => j.document_id === doc.id)
+        .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
+      if (documentNextStep(docJobs).tone !== statusFilter) return false;
+    }
+    return true;
+  });
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
@@ -436,21 +541,60 @@ function MatterView({ matterId }: { matterId: string }) {
         <>
           {docsQ.data.total > docsQ.data.documents.length && (
             <p className="mb-2 text-xs text-muted">
-              Showing {docsQ.data.documents.length} of {docsQ.data.total} documents.
+              Loaded {docsQ.data.documents.length} of {docsQ.data.total} documents — search and
+              filters below only cover what&apos;s loaded.
             </p>
           )}
-          <ul className="divide-y divide-border rounded-md border border-border">
-            {docsQ.data.documents.map((doc) => (
-              <DocumentRow
-                key={doc.id}
-                matterId={matterId}
-                doc={doc}
-                jobs={jobsQ.data?.jobs ?? []}
-                policies={policiesQ.data?.policies ?? []}
-                onJobStarted={jobsQ.reload}
-              />
-            ))}
-          </ul>
+          <div className="mb-3 space-y-2">
+            <input
+              value={docSearch}
+              onChange={(e) => setDocSearch(e.target.value)}
+              placeholder="Search documents by filename…"
+              className="w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-accent"
+            />
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                onClick={() => setStatusFilter("all")}
+                className={`rounded px-2 py-1 text-xs ${
+                  statusFilter === "all"
+                    ? "bg-accent text-white"
+                    : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                }`}
+              >
+                All
+              </button>
+              {(Object.keys(STATUS_TONE_LABEL) as StatusTone[]).map((tone) => (
+                <button
+                  key={tone}
+                  onClick={() => setStatusFilter(tone)}
+                  className={`rounded px-2 py-1 text-xs ${
+                    statusFilter === tone
+                      ? "bg-accent text-white"
+                      : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                  }`}
+                >
+                  {STATUS_TONE_LABEL[tone]}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {filteredDocs.length === 0 ? (
+            <p className="text-sm text-muted">No loaded documents match this search/filter.</p>
+          ) : (
+            <ul className="divide-y divide-border rounded-md border border-border">
+              {filteredDocs.map((doc) => (
+                <DocumentRow
+                  key={doc.id}
+                  matterId={matterId}
+                  doc={doc}
+                  jobs={jobsQ.data?.jobs ?? []}
+                  policies={policiesQ.data?.policies ?? []}
+                  onJobStarted={jobsQ.reload}
+                />
+              ))}
+            </ul>
+          )}
         </>
       )}
     </main>

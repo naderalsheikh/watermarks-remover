@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
@@ -282,10 +282,23 @@ function JobSkeleton() {
 }
 
 function JobView({ matterId, jobId }: { matterId: string; jobId: string }) {
-  const { data: job, error, loading } = useApiData(
+  const { data: job, error, loading, reload } = useApiData(
     () => api.get<Job>(`/v1/matters/${matterId}/jobs/${jobId}`),
     `job:${matterId}:${jobId}`,
   );
+  const isPending = job?.status === "queued" || job?.status === "running";
+  // Job execution is synchronous within the request that starts it (see
+  // service/app/main.py's _execute_job), so "running" is rarely observed
+  // from the tab that clicked Inspect/Sanitize — it shows up when a
+  // second tab, or someone else's session, is looking at the same job
+  // mid-flight. Poll rather than leave that tab stuck on stale "running"
+  // until a manual reload, which is exactly the gap this page's own copy
+  // used to admit.
+  useEffect(() => {
+    if (!isPending) return;
+    const id = setInterval(reload, 3000);
+    return () => clearInterval(id);
+  }, [isPending, reload]);
   const manifestReady = job?.kind === "sanitize" && job.status === "done";
   const { data: manifest } = useApiData(
     () =>
@@ -337,9 +350,20 @@ function JobView({ matterId, jobId }: { matterId: string; jobId: string }) {
                   {job.error}
                 </div>
               )}
-              {job.status === "running" && (
+              {job.status === "refused" && (
+                <div className="mt-3 rounded-md border border-orange-600/30 bg-orange-600/5 px-4 py-3 text-sm text-orange-800 dark:text-orange-300">
+                  <p className="font-medium">Refused — no derivative was produced.</p>
+                  <p className="mt-1">
+                    The policy declined to sanitize this document rather than ship an
+                    incomplete or unsafe result.
+                    {job.error ? ` ${job.error}` : ""}
+                  </p>
+                </div>
+              )}
+              {(job.status === "running" || job.status === "queued") && (
                 <div className="mt-3 rounded-md border border-amber-600/30 bg-amber-600/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-400">
-                  Still running — this page doesn&apos;t auto-refresh yet; reload to check again.
+                  {job.status === "running" ? "Running" : "Queued"} — this page checks again
+                  automatically every few seconds.
                 </div>
               )}
               {job.result?.verification_pass !== undefined && (
