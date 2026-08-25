@@ -524,9 +524,36 @@ def _apply_pdf(
             dest = tmpdir / "out.pdf"
             src.write_bytes(data)
             msgs = _exiftool_privacy_pdf(src, dest)
-            return dest.read_bytes(), [
-                ActionRecord("authoring_props", "strip_listed", m) for m in msgs
-            ]
+            out = dest.read_bytes()
+            records = [ActionRecord("authoring_props", "strip_listed", m) for m in msgs]
+            # This path never calls clean_pdf, so embedded-image metadata
+            # (EXIF/GPS/C2PA inside a JPEG XObject) is never touched here --
+            # a real gap in privacy_only's own stated purpose (jpeg_gps:
+            # strip), not fixed in this pass (see docs/pdf-deep-image-
+            # metadata.md's "Known gap" section: whether privacy_only
+            # *should* reach into embedded images is a policy-semantics
+            # question, not something to decide implicitly by staying
+            # silent). What must not happen regardless is a derivative that
+            # looks like a complete privacy strip when GPS-bearing image
+            # metadata survived untouched inside it -- so disclose it
+            # explicitly whenever it's actually present, the same as any
+            # other policy's embedded_image_metadata record (job page's
+            # EmbeddedImageNotice already renders this prefix as "not
+            # cleared" with no frontend change needed).
+            meta_present, prov_present = container_meta.pdf_deep_image_scan(out)
+            if meta_present:
+                records.append(
+                    ActionRecord(
+                        "embedded_image_metadata",
+                        "flag",
+                        "embedded-image metadata present (may include GPS) but not "
+                        "stripped: privacy_only's PDF path does not process embedded "
+                        "images, only /Author and standalone JPEG uploads"
+                        + (", including C2PA/JUMBF provenance" if prov_present else "")
+                        + " (see docs/pdf-deep-image-metadata.md)",
+                    )
+                )
+            return out, records
     with tempfile.TemporaryDirectory(prefix="wm-policy-") as tmp:
         tmpdir = Path(tmp)
         src = tmpdir / "in.pdf"

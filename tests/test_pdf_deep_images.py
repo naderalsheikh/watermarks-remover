@@ -38,6 +38,8 @@ from container_meta import (
     pdf_deep_image_scan,
     strip_pdf_image_metadata,
 )
+from engine_api import inspect_bytes
+from policies import apply_actions, plan_actions
 
 NEED_EXIFTOOL_QPDF = pytest.mark.skipif(
     not (shutil.which("exiftool") and shutil.which("qpdf")), reason="exiftool and qpdf required"
@@ -518,3 +520,66 @@ def test_clean_to_bundle_fails_closed_without_qpdf_rather_than_ship_unverified(
     out = tmp_path / "bundle"
     with pytest.raises(CustodyError, match="tooling bar"):
         clean_to_bundle(src, out, policy_id="external_sharing", matter_id="m1")
+
+
+@NEED_EXIFTOOL_QPDF
+def test_privacy_only_pdf_discloses_untouched_embedded_image_metadata():
+    """privacy_only's PDF path (policies._apply_pdf's _exiftool_privacy_pdf
+    branch) never calls clean_pdf, so embedded-image metadata (which can
+    include GPS -- exactly what privacy_only's own jpeg_gps: "strip" cell
+    promises to remove for standalone JPEGs) is never touched when that
+    same content is embedded inside a PDF. Confirmed empirically live
+    against the real API before this fix: a real privacy_only sanitize job
+    on such a PDF listed the embedded-image finding in findings_before but
+    said nothing about it anywhere in actions -- a derivative that looked
+    like a complete privacy strip when GPS-bearing metadata had actually
+    survived untouched inside it.
+
+    This asserts three things together, not just the disclosure text: the
+    manifest explicitly flags it (not silently omits it), the embedded
+    JPEG's scan data is byte-identical before and after -- proving "not
+    stripped" is actually true, not just claimed -- and /Author is still
+    blanked (the one thing this path is supposed to do, unaffected by the
+    new disclosure)."""
+    jpeg = _tagged_real_jpeg(0xE1, b"Exif\x00\x00FakeGPS 37.7749N 122.4194W")
+    pdf = _pdf_with_image_xobject(jpeg)
+
+    res = inspect_bytes(pdf, "photo.pdf")
+    plan = plan_actions(res, "privacy_only")
+    cleaned, records = apply_actions(pdf, plan)
+
+    by_subtype = {r.subtype: r for r in records}
+    assert "embedded_image_metadata" in by_subtype, "no disclosure at all for untouched metadata"
+    assert by_subtype["embedded_image_metadata"].action == "flag"
+    assert "not stripped" in by_subtype["embedded_image_metadata"].detail
+    assert "authoring_props" in by_subtype
+    assert "/Author blanked" in by_subtype["authoring_props"].detail
+
+    # Prove it, don't just claim it: the embedded JPEG's own scan data
+    # (SOS through EOI -- the actual DCT-coded pixel data) must be
+    # byte-identical, not just "the file looks similar".
+    orig_streams = list(_iter_pdf_image_xobjects(pdf))
+    new_streams = list(_iter_pdf_image_xobjects(cleaned))
+    assert len(orig_streams) == len(new_streams) == 1
+    orig_sos = orig_streams[0].find(b"\xff\xda")
+    new_sos = new_streams[0].find(b"\xff\xda")
+    assert orig_streams[0][orig_sos:] == new_streams[0][new_sos:]
+    # And the metadata really is still there -- not stripped despite the
+    # PDF being rewritten by exiftool's /Author blank.
+    assert embedded_image_metadata_present(new_streams[0])
+
+
+@NEED_EXIFTOOL_QPDF
+def test_privacy_only_pdf_without_embedded_image_metadata_has_no_flag():
+    """The counterpart: a PDF with no embedded-image metadata at all must
+    not get the disclosure record either -- it exists specifically to flag
+    real, present-but-untouched metadata, not to appear unconditionally
+    on every privacy_only PDF job."""
+    jpeg = _REAL_JPEG  # no injected APPn metadata
+    pdf = _pdf_with_image_xobject(jpeg)
+
+    res = inspect_bytes(pdf, "clean.pdf")
+    plan = plan_actions(res, "privacy_only")
+    _cleaned, records = apply_actions(pdf, plan)
+
+    assert not any(r.subtype == "embedded_image_metadata" for r in records)

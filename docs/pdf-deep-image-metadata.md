@@ -64,7 +64,7 @@ derivative it couldn't fully verify). The skip path is real and unit-tested
 actually reachable outside the two strict-tooling policies or when calling
 `clean_pdf` directly.
 
-**Known gap, not fixed, flagged rather than silently left implicit**:
+**Known gap, not fixed, now disclosed rather than silently left implicit**:
 `privacy_only`'s PDF path (`_exiftool_privacy_pdf`) is a separate,
 narrower exiftool-only routine that never calls `clean_pdf` at all — a
 `privacy_only` sanitize job on a PDF does not strip embedded-image
@@ -73,6 +73,23 @@ strip, not `strip_all_metadata`) suggests it plausibly should. Whether
 that's the right call for `privacy_only` specifically is a policy-semantics
 question, not a bug in this work — left for a deliberate decision, not
 bundled into this pass.
+
+What *was* fixed: the manifest used to say nothing about this at all —
+`findings_before` would list the embedded-image finding but `actions`
+never mentioned it, so a `privacy_only` derivative could look like a
+complete privacy strip when GPS-bearing image metadata had actually
+survived untouched inside it (confirmed live against the real API before
+the fix: exactly that gap, on a real job). `_apply_pdf` now emits an
+explicit `embedded_image_metadata: flag` record whenever this path
+leaves real metadata behind — same subtype prefix the job page's
+`EmbeddedImageNotice` already renders as "not cleared" for the
+indirect-`/Length` case, so this reached the UI with no frontend change
+at all. Proven, not just claimed: a regression test asserts the embedded
+JPEG's scan data is byte-identical before and after (the "not stripped"
+claim is actually true), that the disclosure record is present when
+metadata is, and absent when it isn't
+(`test_privacy_only_pdf_discloses_untouched_embedded_image_metadata`,
+`test_privacy_only_pdf_without_embedded_image_metadata_has_no_flag`).
 
 **Rejected: the Ghostscript re-encode pass.** It was built (seven
 correctness points from the original design below all addressed —
