@@ -3,26 +3,42 @@
 import { useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { useApiData } from "@/lib/useApi";
+import { usePaginatedList } from "@/lib/usePaginatedList";
 import type { Matter } from "@/lib/types";
 import { Header } from "@/components/Header";
 
+const PAGE_SIZE = 50;
+
 export default function MattersPage() {
-  const { data, error, loading, reload } = useApiData(
-    () => api.get<{ matters: Matter[]; total: number }>("/v1/matters"),
+  const {
+    items: matters,
+    total,
+    error,
+    loading,
+    loadingMore,
+    hasMore,
+    loadMore,
+    reload,
+  } = usePaginatedList(
+    (offset) =>
+      api
+        .get<{ matters: Matter[]; total: number }>(
+          `/v1/matters?limit=${PAGE_SIZE}&offset=${offset}`,
+        )
+        .then((r) => ({ items: r.matters, total: r.total })),
     "matters",
   );
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  // Filters only the matters this page already fetched (server-capped at
-  // `limit`, default 100) — not a server-side search across every matter.
-  // The "Showing N of M" line below still applies on top of this, so the
-  // two don't silently combine into a claim of completeness neither one
-  // makes on its own.
-  const filtered =
-    data?.matters.filter((m) => m.name.toLowerCase().includes(search.trim().toLowerCase())) ?? [];
+  // Filters only the matters loaded so far (accumulated via "Load more")
+  // — not a server-side search across every matter. The load-more control
+  // below still applies on top of this, so the two don't silently combine
+  // into a claim of completeness neither one makes on its own.
+  const filtered = matters.filter((m) =>
+    m.name.toLowerCase().includes(search.trim().toLowerCase()),
+  );
 
   async function createMatter(e: React.FormEvent) {
     e.preventDefault();
@@ -85,17 +101,17 @@ export default function MattersPage() {
             {error}
           </p>
         )}
-        {data && data.matters.length === 0 && (
+        {!loading && matters.length === 0 && (
           <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
             No matters yet — create one above to get started.
           </div>
         )}
 
-        {data && data.matters.length > 0 && (
+        {!loading && matters.length > 0 && (
           <>
-            {data.total > data.matters.length && (
+            {total > matters.length && (
               <p className="mb-2 text-xs text-muted">
-                Loaded {data.matters.length} of {data.total} matters — search below only covers
+                Loaded {matters.length} of {total} matters — search below only covers
                 what&apos;s loaded.
               </p>
             )}
@@ -109,9 +125,9 @@ export default function MattersPage() {
               <p className="text-sm text-muted">No matters match &quot;{search}&quot;.</p>
             ) : (
               <>
-                {search.trim() && filtered.length < data.matters.length && (
+                {search.trim() && filtered.length < matters.length && (
                   <p className="mb-2 text-xs text-muted">
-                    {filtered.length} of {data.matters.length} loaded matters match.
+                    {filtered.length} of {matters.length} loaded matters match.
                   </p>
                 )}
                 <ul className="divide-y divide-border rounded-md border border-border">
@@ -130,6 +146,16 @@ export default function MattersPage() {
                   ))}
                 </ul>
               </>
+            )}
+            {hasMore && (
+              <button
+                type="button"
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="mt-3 w-full rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+              >
+                {loadingMore ? "Loading…" : `Load more (${matters.length} of ${total})`}
+              </button>
             )}
           </>
         )}

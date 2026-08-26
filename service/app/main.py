@@ -635,16 +635,23 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         user: str = Depends(principal),
         s: Session = Depends(db_session),
         limit: int = 100,
+        offset: int = 0,
     ):
         limit = min(max(1, limit), 500)  # server-capped, never unbounded
+        offset = max(0, offset)
         matter_ids = [
             r[0]
             for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
         ]
         base = s.query(Matter).filter(Matter.id.in_(matter_ids))
         total = base.count()
-        matters = base.order_by(Matter.created_utc.desc()).limit(limit)
-        return {"matters": [_matter_dict(m) for m in matters], "total": total}
+        matters = base.order_by(Matter.created_utc.desc()).offset(offset).limit(limit)
+        return {
+            "matters": [_matter_dict(m) for m in matters],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
 
     @app.post("/v1/matters")
     def create_matter(body: MatterBody, user: str = Depends(principal), s: Session = Depends(db_session)):
@@ -726,14 +733,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         user: str = Depends(principal),
         s: Session = Depends(db_session),
         limit: int = 100,
+        offset: int = 0,
     ):
         limit = min(max(1, limit), 500)  # server-capped, never unbounded
+        offset = max(0, offset)
         _require(matter_id, "read", s, user)
         _matter(matter_id, s)
         base = s.query(Document).filter_by(matter_id=matter_id)
         total = base.count()
-        docs = base.order_by(Document.created_utc.desc()).limit(limit)
-        return {"documents": [_doc_dict(d) for d in docs], "total": total}
+        docs = base.order_by(Document.created_utc.desc()).offset(offset).limit(limit)
+        return {
+            "documents": [_doc_dict(d) for d in docs],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
 
     @app.get("/v1/matters/{matter_id}/documents/{doc_id}")
     def get_document(
@@ -905,18 +919,25 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         user: str = Depends(principal),
         s: Session = Depends(db_session),
         limit: int = 100,
+        offset: int = 0,
     ):
         limit = min(max(1, limit), 500)  # server-capped, never unbounded
+        offset = max(0, offset)
         _require(matter_id, "read", s, user)
         _matter(matter_id, s)
         q = s.query(Job).filter_by(matter_id=matter_id)
         if document_id:
             q = q.filter_by(document_id=document_id)
         total = q.count()
-        jobs = q.order_by(Job.created_utc.desc()).limit(limit).all()
+        jobs = q.order_by(Job.created_utc.desc()).offset(offset).limit(limit).all()
         # List view omits the full result payload (it can be large for
         # inspect jobs); the detail route carries it.
-        return {"jobs": [_job_dict(j, include_result=False) for j in jobs], "total": total}
+        return {
+            "jobs": [_job_dict(j, include_result=False) for j in jobs],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}")
     def get_job(
@@ -1068,18 +1089,31 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         matter_id: str,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        limit: int = 100,
+        offset: int = 0,
     ):
+        limit = min(max(1, limit), 500)  # server-capped, never unbounded
+        offset = max(0, offset)
         _require(matter_id, "admin", s, user)
-        rows = (
+        # Chain verification is inherently sequential from genesis -- it
+        # needs every row, not just the page being displayed, so it always
+        # runs against the full set regardless of pagination. Already
+        # fetched in full before this change too; paginating the *response*
+        # doesn't need a second query, just a slice of what's already here.
+        all_rows = (
             s.query(AuditEvent)
             .filter(AuditEvent.matter_id == matter_id)
             .order_by(AuditEvent.seq)
             .all()
         )
-        ok, detail = verify_chain(rows)
+        ok, detail = verify_chain(all_rows)
+        page_rows = all_rows[offset : offset + limit]
         return {
             "chain_ok": ok,
             "chain_detail": detail,
+            "total": len(all_rows),
+            "offset": offset,
+            "limit": limit,
             "events": [
                 {
                     "id": e.id,
@@ -1091,7 +1125,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     "row_hash": e.row_hash,
                     "at": e.at,
                 }
-                for e in rows
+                for e in page_rows
             ],
         }
 

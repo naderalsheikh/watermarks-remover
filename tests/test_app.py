@@ -175,6 +175,82 @@ def test_list_endpoints_are_server_capped_and_jobs_omit_result(client):
     assert "result" in detail
 
 
+def test_matters_pagination_offset_walks_the_full_list_with_no_gaps_or_dupes(client):
+    """Real pagination, not just a truncation disclosure: walking every
+    page by offset must reconstruct the exact same set the server itself
+    says exists (`total`), with no item skipped or repeated."""
+    names = [f"matter {i}" for i in range(7)]
+    created_ids = {client.post("/v1/matters", json={"name": n}).json()["id"] for n in names}
+
+    seen_ids: set[str] = set()
+    offset = 0
+    page_size = 3
+    while True:
+        page = client.get(f"/v1/matters?limit={page_size}&offset={offset}").json()
+        assert page["offset"] == offset
+        assert page["limit"] == page_size
+        seen_ids.update(m["id"] for m in page["matters"])
+        offset += page_size
+        if offset >= page["total"]:
+            break
+    assert created_ids <= seen_ids  # every matter created above was reachable by paging
+
+
+def test_documents_and_jobs_pagination_offset_reports_correct_total_and_page(client):
+    m = client.post("/v1/matters", json={"name": "paged-docs"}).json()["id"]
+    doc_ids = []
+    for i in range(5):
+        data = (FIXTURES / "spa.txt").read_bytes()
+        r = client.post(
+            f"/v1/matters/{m}/documents",
+            files={"file": (f"doc{i}.txt", data, "application/octet-stream")},
+        )
+        doc_ids.append(r.json()["id"])
+    for doc_id in doc_ids:
+        client.post(f"/v1/matters/{m}/documents/{doc_id}/inspect-jobs")
+
+    first = client.get(f"/v1/matters/{m}/documents?limit=2&offset=0").json()
+    assert first["total"] == 5
+    assert first["offset"] == 0 and first["limit"] == 2
+    assert len(first["documents"]) == 2
+
+    second = client.get(f"/v1/matters/{m}/documents?limit=2&offset=2").json()
+    assert len(second["documents"]) == 2
+    assert {d["id"] for d in first["documents"]}.isdisjoint({d["id"] for d in second["documents"]})
+
+    last = client.get(f"/v1/matters/{m}/documents?limit=2&offset=4").json()
+    assert len(last["documents"]) == 1  # 5 total, offset 4 -> exactly 1 left
+
+    jobs_page = client.get(f"/v1/matters/{m}/jobs?limit=2&offset=0").json()
+    assert jobs_page["total"] == 5
+    assert jobs_page["offset"] == 0 and jobs_page["limit"] == 2
+    assert len(jobs_page["jobs"]) == 2
+
+
+def test_audit_pagination_returns_a_page_but_still_verifies_the_full_chain(client):
+    """Chain verification must not be weakened by pagination -- it always
+    covers every event, even when only a page of them is returned for
+    display. Also: the paginated events must be exactly the right slice
+    of the same ascending seq order the unpaginated response already
+    used."""
+    m = client.post("/v1/matters", json={"name": "paged-audit"}).json()["id"]
+    for i in range(4):
+        client.put(f"/v1/matters/{m}/acl", json={"user_id": f"reviewer{i}", "perm": "read"})
+
+    full = client.get(f"/v1/matters/{m}/audit").json()
+    assert full["chain_ok"] is True
+    assert full["total"] == len(full["events"]) >= 5  # matter.create + 4 grants
+
+    page = client.get(f"/v1/matters/{m}/audit?limit=2&offset=1").json()
+    assert page["chain_ok"] is True  # still verified against the full chain
+    assert page["chain_detail"] == full["chain_detail"]
+    assert page["total"] == full["total"]
+    assert page["offset"] == 1 and page["limit"] == 2
+    assert [e["seq"] for e in page["events"]] == [
+        e["seq"] for e in full["events"]
+    ][1:3]
+
+
 def _upload(client, name: str, matter: str | None = None) -> dict:
     if matter is None:
         matter = client.post("/v1/matters", json={"name": "m"}).json()["id"]

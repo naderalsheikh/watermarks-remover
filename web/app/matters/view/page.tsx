@@ -6,9 +6,12 @@ import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { computeProductionReviewState } from "@/lib/productionReview";
 import { useApiData } from "@/lib/useApi";
+import { usePaginatedList } from "@/lib/usePaginatedList";
 import type { Document, Job, Matter, Policy } from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
+
+const PAGE_SIZE = 50;
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -398,7 +401,17 @@ function DocumentRow({
   );
 }
 
-function MatterStats({ documents, jobs }: { documents: Document[]; jobs: Job[] }) {
+function MatterStats({
+  documents,
+  documentsTotal,
+  jobs,
+  jobsTotal,
+}: {
+  documents: Document[];
+  documentsTotal: number;
+  jobs: Job[];
+  jobsTotal: number;
+}) {
   const done = jobs.filter((j) => j.status === "done").length;
   const running = jobs.filter((j) => j.status === "queued" || j.status === "running").length;
   const failed = jobs.filter((j) => j.status === "failed").length;
@@ -406,11 +419,13 @@ function MatterStats({ documents, jobs }: { documents: Document[]; jobs: Job[] }
   // a macro-enabled file) previously fell through every bucket here —
   // uncounted, so the summary looked tidier than it actually was.
   const refused = jobs.filter((j) => j.status === "refused").length;
+  const jobsPartial = jobsTotal > jobs.length;
   return (
-    <div className="mb-6 flex flex-wrap gap-4 text-sm text-muted">
+    <div className="mb-1 flex flex-wrap gap-4 text-sm text-muted">
       <span>
-        <span className="font-medium text-foreground">{documents.length}</span> document
-        {documents.length === 1 ? "" : "s"}
+        <span className="font-medium text-foreground">{documents.length}</span>
+        {documentsTotal > documents.length ? ` of ${documentsTotal}` : ""} document
+        {documentsTotal === 1 ? "" : "s"}
       </span>
       <span>
         <span className="font-medium text-foreground">{done}</span> job{done === 1 ? "" : "s"}{" "}
@@ -431,6 +446,11 @@ function MatterStats({ documents, jobs }: { documents: Document[]; jobs: Job[] }
           <span className="font-medium">{refused}</span> refused by policy
         </span>
       )}
+      {jobsPartial && (
+        <span title="Job counts above only reflect jobs loaded so far, not the matter's full job history.">
+          (of {jobsTotal} jobs total)
+        </span>
+      )}
     </div>
   );
 }
@@ -443,12 +463,22 @@ function MatterView({
   highlightDocId: string | null;
 }) {
   const matterQ = useApiData(() => api.get<Matter>(`/v1/matters/${matterId}`), `matter:${matterId}`);
-  const docsQ = useApiData(
-    () => api.get<{ documents: Document[]; total: number }>(`/v1/matters/${matterId}/documents`),
+  const docsQ = usePaginatedList<Document>(
+    (offset) =>
+      api
+        .get<{ documents: Document[]; total: number }>(
+          `/v1/matters/${matterId}/documents?limit=${PAGE_SIZE}&offset=${offset}`,
+        )
+        .then((r) => ({ items: r.documents, total: r.total })),
     `docs:${matterId}`,
   );
-  const jobsQ = useApiData(
-    () => api.get<{ jobs: Job[]; total: number }>(`/v1/matters/${matterId}/jobs`),
+  const jobsQ = usePaginatedList<Job>(
+    (offset) =>
+      api
+        .get<{ jobs: Job[]; total: number }>(
+          `/v1/matters/${matterId}/jobs?limit=${PAGE_SIZE}&offset=${offset}`,
+        )
+        .then((r) => ({ items: r.jobs, total: r.total })),
     `jobs:${matterId}`,
   );
   const policiesQ = useApiData(() => api.get<{ policies: Policy[] }>("/v1/policies"), "policies");
@@ -480,12 +510,12 @@ function MatterView({
   // Both filters run only against the documents/jobs already fetched
   // (server-capped at `limit`) — same "loaded, not the whole matter"
   // scope as the matters-list search.
-  const filteredDocs = (docsQ.data?.documents ?? []).filter((doc) => {
+  const filteredDocs = docsQ.items.filter((doc) => {
     if (docSearch.trim() && !doc.filename.toLowerCase().includes(docSearch.trim().toLowerCase())) {
       return false;
     }
     if (statusFilter !== "all") {
-      const docJobs = (jobsQ.data?.jobs ?? [])
+      const docJobs = jobsQ.items
         .filter((j) => j.document_id === doc.id)
         .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
       if (documentNextStep(docJobs).tone !== statusFilter) return false;
@@ -519,7 +549,29 @@ function MatterView({
       </h1>
       {matterQ.error && <p className="mb-4 text-sm text-red-600">{matterQ.error}</p>}
 
-      {docsQ.data && <MatterStats documents={docsQ.data.documents} jobs={jobsQ.data?.jobs ?? []} />}
+      {!docsQ.loading && (
+        <MatterStats
+          documents={docsQ.items}
+          documentsTotal={docsQ.total}
+          jobs={jobsQ.items}
+          jobsTotal={jobsQ.total}
+        />
+      )}
+      {jobsQ.total > jobsQ.items.length && (
+        <p className="mb-6 text-xs text-muted">
+          <button
+            type="button"
+            onClick={jobsQ.loadMore}
+            disabled={jobsQ.loadingMore}
+            className="underline hover:text-foreground disabled:opacity-50"
+          >
+            {jobsQ.loadingMore
+              ? "Loading more jobs…"
+              : `Load ${Math.min(PAGE_SIZE, jobsQ.total - jobsQ.items.length)} more jobs (${jobsQ.items.length} of ${jobsQ.total} loaded)`}
+          </button>{" "}
+          — per-document status below only reflects jobs loaded so far.
+        </p>
+      )}
 
       <form onSubmit={upload} className="mb-8 flex items-center gap-2">
         <input
@@ -549,18 +601,18 @@ function MatterView({
         </div>
       )}
       {docsQ.error && <p className="text-sm text-red-600">{docsQ.error}</p>}
-      {docsQ.data && docsQ.data.documents.length === 0 && (
+      {!docsQ.loading && docsQ.items.length === 0 && (
         <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
           No documents yet — upload one above to inspect or sanitize it.
         </div>
       )}
 
-      {docsQ.data && docsQ.data.documents.length > 0 && (
+      {!docsQ.loading && docsQ.items.length > 0 && (
         <>
-          {docsQ.data.total > docsQ.data.documents.length && (
+          {docsQ.total > docsQ.items.length && (
             <p className="mb-2 text-xs text-muted">
-              Loaded {docsQ.data.documents.length} of {docsQ.data.total} documents — search and
-              filters below only cover what&apos;s loaded.
+              Loaded {docsQ.items.length} of {docsQ.total} documents — search and filters below
+              only cover what&apos;s loaded.
             </p>
           )}
           <div className="mb-3 space-y-2">
@@ -606,13 +658,25 @@ function MatterView({
                   key={doc.id}
                   matterId={matterId}
                   doc={doc}
-                  jobs={jobsQ.data?.jobs ?? []}
+                  jobs={jobsQ.items}
                   policies={policiesQ.data?.policies ?? []}
                   onJobStarted={jobsQ.reload}
                   highlighted={doc.id === highlightDocId}
                 />
               ))}
             </ul>
+          )}
+          {docsQ.hasMore && (
+            <button
+              type="button"
+              onClick={docsQ.loadMore}
+              disabled={docsQ.loadingMore}
+              className="mt-3 w-full rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+            >
+              {docsQ.loadingMore
+                ? "Loading…"
+                : `Load more (${docsQ.items.length} of ${docsQ.total})`}
+            </button>
           )}
         </>
       )}

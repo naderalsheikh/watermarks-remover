@@ -113,6 +113,9 @@ export type AuditEvent = {
 export type Audit = {
   chain_ok: boolean;
   chain_detail: string;
+  total: number;
+  offset: number;
+  limit: number;
   events: AuditEvent[];
 };
 
