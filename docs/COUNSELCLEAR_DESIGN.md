@@ -1555,3 +1555,62 @@ audit table's own container confirmed independently scrollable
 (`scrollWidth > clientWidth`) while the page itself stays fixed-width,
 and the dashboard/matter-view/audit-log truncation fixes screenshotted
 before and after.
+
+### PR 28 — Human-readable matter summary report — implemented (2026-08-25)
+
+`GET /v1/matters/{id}/summary`: a self-contained HTML reviewer-handoff
+report for one matter — documents count, job counts by status, the same
+four trust-critical attention queues the dashboard shows (unreviewed
+findings, refused, failed, stale) but scoped to this matter, and the
+audit chain's verification verdict plus its most recent activity.
+Deliberately HTML, not PDF: served `text/html` (not an attachment) so it
+opens in a tab and the recipient can use their own browser's print
+dialog to save a PDF, rather than this app taking on a PDF-generation
+dependency for what the product brief explicitly asked to keep simple.
+
+- **Shared computation, not a second copy**: the attention-queue logic
+  that was inline in `dashboard()` is now `_attention_items(s, matter_ids,
+  matter_names)`, called with every ACL-readable matter by the dashboard
+  and with a single-element list by the summary route — one computation,
+  two callers, so the two surfaces can never silently disagree about what
+  "needs attention" means. Refactor verified behavior-preserving: all 8
+  pre-existing dashboard tests still pass unchanged.
+- **Not a certification**: an explicit disclaimer (top and bottom of the
+  report, not boilerplate) states this summarizes CounselClear's own
+  recorded state — document/job counts, attention items, chain
+  integrity — and is not a legal certification or a claim that any
+  document is "clean" beyond what the per-job manifest and hash-chained
+  audit trail themselves support.
+- **Honest about partial coverage**: recent audit activity shows the last
+  10 events with an explicit "showing N of M" note when the matter has
+  more than that, and points at the full CSV export
+  (`/v1/matters/{id}/audit/export`, PR 26) rather than silently
+  truncating without saying so. The chain verification verdict itself
+  (`verify_chain()`) always covers every event, same as the audit routes
+  — only the *displayed* activity list is capped.
+- **XSS-safe**: every dynamic value (matter name, document filenames, job
+  error strings) is `html.escape()`'d — this is a document meant to be
+  opened in a browser and handed outside the app, so a matter or
+  document named with markup can't inject into it.
+- **Same `admin` perm as the audit routes** (`export_audit`,
+  `GET .../audit`): the report discloses the same class of operational
+  detail (chain status, refusal/failure reasons) those routes already
+  gate behind admin, not `read`.
+- UI: "Summary report" links (open in a new tab, `target="_blank"`) on
+  the matter view and audit log pages, alongside the existing CSV export
+  links.
+
+Tests: 6 new (`tests/test_matter_summary.py`) — admin-perm gating, totals
+and a verified-chain render against a real inspect flow, unreviewed-
+findings and refused items both appearing (one via a real policy
+refusal, one via the same direct-seed technique `test_dashboard.py` uses
+for the no-decision-marker signal), the partial-coverage disclosure at
+>10 events, HTML-escaping of a deliberately hostile matter name, and the
+403 an unknown matter id gets (matching `GET /v1/matters/{id}` and the
+rest of the API's existing `_require`-before-`_matter` ordering). Full
+suite green (1087 collected); frontend gates green. Verified live: the
+report fetched directly against a running backend (`curl` with a real
+session cookie) and through the actual UI link — confirmed the rendered
+`<title>`, totals, the refused-job attention item with its document/job
+reference, and "Verified intact — N events intact" all matched the real
+seeded state.

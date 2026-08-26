@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
 import logging
@@ -74,6 +75,152 @@ def _escape_like(q: str) -> str:
     backslash as the ilike() escape character to match this.
     """
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+_ATTENTION_SECTION_TITLE = {
+    "unreviewed_findings": "Unreviewed findings",
+    "refused": "Refused jobs",
+    "failed": "Failed jobs",
+    "stale": "Stale matter",
+}
+
+
+def _render_matter_summary_html(
+    *,
+    matter_id: str,
+    matter_name: str,
+    generated_at: str,
+    generated_by: str,
+    total_documents: int,
+    job_counts: dict[str, int],
+    attention: list[dict],
+    chain_ok: bool,
+    chain_detail: str,
+    total_events: int,
+    recent_events: list[dict],
+) -> str:
+    """Self-contained HTML reviewer-handoff report -- no external CSS/JS,
+    printable to PDF from any browser's own print dialog rather than this
+    app taking on a PDF-generation dependency. Every dynamic value is
+    html.escape()'d: matter names, filenames, and job error strings are
+    all user/policy-supplied text that could otherwise inject markup into
+    a document meant to be handed to someone outside the app.
+
+    Deliberately NOT a certification: the disclaimer at both top and
+    bottom is load-bearing, not boilerplate -- this restates only what
+    the audit chain and manifests themselves already support (per-job
+    verification, hash-chained events), not a claim that a matter is
+    "clean" or that no risk remains.
+    """
+    e = html.escape
+
+    def esc(v: object) -> str:
+        return e(str(v))
+
+    attention_html = ""
+    if not attention:
+        attention_html = "<p>No open attention items for this matter.</p>"
+    else:
+        by_type: dict[str, list[dict]] = {}
+        for item in attention:
+            by_type.setdefault(item["type"], []).append(item)
+        for atype, items in by_type.items():
+            title = _ATTENTION_SECTION_TITLE.get(atype, atype)
+            attention_html += f"<h3>{esc(title)} ({len(items)})</h3><ul>"
+            for item in items:
+                ref_bits = []
+                if item.get("document_name"):
+                    ref_bits.append(f"document: {esc(item['document_name'])}")
+                if item.get("job_id"):
+                    ref_bits.append(f"job id: {esc(item['job_id'])}")
+                ref = f" ({', '.join(ref_bits)})" if ref_bits else ""
+                attention_html += f"<li>{esc(item['detail'])}{ref}</li>"
+            attention_html += "</ul>"
+
+    job_status_html = "".join(
+        f"<tr><td>{esc(status)}</td><td>{esc(count)}</td></tr>"
+        for status, count in job_counts.items()
+    )
+
+    if not recent_events:
+        recent_html = "<p>No audit events recorded.</p>"
+    else:
+        shown = len(recent_events)
+        coverage_note = (
+            f"Showing the most recent {shown} of {total_events} total event(s)."
+            if shown < total_events
+            else f"Showing all {total_events} event(s) -- this matter has no more."
+        )
+        rows = "".join(
+            f"<tr><td>{esc(ev['seq'])}</td><td>{esc(ev['at'])}</td>"
+            f"<td>{esc(ev['action'])}</td><td>{esc(ev['actor_id'])}</td></tr>"
+            for ev in recent_events
+        )
+        recent_html = (
+            f"<p>{coverage_note} The complete, hash-chain-verifiable audit "
+            f"trail is available via the CSV export "
+            f"(<code>/v1/matters/{esc(matter_id)}/audit/export</code>), not "
+            "reproduced in full here.</p>"
+            "<table><thead><tr><th>#</th><th>When (UTC)</th><th>Action</th>"
+            f"<th>Actor</th></tr></thead><tbody>{rows}</tbody></table>"
+        )
+
+    disclaimer = (
+        "This report summarizes CounselClear's own recorded state for this "
+        "matter -- document and job counts, open attention items, and audit "
+        "chain integrity -- as of the generation timestamp below. It is "
+        "<strong>not</strong> a legal certification, attestation, or a "
+        "claim that any document is fully “clean” beyond what the "
+        "per-job manifest and the hash-chained audit trail themselves "
+        "record. Consult the individual job manifests for exactly what was "
+        "stripped, flagged, or kept in each derivative."
+    )
+
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Matter Summary — {esc(matter_name)}</title>
+<style>
+  body {{ font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 800px;
+         margin: 2rem auto; padding: 0 1rem; color: #171717; line-height: 1.5; }}
+  h1 {{ font-size: 1.5rem; margin-bottom: 0.25rem; }}
+  h2 {{ font-size: 1.1rem; margin-top: 2rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.25rem; }}
+  h3 {{ font-size: 0.95rem; margin-bottom: 0.25rem; }}
+  .meta {{ color: #6b7280; font-size: 0.9rem; }}
+  .disclaimer {{ background: #fef3c7; border: 1px solid #d97706; border-radius: 6px;
+                padding: 0.75rem 1rem; font-size: 0.9rem; margin: 1rem 0; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.85rem; margin-top: 0.5rem; }}
+  th, td {{ border: 1px solid #e5e7eb; padding: 4px 8px; text-align: left; }}
+  code {{ background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }}
+  .chain-ok {{ color: #047857; font-weight: 600; }}
+  .chain-broken {{ color: #b91c1c; font-weight: 600; }}
+</style>
+</head>
+<body>
+<h1>Matter Summary — {esc(matter_name)}</h1>
+<p class="meta">Matter ID: <code>{esc(matter_id)}</code><br>
+Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
+<div class="disclaimer">{disclaimer}</div>
+
+<h2>Totals</h2>
+<p>Documents: {esc(total_documents)}</p>
+<table><thead><tr><th>Job status</th><th>Count</th></tr></thead>
+<tbody>{job_status_html}</tbody></table>
+
+<h2>Attention items</h2>
+{attention_html}
+
+<h2>Audit chain</h2>
+<p>Status: <span class="{"chain-ok" if chain_ok else "chain-broken"}">
+{"Verified intact" if chain_ok else "BROKEN"}</span> — {esc(chain_detail)}</p>
+{recent_html}
+
+<div class="disclaimer">{disclaimer}</div>
+</body>
+</html>
+"""
+
 
 # Four frozen v1 default policies (docs/COUNSELCLEAR_DESIGN.md, "Key
 # Decisions" #5, and the full subtype table under Policy Engine). Literal
@@ -1395,6 +1542,65 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/v1/matters/{matter_id}/summary")
+    def matter_summary(
+        matter_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Human-readable HTML reviewer-handoff report for one matter.
+
+        Same "admin" perm as the audit routes: the report discloses audit
+        chain verification status and refusal/failure reasons, the same
+        class of operational detail those routes already gate. Served
+        inline (not attachment) so it opens directly in a tab -- the
+        recipient can read it there or use the browser's own print dialog
+        to save a PDF, rather than this app taking on a PDF-generation
+        dependency for a "prefer simple HTML" reviewer handoff artifact.
+        """
+        _require(matter_id, "admin", s, user)
+        matter = _matter(matter_id, s)
+
+        total_documents = s.query(Document).filter_by(matter_id=matter_id).count()
+        job_counts = {st: 0 for st in ("queued", "running", "done", "failed", "refused")}
+        for status, n in (
+            s.query(Job.status, func.count(Job.id))
+            .filter(Job.matter_id == matter_id)
+            .group_by(Job.status)
+            .all()
+        ):
+            if status in job_counts:
+                job_counts[status] = n
+
+        attention = _attention_items(s, [matter_id], {matter_id: matter.name})
+
+        all_audit_rows = (
+            s.query(AuditEvent)
+            .filter(AuditEvent.matter_id == matter_id)
+            .order_by(AuditEvent.seq)
+            .all()
+        )
+        chain_ok, chain_detail = verify_chain(all_audit_rows)
+        recent_events = [
+            {"seq": ev.seq, "at": ev.at, "action": ev.action, "actor_id": ev.actor_id}
+            for ev in reversed(all_audit_rows[-10:])
+        ]
+
+        body = _render_matter_summary_html(
+            matter_id=matter_id,
+            matter_name=matter.name,
+            generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            generated_by=user,
+            total_documents=total_documents,
+            job_counts=job_counts,
+            attention=attention,
+            chain_ok=chain_ok,
+            chain_detail=chain_detail,
+            total_events=len(all_audit_rows),
+            recent_events=recent_events,
+        )
+        return Response(content=body, media_type="text/html")
+
     @app.get("/v1/dashboard")
     def dashboard(
         user: str = Depends(principal),
@@ -1442,7 +1648,65 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         matter_names = dict(
             s.query(Matter.id, Matter.name).filter(Matter.id.in_(matter_ids)).all()
         )
+        attention = _attention_items(s, matter_ids, matter_names)
 
+        recent_rows = (
+            s.query(AuditEvent, Matter.name)
+            .join(Matter, Matter.id == AuditEvent.matter_id)
+            .filter(AuditEvent.matter_id.in_(matter_ids))
+            .order_by(AuditEvent.at.desc())
+            .limit(10)
+            .all()
+        )
+        return {
+            "totals": {
+                "matters": total_matters,
+                "documents": total_documents,
+                "jobs": job_counts,
+            },
+            "attention": attention,
+            "recent": [
+                {
+                    "matter_id": e.matter_id,
+                    "matter_name": name,
+                    "action": e.action,
+                    "actor_id": e.actor_id,
+                    "at": e.at,
+                }
+                for e, name in recent_rows
+            ],
+        }
+
+    # --- helpers ------------------------------------------------------------
+
+    def _parse_ts(ts: str | None) -> datetime | None:
+        """ISO timestamp -> UTC-aware datetime; None for missing/unparseable.
+
+        Rows carry _now() strings ("2026-08-25T12:34:56+00:00"); tolerate
+        legacy naive strings rather than crash the whole overview on one
+        odd row.
+        """
+        if not ts:
+            return None
+        try:
+            d = datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=UTC)
+        return d.astimezone(UTC)
+
+    def _attention_items(
+        s: Session, matter_ids: list[str], matter_names: dict[str, str]
+    ) -> list[dict]:
+        """The four trust-critical queues (unreviewed_findings, refused,
+        failed, stale), scoped to whichever matter_ids the caller passes.
+
+        Shared by GET /v1/dashboard (every ACL-readable matter) and
+        GET /v1/matters/{id}/summary (a single matter) so the two surfaces
+        can never silently disagree about what counts as "needs attention"
+        -- one computation, two callers, not two hand-maintained copies.
+        """
         attention: list[dict] = []
 
         # Trust-critical queue 1: done sanitize jobs whose manifest kept
@@ -1545,51 +1809,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     }
                 )
 
-        recent_rows = (
-            s.query(AuditEvent, Matter.name)
-            .join(Matter, Matter.id == AuditEvent.matter_id)
-            .filter(AuditEvent.matter_id.in_(matter_ids))
-            .order_by(AuditEvent.at.desc())
-            .limit(10)
-            .all()
-        )
-        return {
-            "totals": {
-                "matters": total_matters,
-                "documents": total_documents,
-                "jobs": job_counts,
-            },
-            "attention": attention,
-            "recent": [
-                {
-                    "matter_id": e.matter_id,
-                    "matter_name": name,
-                    "action": e.action,
-                    "actor_id": e.actor_id,
-                    "at": e.at,
-                }
-                for e, name in recent_rows
-            ],
-        }
-
-    # --- helpers ------------------------------------------------------------
-
-    def _parse_ts(ts: str | None) -> datetime | None:
-        """ISO timestamp -> UTC-aware datetime; None for missing/unparseable.
-
-        Rows carry _now() strings ("2026-08-25T12:34:56+00:00"); tolerate
-        legacy naive strings rather than crash the whole overview on one
-        odd row.
-        """
-        if not ts:
-            return None
-        try:
-            d = datetime.fromisoformat(ts)
-        except ValueError:
-            return None
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=UTC)
-        return d.astimezone(UTC)
+        return attention
 
     def _matter(matter_id: str, s: Session) -> Matter:
         m = s.get(Matter, matter_id)

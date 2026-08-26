@@ -183,25 +183,38 @@ function AuditView({ matterId }: { matterId: string }) {
       <Link href={`/matters/view?id=${matterId}`} className="text-sm text-muted hover:text-foreground">
         ← Back to matter
       </Link>
-      <div className="mb-6 mt-2 flex items-end justify-between gap-4">
+      <div className="mb-6 mt-2 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="mb-1 text-2xl font-semibold tracking-tight">Audit log</h1>
           <p className="text-sm text-muted">
             {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
           </p>
         </div>
-        {/* Plain <a>, not the api client: this is a file download (CSV,
-            Content-Disposition: attachment), same pattern as the bundle
-            download on the job page -- the browser handles it natively,
-            same-origin session cookie rides along automatically. Exports
-            the FULL chain, never just what's loaded/filtered on this
-            page -- a reviewer handoff can't be a partial custody record. */}
-        <a
-          href={`/v1/matters/${matterId}/audit/export`}
-          className="shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-        >
-          Export CSV
-        </a>
+        <div className="flex flex-wrap gap-2">
+          {/* Plain <a>, not the api client: this is a file download (CSV,
+              Content-Disposition: attachment), same pattern as the bundle
+              download on the job page -- the browser handles it natively,
+              same-origin session cookie rides along automatically. Exports
+              the FULL chain, never just what's loaded/filtered on this
+              page -- a reviewer handoff can't be a partial custody record. */}
+          <a
+            href={`/v1/matters/${matterId}/audit/export`}
+            className="shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+          >
+            Export CSV
+          </a>
+          {/* Opens in a new tab: the human-readable summary report, which
+              includes this same chain verification verdict alongside
+              totals and attention items -- not a download like the CSV. */}
+          <a
+            href={`/v1/matters/${matterId}/summary`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+          >
+            Summary report
+          </a>
+        </div>
       </div>
       {matterQ.error && <p className="mb-6 text-sm text-red-600">{matterQ.error}</p>}
 

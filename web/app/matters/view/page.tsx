@@ -757,6 +757,18 @@ function MatterView({
           >
             Export jobs CSV →
           </a>
+          {/* Opens in a new tab, not a download: the report is served
+              inline HTML meant to be read there, or saved as a PDF via
+              the browser's own print dialog -- not silently downloaded
+              like the CSV exports above. */}
+          <a
+            href={`/v1/matters/${matterId}/summary`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="whitespace-nowrap text-sm text-muted hover:text-foreground"
+          >
+            Summary report →
+          </a>
         </div>
       </div>
       <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">
