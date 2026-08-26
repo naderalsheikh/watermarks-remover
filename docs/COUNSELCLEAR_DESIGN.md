@@ -1125,6 +1125,7 @@ Resolved and promoted to Key Decisions: header/footer default (flag); hidden she
 - Upstream idea (partially superseded): `docs/plans/ideas/deployment-docker-cli-api.md` — keep Phase 0 extraction; do **not** adopt “all capabilities in v1”
 - Ethics: `skills/remove-ai-marks/references/ethics.md`
 - Production deployment: `docs/COUNSELCLEAR_PRODUCTION.md` — topology, digest pinning, gVisor worker sandboxing, managed Postgres, OIDC setup, S3 Object Lock + CMK + residency guidance, operations checklist
+- Product strategy doctrine: `docs/counselclear-strategy.md` — the defensibility wedge, upstream-as-reference-only (never a parent branch to sync/rebase/cherry-pick from), the airlock/integration product horizon, the engine-boundary invariant (and the tests that enforce it), evidence-bound product language, and the one-writer handoff protocol
 - Semantics source (not a vendor dependency): Microsoft Word Inspect Document / Accept All; Workshare Protect; DocsCorp cleanse
 - Tools: [qpdf](https://qpdf.sourceforge.io/), [exiftool](https://exiftool.org/), [c2patool](https://github.com/contentauth/c2pa-rs)
 
@@ -1898,3 +1899,14 @@ state; a live browser bulk-sanitize run (macro-enabled + plain
 document) again showed a genuine in-flight `queued` snapshot before
 settling on the correct final split (1 done, 1 refused), with no
 console errors in a fresh tab.
+
+### PR 32 — Engine boundary hardening (both directions) + tracked strategy doctrine — implemented (2026-08-26)
+
+Following the defensibility-wedge product review (`docs/counselclear-strategy.md`), pass one of three planned chunks: harden the Engine vs. Product Shell isolation boundary the doctrine's point 4 depends on, before the airlock/CLI work (planned chunk 3) starts calling into the engine from a second entrypoint. No feature work, no engine behavior changes — this only adds a test and two docs.
+
+- **New test**, `tests/test_worker_isolation.py::test_engine_scripts_never_import_control_plane_or_orm_or_web_framework`: AST-based (not substring matching, so a docstring or local variable named `app` can't false-positive) scan of every file in `service/scripts/` for a top-level import of `app` (the control plane), `sqlalchemy`, `fastapi`, `starlette`, or `requests`. Passes cleanly today — confirmed by injecting a real violation into a scratch copy of `common.py` and watching the test catch it before reverting. This is the reverse direction of the existing `test_api_module_never_imports_parsers` (main.py must not import the engine's parsers); together the two tests enforce the boundary in both directions.
+- **Deliberately not a blanket network ban.** The instruction that motivated this pass listed "requests/http clients... or other control-plane/network dependencies" as bannable, but several engine modules (`image_meta.run_synthid_score`'s `WATERMARKS_SYNTHID_SCORER_URL` HTTP sidecar, `rewrite_text`'s watermark-rewrite network from PR 20, the MarkLLM/KGW/website-audit detector workers) make real, intentional outbound calls via stdlib `urllib`/subprocess to their own optional, config-gated sidecars — every one degrading gracefully ("unconfigured" → `None`) rather than failing. Banning all network I/O would have meant either breaking pre-existing, tested, shipped functionality or reclassifying it as a violation, and both are product decisions, not boundary fixes — out of scope for a hardening pass with the explicit constraint "No engine behavior changes unless a boundary violation is discovered." No violation was discovered; nothing changed. The `requests` package specifically (a control-plane-style HTTP client, distinct from the stdlib sidecar pattern above) and the ORM/web-framework/control-plane names are still hard-banned.
+- **`docs/counselclear-strategy.md`** (new, tracked): the seven-point strategy doctrine, now visible in `git log`/`git status`/to any collaborator — the identically-named root-level file the doctrine was originally dictated into is outside this repo's allowlisted `.gitignore` tree and was never tracked. Point 4 (engine purity) now names both isolation tests and states the network-I/O nuance above explicitly, so the next person reading the doctrine doesn't have to rediscover it.
+- **`docs/COUNSELCLEAR_DESIGN.md`**'s References section now points at the strategy doc.
+
+Full backend suite green (1100 passed, 1 pre-existing skip, cross-checked against 1101 collected — unchanged from the prior pass; this added exactly one test), `ruff check` clean. Docs/tests only — no frontend files touched, so frontend gates were not run.

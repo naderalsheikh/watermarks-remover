@@ -8,6 +8,7 @@ reconciles terminal state.
 
 from __future__ import annotations
 
+import ast
 import io
 import sys
 import zipfile
@@ -76,6 +77,69 @@ def test_no_decision_marker_stays_in_sync_with_policies():
     from app.main import NO_DECISION_MARKER
 
     assert NO_DECISION_MARKER == policies_mod.NO_DECISION_MARKER
+
+
+# --- engine boundary doctrine (docs/counselclear-strategy.md #4) ----------------
+#
+# test_api_module_never_imports_parsers above is the one-way guard: the
+# control plane (main.py) must not reach down into the engine's parsers.
+# These tests are the other direction: the engine (service/scripts/*.py)
+# must not reach up into the control plane, an ORM/session library, a web
+# framework, or a control-plane-style HTTP client. Neither side may depend
+# on the other's concerns -- the engine stays pure bytes in/out and
+# offline-runnable on a single laptop regardless of whether it's invoked
+# from a local CLI, a Docker worker, or an enterprise deployment; the
+# control plane stays swappable/testable without dragging in every
+# parser's dependency tree.
+#
+# Deliberately NOT a blanket ban on network I/O: several engine modules
+# make outbound calls to their own optional, config-gated sidecar
+# services -- image_meta.run_synthid_score's WATERMARKS_SYNTHID_SCORER_URL
+# HTTP sidecar, rewrite_text's watermark-rewrite network (PR 20), the
+# MarkLLM/KGW/website-audit detector workers -- via stdlib urllib or a
+# subprocess, never the control plane, and every one degrades gracefully
+# ("unconfigured" -> None) when not set up. That's a pre-existing,
+# intentional engine capability, not control-plane leakage; reclassifying
+# it would be a product decision, not a boundary fix, so it's out of
+# scope here.
+
+_ENGINE_SCRIPTS_DIR = REPO / "service" / "scripts"
+# The control-plane package itself, an ORM/session library, a web
+# framework, and a control-plane-style HTTP client. Plain `urllib`/
+# `socket`/subprocess-based sidecar calls are not banned -- see above.
+_BANNED_ENGINE_IMPORT_ROOTS = frozenset({"app", "sqlalchemy", "fastapi", "starlette", "requests"})
+
+
+def _engine_scripts_files() -> list[Path]:
+    return sorted(p for p in _ENGINE_SCRIPTS_DIR.glob("*.py"))
+
+
+def _imported_roots(path: Path) -> set[str]:
+    """Top-level package name of every absolute import in *path* (AST-based,
+    not substring matching, so a docstring mentioning "app" or a local
+    variable named `app` can't produce a false positive)."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            roots.add(node.module.split(".")[0])  # level > 0 would be a relative import
+    return roots
+
+
+def test_engine_scripts_never_import_control_plane_or_orm_or_web_framework():
+    files = _engine_scripts_files()
+    assert len(files) > 30, "sanity check: found suspiciously few engine scripts"
+    violations = {
+        path.name: sorted(bad)
+        for path in files
+        if (bad := _imported_roots(path) & _BANNED_ENGINE_IMPORT_ROOTS)
+    }
+    assert not violations, (
+        "engine script(s) import a control-plane/ORM/web-framework/http-client "
+        f"module, violating the engine boundary: {violations}"
+    )
 
 
 # --- end-to-end through the subprocess runner ------------------------------------
