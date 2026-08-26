@@ -207,7 +207,14 @@ function NoDecisionWarning({ actions }: { actions: string[] }) {
   if (lines.length === 0) return null;
   const subtypes = lines.map((l) => l.split(":", 1)[0]);
   return (
-    <div className="mb-6 rounded-md border border-red-600/40 bg-red-600/10 p-4 text-sm">
+    <div
+      id="unreviewed-findings"
+      className="mb-6 rounded-md border border-red-600/40 bg-red-600/10 p-4 text-sm"
+    >
+      {/* Anchor for the dashboard's "unreviewed findings" deep link
+          (?highlight=unreviewed), scrolled to by JobView below — this is
+          the one disclosure a dashboard drill-down must land on directly,
+          not just "somewhere on this job's page". */}
       <p className="font-medium text-red-700 dark:text-red-400">
         {subtypes.length} finding{subtypes.length === 1 ? "" : "s"} kept without review
       </p>
@@ -343,7 +350,15 @@ function JobSkeleton() {
   );
 }
 
-function JobView({ matterId, jobId }: { matterId: string; jobId: string }) {
+function JobView({
+  matterId,
+  jobId,
+  highlight,
+}: {
+  matterId: string;
+  jobId: string;
+  highlight: string | null;
+}) {
   const { data: job, error, loading, reload } = useApiData(
     () => api.get<Job>(`/v1/matters/${matterId}/jobs/${jobId}`),
     `job:${matterId}:${jobId}`,
@@ -370,6 +385,17 @@ function JobView({ matterId, jobId }: { matterId: string; jobId: string }) {
     `manifest:${matterId}:${jobId}:${manifestReady}`,
   );
   const [includeOriginal, setIncludeOriginal] = useState(false);
+  // Dashboard "unreviewed findings" deep link (?highlight=unreviewed):
+  // scroll straight to the warning once the manifest that renders it has
+  // actually loaded, rather than landing on the top of a long job page
+  // and leaving the operator to hunt for what they clicked through for.
+  useEffect(() => {
+    if (highlight !== "unreviewed" || !manifest) return;
+    document.getElementById("unreviewed-findings")?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  }, [highlight, manifest]);
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
@@ -497,7 +523,7 @@ function JobPageInner() {
       </main>
     );
   }
-  return <JobView matterId={matterId} jobId={jobId} />;
+  return <JobView matterId={matterId} jobId={jobId} highlight={params.get("highlight")} />;
 }
 
 export default function JobPage() {

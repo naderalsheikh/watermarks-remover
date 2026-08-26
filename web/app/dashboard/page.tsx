@@ -1,32 +1,58 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { useApiData } from "@/lib/useApi";
 import type { AttentionItem, AttentionType, Dashboard } from "@/lib/types";
 import { Header } from "@/components/Header";
 
-const ATTENTION_META: Record<AttentionType, { label: string; badge: string }> = {
+// Per type: badge styling, the one-line label, and the "why it matters /
+// what to do" pair a bare `detail` string (the server's factual "what
+// happened") can't carry on its own. This is UI framing over a fixed,
+// non-decision-dependent set of four types — not a claim about any
+// specific item, so it's safe to keep as a static lookup rather than
+// something the backend has to compute per row.
+const ATTENTION_META: Record<
+  AttentionType,
+  { label: string; badge: string; whyItMatters: string; whatToDo: string }
+> = {
   // Production sanitize jobs that shipped with findings kept without an
   // operator decision — the trust-critical queue, so it gets the harshest
   // color of the three "something needs you" states.
   unreviewed_findings: {
     label: "Unreviewed findings",
     badge: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
+    whyItMatters: "A derivative already shipped with findings kept as-is, unreviewed.",
+    whatToDo: "Open the job, read the warning, and decide whether that's acceptable.",
   },
   refused: {
     label: "Refused job",
     badge: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
+    whyItMatters: "The policy declined to produce a derivative — nothing shipped.",
+    whatToDo: "Open the job to see why, then re-run with a different policy or attestation.",
   },
   failed: {
     label: "Failed job",
     badge: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
+    whyItMatters: "Something broke before the job could finish, rather than reaching a verdict.",
+    whatToDo: "Open the job for the error, then retry the inspect or sanitize.",
   },
   stale: {
     label: "Stale matter",
     badge: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
+    whyItMatters: "No inspect, sanitize, or access change here in over a week.",
+    whatToDo: "Open the matter to confirm it's still actually idle, not just unattended.",
   },
 };
+
+const ATTENTION_TABS: { value: "all" | AttentionType; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "unreviewed_findings", label: "Unreviewed" },
+  { value: "refused", label: "Refused" },
+  { value: "failed", label: "Failed" },
+  { value: "stale", label: "Stale" },
+];
 
 const JOB_STATUS_ORDER = ["queued", "running", "done", "failed", "refused"] as const;
 
@@ -49,7 +75,22 @@ function formatTs(ts: string): string {
     : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function attentionHref(item: AttentionItem): string {
+// Precise per-type destinations, not one generic "open the matter" link
+// for everything: a job-bearing item (unreviewed/refused/failed) lands on
+// that exact job, with unreviewed_findings scrolling straight to the
+// warning section (see web/app/matters/job/page.tsx's ?highlight=
+// handling); stale has no job to point at, so it lands on the matter
+// itself. "View audit" and "Open matter" are offered everywhere as
+// secondary actions so a drill-down never traps the operator on one page.
+function attentionPrimaryHref(item: AttentionItem): string {
+  if (item.job_id) {
+    const base = `/matters/job?matter=${item.matter_id}&job=${item.job_id}`;
+    return item.type === "unreviewed_findings" ? `${base}&highlight=unreviewed` : base;
+  }
+  return `/matters/view?id=${item.matter_id}`;
+}
+
+function attentionMatterHref(item: AttentionItem): string {
   const base = `/matters/view?id=${item.matter_id}`;
   return item.document_id ? `${base}&doc=${item.document_id}` : base;
 }
@@ -59,6 +100,12 @@ export default function DashboardPage() {
     () => api.get("/v1/dashboard"),
     "dashboard",
   );
+  // Tabs filter the already-fully-loaded `attention` array client-side —
+  // honest to do so without a "loaded-so-far" caveat, because unlike the
+  // matters/documents lists, this array is never paginated: the backend
+  // computes it in full over every readable matter on each request.
+  const [tab, setTab] = useState<"all" | AttentionType>("all");
+  const visibleAttention = data?.attention.filter((a) => tab === "all" || a.type === tab) ?? [];
 
   return (
     <>
@@ -141,21 +188,47 @@ export default function DashboardPage() {
               <h2 className="mb-2 text-sm font-semibold tracking-wide text-muted">
                 NEEDS ATTENTION
               </h2>
+
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {ATTENTION_TABS.map((t) => {
+                  const count =
+                    t.value === "all"
+                      ? data.attention.length
+                      : data.attention.filter((a) => a.type === t.value).length;
+                  return (
+                    <button
+                      key={t.value}
+                      onClick={() => setTab(t.value)}
+                      className={`rounded px-2 py-1 text-xs ${
+                        tab === t.value
+                          ? "bg-accent text-white"
+                          : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                      }`}
+                    >
+                      {t.label} · {count}
+                    </button>
+                  );
+                })}
+              </div>
+
               {data.attention.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
                   Nothing needs attention.
                 </div>
+              ) : visibleAttention.length === 0 ? (
+                <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
+                  No {(ATTENTION_TABS.find((t) => t.value === tab)?.label ?? "matching").toLowerCase()}{" "}
+                  items right now.
+                </div>
               ) : (
                 <ul className="divide-y divide-border rounded-md border border-border">
-                  {data.attention.map((item) => {
+                  {visibleAttention.map((item) => {
                     const meta = ATTENTION_META[item.type];
+                    const showOpenMatter = item.type !== "stale";
                     return (
-                      <li key={`${item.type}:${item.job_id ?? item.matter_id}`}>
-                        <Link
-                          href={attentionHref(item)}
-                          className="flex items-center justify-between gap-4 px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-                        >
-                          <div className="min-w-0">
+                      <li key={`${item.type}:${item.job_id ?? item.matter_id}`} className="px-4 py-3">
+                        <div className="flex items-start justify-between gap-4">
+                          <Link href={attentionPrimaryHref(item)} className="min-w-0 flex-1 hover:underline">
                             <p className="truncate">
                               <span
                                 className={`mr-2 rounded px-2 py-0.5 text-xs font-medium ${meta.badge}`}
@@ -167,12 +240,36 @@ export default function DashboardPage() {
                                 <span className="text-muted"> · {item.document_name}</span>
                               )}
                             </p>
-                            <p className="mt-0.5 text-sm text-muted">{item.detail}</p>
-                          </div>
+                          </Link>
                           <time className="shrink-0 text-xs text-muted">
                             {formatTs(item.created_utc)}
                           </time>
-                        </Link>
+                        </div>
+                        <p className="mt-0.5 text-sm text-muted">{item.detail}</p>
+                        <p className="mt-1 text-xs text-muted">
+                          <span className="font-medium text-foreground">Why it matters:</span>{" "}
+                          {meta.whyItMatters} <span className="font-medium text-foreground">Next:</span>{" "}
+                          {meta.whatToDo}
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                          <Link href={attentionPrimaryHref(item)} className="font-medium text-accent hover:underline">
+                            {item.job_id ? "Open job" : "Open matter"}
+                          </Link>
+                          {showOpenMatter && (
+                            <Link
+                              href={attentionMatterHref(item)}
+                              className="text-muted hover:text-foreground hover:underline"
+                            >
+                              Open matter
+                            </Link>
+                          )}
+                          <Link
+                            href={`/matters/audit?id=${item.matter_id}`}
+                            className="text-muted hover:text-foreground hover:underline"
+                          >
+                            View audit
+                          </Link>
+                        </div>
                       </li>
                     );
                   })}

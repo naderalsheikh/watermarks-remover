@@ -1404,3 +1404,49 @@ appear.
   Full suite green (1078 collected); frontend gates green; verified live
   in the browser (debounced to one request per pause in typing, not one
   per keystroke; `50%` matched only the literal name).
+
+### PR 25 — Dashboard drill-down and attention workflow — implemented (2026-08-25)
+
+The dashboard's attention queue was informational only: every item linked
+to the matter view regardless of type, `unreviewed_findings` items didn't
+route to the job that actually carries the warning, and there was no way
+to see just the refused jobs, or just the stale matters, without reading
+past everything else. Pure frontend change — the `/v1/dashboard` response
+shape (PR 22) already carried everything needed (`job_id`, `document_id`,
+`matter_id`) to build precise per-type destinations; this pass is UI over
+that data, not a new backend computation.
+
+- **Precise deep links, per type** (`web/app/dashboard/page.tsx`):
+  `unreviewed_findings` / `refused` / `failed` items (all carry a
+  `job_id`) now land on `/matters/job?matter=…&job=…`; `stale` (no job)
+  lands on the matter view. `unreviewed_findings` additionally appends
+  `&highlight=unreviewed`, which the job page (`web/app/matters/job/page.tsx`)
+  reads to scroll straight to the "N findings kept without review"
+  warning (`id="unreviewed-findings"`) once the manifest has loaded — not
+  just the top of a long job page.
+- **Why it matters / what to do next**, per type: a fixed, non-decision-
+  dependent copy lookup (`ATTENTION_META`) pairs with the backend's
+  factual `detail` string rather than replacing it — "what happened" stays
+  server-computed, "why it matters"/"what to do" is UI framing over the
+  four known types.
+- **Filter tabs** (All / Unreviewed / Refused / Failed / Stale, with live
+  counts): pure client-side filter over `data.attention` — safe without a
+  "loaded-so-far" caveat because that array is never paginated, the
+  backend already computes it in full on every request.
+- **Secondary actions per item** ("Open job"/"Open matter", "Open matter",
+  "View audit" — never duplicated when the primary link already covers
+  one), so a drill-down never traps the operator on a single page. All
+  read-only navigation; no destructive one-click actions.
+- Empty states: "nothing needs attention" (no items at all) is now
+  distinct from "no `<type>` items right now" (a filter tab with zero
+  matches) — the two mean different things and shouldn't read the same.
+
+No backend or database change; existing dashboard tests (8) unaffected.
+Frontend gates green (`tsc`, `eslint`, `vitest`, `next build`). Verified
+live against seeded mixed attention data covering all four types (the
+`failed` and `stale` cases seeded directly via the session factory, same
+technique `tests/test_dashboard.py` uses, since there's no real API path
+to force a worker crash or backdate a matter on demand): tab filtering,
+every deep link's exact href, and the unreviewed-findings scroll-to
+landing exactly on the warning section — all confirmed through the
+running app, not just read from source.
