@@ -1683,3 +1683,59 @@ verified at the literal boundary: seeded 101 documents, loaded and
 selected all of them, confirmed the exact "Deselect 1 to continue"
 message and disabled buttons, then deselected one and confirmed they
 re-enabled at exactly 100.
+
+### PR 30 — Frontend regression coverage for the high-value UI logic — implemented (2026-08-26)
+
+The frontend's product-critical decision logic (which controls a limited
+principal sees, the dashboard's disclosure split, the bulk cap) had grown
+across PRs 22-29 with a single pre-existing vitest file as the only
+regression net. Extracted the pure, non-JSX logic out of three pages into
+tested `web/lib/` modules — same pattern `productionReview.ts` already
+established — rather than adding a component/browser test framework.
+
+- **`web/lib/matterPermissions.ts`** (new): `hasMatterPerm()` and
+  `permissionGate()` replace the `perms.has("x") ? undefined :
+  "You don't have x permission..."`-shaped conditional that PR 29 had
+  written out independently at every gated control across
+  `matters/view/page.tsx` and `matters/job/page.tsx` — one place the
+  exact wording and the "perms not loaded yet = no permissions" safe
+  default live, instead of N copies that could quietly drift. Both pages
+  now pass `perms` through as a plain `string[] | undefined` (dropping an
+  unnecessary `Set` wrapper) and call the shared helpers.
+- **`web/lib/dashboardAttention.ts`** (new): `attentionPrimaryHref()`/
+  `attentionMatterHref()` (the deep-link contract), `filterAttentionByTab()`,
+  `attentionTabCounts()`, and the three admin-scope disclosure-copy
+  functions (`attentionScopeNote()`, `recentScopeNote()`,
+  `recentEmptyStateText()`) moved out of `dashboard/page.tsx` largely
+  unchanged, plus one real fix along the way: the tab-count loop was
+  recomputing `attentionTabCounts()` from scratch on every one of the 5
+  tabs (O(tabs × items) for no reason) -- now computed once.
+- **`web/lib/bulkCap.ts`** (new): `BULK_MAX_DOCUMENTS`, `isOverBulkCap()`,
+  `bulkCapOverflow()` -- the cap comparison and the "deselect N" arithmetic
+  PR 29 had inlined at 6 call sites across the bulk bar and
+  `BulkRunPanel`.
+- **`productionReview.ts`** gained two tests for real gaps in the
+  existing suite: multiple findings of the same approve-default subtype
+  are counted, not just detected as present, and a finding with
+  `requires_approval: true` but no `policy_subtype` is correctly excluded
+  from the approve-decision map (the guard already existed in the code;
+  it just had no test proving it doesn't crash or leak a phantom entry).
+- **Evaluated and explicitly skipped**: `usePaginatedList` /
+  `useDebouncedValue`'s key/reset logic. Both are real React hooks
+  (`useState`/`useEffect`); calling a hook outside a component throws
+  ("Invalid hook call") with no reconciler running, so testing them
+  meaningfully needs `@testing-library/react`'s `renderHook` (jsdom) --
+  exactly the "heavy test infra" this pass was told to avoid unless
+  clearly justified. Their pagination/search behavior stays covered by
+  live browser verification (PR 24, PR 29) instead.
+
+37 new tests (6 → 43 in the vitest suite: 8 permission-gate tests, 19
+dashboard-attention tests, 8 bulk-cap tests including the 99/100/101
+boundary, 2 production-review gap-fills). Pure frontend, no backend
+touched -- no full backend suite run for this pass. Frontend gates green
+(`tsc`, `eslint`, `vitest`, `next build`). Verified live after the
+refactor (not just the new unit tests): logged in as the operator,
+confirmed Access/Audit log/Summary report links, per-document Inspect/
+Sanitize, and the bulk bar all still render and enable correctly against
+the now-shared permission helpers, and the dashboard still renders
+correctly against the extracted `dashboardAttention` functions.

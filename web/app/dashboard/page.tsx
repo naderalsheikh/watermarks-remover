@@ -4,7 +4,17 @@ import { useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { useApiData } from "@/lib/useApi";
-import type { AttentionItem, AttentionType, Dashboard } from "@/lib/types";
+import {
+  attentionMatterHref,
+  attentionPrimaryHref,
+  attentionScopeNote,
+  attentionTabCounts,
+  filterAttentionByTab,
+  recentEmptyStateText,
+  recentScopeNote,
+  type AttentionTab,
+} from "@/lib/dashboardAttention";
+import type { AttentionType, Dashboard } from "@/lib/types";
 import { Header } from "@/components/Header";
 
 // Per type: badge styling, the one-line label, and the "why it matters /
@@ -46,7 +56,7 @@ const ATTENTION_META: Record<
   },
 };
 
-const ATTENTION_TABS: { value: "all" | AttentionType; label: string }[] = [
+const ATTENTION_TABS: { value: AttentionTab; label: string }[] = [
   { value: "all", label: "All" },
   { value: "unreviewed_findings", label: "Unreviewed" },
   { value: "refused", label: "Refused" },
@@ -75,26 +85,6 @@ function formatTs(ts: string): string {
     : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-// Precise per-type destinations, not one generic "open the matter" link
-// for everything: a job-bearing item (unreviewed/refused/failed) lands on
-// that exact job, with unreviewed_findings scrolling straight to the
-// warning section (see web/app/matters/job/page.tsx's ?highlight=
-// handling); stale has no job to point at, so it lands on the matter
-// itself. "View audit" and "Open matter" are offered everywhere as
-// secondary actions so a drill-down never traps the operator on one page.
-function attentionPrimaryHref(item: AttentionItem): string {
-  if (item.job_id) {
-    const base = `/matters/job?matter=${item.matter_id}&job=${item.job_id}`;
-    return item.type === "unreviewed_findings" ? `${base}&highlight=unreviewed` : base;
-  }
-  return `/matters/view?id=${item.matter_id}`;
-}
-
-function attentionMatterHref(item: AttentionItem): string {
-  const base = `/matters/view?id=${item.matter_id}`;
-  return item.document_id ? `${base}&doc=${item.document_id}` : base;
-}
-
 export default function DashboardPage() {
   const { data, error, loading, reload } = useApiData<Dashboard>(
     () => api.get("/v1/dashboard"),
@@ -104,8 +94,9 @@ export default function DashboardPage() {
   // honest to do so without a "loaded-so-far" caveat, because unlike the
   // matters/documents lists, this array is never paginated: the backend
   // computes it in full over every readable matter on each request.
-  const [tab, setTab] = useState<"all" | AttentionType>("all");
-  const visibleAttention = data?.attention.filter((a) => tab === "all" || a.type === tab) ?? [];
+  const [tab, setTab] = useState<AttentionTab>("all");
+  const visibleAttention = filterAttentionByTab(data?.attention ?? [], tab);
+  const tabCounts = attentionTabCounts(data?.attention ?? []);
 
   return (
     <>
@@ -188,24 +179,15 @@ export default function DashboardPage() {
               <h2 className="mb-2 text-sm font-semibold tracking-wide text-muted">
                 NEEDS ATTENTION
               </h2>
-              {data.admin_matters < data.totals.matters && (
+              {attentionScopeNote(data.admin_matters, data.totals.matters) && (
                 <p className="mb-2 text-xs text-muted">
-                  {data.admin_matters === 0
-                    ? "You have read access only, not admin, on these matters — stale-matter detection " +
-                      "is hidden (it's derived from audit activity, which requires admin). Refused, " +
-                      "failed, and unreviewed-findings items below are still shown in full."
-                    : `Stale-matter detection is shown only for the ${data.admin_matters} of ` +
-                      `${data.totals.matters} matter${data.totals.matters === 1 ? "" : "s"} you ` +
-                      "administer — it's derived from audit activity, which requires admin."}
+                  {attentionScopeNote(data.admin_matters, data.totals.matters)}
                 </p>
               )}
 
               <div className="mb-2 flex flex-wrap gap-1.5">
                 {ATTENTION_TABS.map((t) => {
-                  const count =
-                    t.value === "all"
-                      ? data.attention.length
-                      : data.attention.filter((a) => a.type === t.value).length;
+                  const count = tabCounts[t.value];
                   return (
                     <button
                       key={t.value}
@@ -300,20 +282,14 @@ export default function DashboardPage() {
               <h2 className="mb-2 text-sm font-semibold tracking-wide text-muted">
                 RECENT ACTIVITY
               </h2>
-              {data.admin_matters < data.totals.matters && (
+              {recentScopeNote(data.admin_matters, data.totals.matters) && (
                 <p className="mb-2 text-xs text-muted">
-                  {data.admin_matters === 0
-                    ? "This feed shows audit activity, which requires admin — you don't administer " +
-                      "any of your readable matters, so it's empty rather than incomplete."
-                    : `Limited to the ${data.admin_matters} of ${data.totals.matters} matter` +
-                      `${data.totals.matters === 1 ? "" : "s"} you administer.`}
+                  {recentScopeNote(data.admin_matters, data.totals.matters)}
                 </p>
               )}
               {data.recent.length === 0 ? (
                 <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
-                  {data.admin_matters === 0 && data.totals.matters > 0
-                    ? "No activity visible — you have read access only, not admin, on these matters."
-                    : "No activity yet."}
+                  {recentEmptyStateText(data.admin_matters, data.totals.matters)}
                 </div>
               ) : (
                 <ul className="divide-y divide-border rounded-md border border-border">

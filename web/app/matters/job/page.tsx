@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format";
 import { useApiData } from "@/lib/useApi";
+import { hasMatterPerm } from "@/lib/matterPermissions";
 import type { Finding, Job, Manifest, Matter } from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -370,7 +371,7 @@ function JobView({
     () => api.get<Matter>(`/v1/matters/${matterId}`),
     `matter:${matterId}`,
   );
-  const perms = new Set(matterQ.data?.perms ?? []);
+  const perms = matterQ.data?.perms;
   const isPending = job?.status === "queued" || job?.status === "running";
   // Job execution is synchronous within the request that starts it (see
   // service/app/main.py's _execute_job), so "running" is rarely observed
@@ -411,7 +412,7 @@ function JobView({
         <Link href={`/matters/view?id=${matterId}`} className="text-sm text-muted hover:text-foreground">
           ← Matter
         </Link>
-        {perms.has("admin") && (
+        {hasMatterPerm(perms, "admin") && (
           <Link
             href={`/matters/audit?id=${matterId}`}
             className="text-sm text-muted hover:text-foreground"

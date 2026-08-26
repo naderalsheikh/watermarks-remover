@@ -82,6 +82,32 @@ describe("computeProductionReviewState", () => {
     expect(state.approveSubtypes).toEqual([]);
   });
 
+  it("counts multiple findings of the same approve-default subtype, not just their presence", () => {
+    const findings = [
+      finding({ policy_subtype: "tracked_changes", requires_approval: true }),
+      finding({ policy_subtype: "tracked_changes", requires_approval: true }),
+      finding({ policy_subtype: "tracked_changes", requires_approval: true }),
+      finding({ policy_subtype: "comments_and_notes", requires_approval: true }),
+    ];
+    const state = computeProductionReviewState(true, true, loaded(findings));
+    expect(state.approveSubtypeCounts.get("tracked_changes")).toBe(3);
+    expect(state.approveSubtypeCounts.get("comments_and_notes")).toBe(1);
+  });
+
+  it("excludes a finding that requires approval but carries no policy_subtype", () => {
+    // requires_approval && policy_subtype is the guard in the real code --
+    // a finding with no subtype mapping has nothing to attach an
+    // approve/keep decision to, so it must not appear in the map or the
+    // subtype list, and must not crash trying to increment a null key.
+    const findings = [
+      finding({ policy_subtype: null, requires_approval: true }),
+      finding({ policy_subtype: "tracked_changes", requires_approval: true }),
+    ];
+    const state = computeProductionReviewState(true, true, loaded(findings));
+    expect(state.approveSubtypes).toEqual(["tracked_changes"]);
+    expect(state.approveSubtypeCounts.size).toBe(1);
+  });
+
   it("never gates or reviews outside production, regardless of inspect state", () => {
     const findings = [finding({ policy_subtype: "tracked_changes", requires_approval: true })];
     expect(computeProductionReviewState(false, true, loaded(findings)).needsFallbackGate).toBe(
