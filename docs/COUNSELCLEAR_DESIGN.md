@@ -1450,3 +1450,45 @@ to force a worker crash or backdate a matter on demand): tab filtering,
 every deep link's exact href, and the unreviewed-findings scroll-to
 landing exactly on the warning section — all confirmed through the
 running app, not just read from source.
+
+### PR 26 — Audit and job CSV export for reviewer handoff — implemented (2026-08-25)
+
+Neither the audit chain nor a matter's job history could be handed off
+outside the app in any form — a reviewer sending a matter's custody
+record to opposing counsel, a client, or an internal compliance file had
+no export path at all, only the paginated UI list.
+
+- **`GET /v1/matters/{id}/audit/export`** (`service/app/main.py`): the
+  *complete* audit chain as CSV, deliberately ignoring `limit`/`offset`
+  entirely — an export is "give me everything," and a partial chain-of-
+  custody handoff isn't a real one. Same `admin` perm and the same
+  `verify_chain()` call as the paginated route; the verdict rides in
+  `X-Chain-Ok`/`X-Chain-Detail`/`X-Total-Events` response headers rather
+  than being folded into the CSV body, so every row stays a real event
+  and the file stays valid RFC4180 CSV a spreadsheet tool can open
+  directly.
+- **`GET /v1/matters/{id}/jobs/export`**: same idea for the job history —
+  one row per job (job id, document, kind, policy, status, error,
+  verification, timestamps), full set, `read` perm (matching the list
+  route).
+- **Registration-order bug caught before it shipped**: `jobs/export` was
+  first added *after* the existing `GET .../jobs/{job_id}` route.
+  FastAPI/Starlette match routes in registration order, so `{job_id}`
+  would have silently swallowed the literal path segment `export` as a
+  job id, and the export route would never have been reached — moved
+  `export_jobs` to register before `get_job`, with a regression test
+  (`test_jobs_export_returns_every_job_as_csv_and_the_route_is_not_shadowed`)
+  asserting a real 200 CSV response, not the 404 "job not found" the bug
+  would have produced.
+- **UI**: plain `<a href>` download links (not the JSON `api` client —
+  same pattern the existing bundle download already uses; same-origin
+  session cookie rides along natively) — "Export CSV" on the audit page,
+  "Export jobs CSV" on the matter view page.
+
+Tests: 3 new (`tests/test_app.py`) — full unpaginated export content and
+headers, admin-perm gating on the audit export, and the route-shadowing
+regression above. Full suite green (1081 collected); frontend gates
+green; verified live — both exports fetched directly against a running
+backend, confirmed valid CSV with correct headers and complete row
+counts, including the jobs export specifically returning 200 with real
+rows rather than being shadowed.

@@ -183,10 +183,26 @@ function AuditView({ matterId }: { matterId: string }) {
       <Link href={`/matters/view?id=${matterId}`} className="text-sm text-muted hover:text-foreground">
         ← Back to matter
       </Link>
-      <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">Audit log</h1>
-      <p className="mb-6 text-sm text-muted">
-        {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
-      </p>
+      <div className="mb-6 mt-2 flex items-end justify-between gap-4">
+        <div>
+          <h1 className="mb-1 text-2xl font-semibold tracking-tight">Audit log</h1>
+          <p className="text-sm text-muted">
+            {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
+          </p>
+        </div>
+        {/* Plain <a>, not the api client: this is a file download (CSV,
+            Content-Disposition: attachment), same pattern as the bundle
+            download on the job page -- the browser handles it natively,
+            same-origin session cookie rides along automatically. Exports
+            the FULL chain, never just what's loaded/filtered on this
+            page -- a reviewer handoff can't be a partial custody record. */}
+        <a
+          href={`/v1/matters/${matterId}/audit/export`}
+          className="shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+        >
+          Export CSV
+        </a>
+      </div>
       {matterQ.error && <p className="mb-6 text-sm text-red-600">{matterQ.error}</p>}
 
       {!authQ.loading && !oidc && (

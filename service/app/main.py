@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import io
 import json
 import logging
@@ -1108,6 +1109,56 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "limit": limit,
         }
 
+    @app.get("/v1/matters/{matter_id}/jobs/export")
+    def export_jobs(
+        matter_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """The full, unpaginated job history as CSV -- one row per job, the
+        same fields GET .../jobs already returns (minus the large `result`
+        payload, same as the list route), never truncated to a page: an
+        export is an explicit "give me everything" action, not a view.
+
+        Registered before GET .../jobs/{job_id} below on purpose: FastAPI
+        matches routes in registration order, and {job_id} would otherwise
+        greedily swallow the literal path segment "export" as a job id.
+        """
+        _require(matter_id, "read", s, user)
+        _matter(matter_id, s)
+        jobs = (
+            s.query(Job, Document.filename)
+            .join(Document, Document.id == Job.document_id)
+            .filter(Job.matter_id == matter_id)
+            .order_by(Job.created_utc.desc())
+            .all()
+        )
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(
+            [
+                "job_id", "document_id", "document_filename", "kind", "policy_id",
+                "status", "error", "verification_pass", "created_utc", "finished_utc",
+            ]
+        )
+        for job, filename in jobs:
+            result = job.result_json or {}
+            writer.writerow(
+                [
+                    job.id, job.document_id, filename, job.kind, job.policy_id,
+                    job.status, job.error, result.get("verification_pass", ""),
+                    job.created_utc, job.finished_utc or "",
+                ]
+            )
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="jobs_{matter_id}.csv"',
+                "X-Total-Jobs": str(len(jobs)),
+            },
+        )
+
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}")
     def get_job(
         matter_id: str,
@@ -1297,6 +1348,52 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 for e in page_rows
             ],
         }
+
+    @app.get("/v1/matters/{matter_id}/audit/export")
+    def export_audit(
+        matter_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """The full, unpaginated audit chain as CSV -- a reviewer handoff
+        artifact, not a UI list. Same "admin" perm and the same
+        verify_chain() call as GET .../audit; deliberately ignores
+        limit/offset entirely (there is no partial handoff of a chain of
+        custody) and reports the verification verdict in response headers
+        rather than folding it into the CSV body, so every row stays a
+        real audit event and the file stays valid, parseable CSV.
+        """
+        _require(matter_id, "admin", s, user)
+        _matter(matter_id, s)
+        all_rows = (
+            s.query(AuditEvent)
+            .filter(AuditEvent.matter_id == matter_id)
+            .order_by(AuditEvent.seq)
+            .all()
+        )
+        ok, detail = verify_chain(all_rows)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(
+            ["seq", "at", "action", "actor_id", "payload_json", "prev_hash", "row_hash"]
+        )
+        for e in all_rows:
+            writer.writerow(
+                [e.seq, e.at, e.action, e.actor_id, json.dumps(e.payload), e.prev_hash, e.row_hash]
+            )
+        # Header values must be a single line -- chain_detail is normally a
+        # short fixed phrase, but never trust it not to contain one.
+        safe_detail = detail.replace("\n", " ").replace("\r", " ")
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="audit_{matter_id}.csv"',
+                "X-Chain-Ok": "true" if ok else "false",
+                "X-Chain-Detail": safe_detail,
+                "X-Total-Events": str(len(all_rows)),
+            },
+        )
 
     @app.get("/v1/dashboard")
     def dashboard(

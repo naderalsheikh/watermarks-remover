@@ -742,6 +742,15 @@ function MatterView({
           >
             Audit log →
           </Link>
+          {/* Plain <a>, not the api client: a CSV file download, same
+              pattern as the job page's bundle download. Exports every job
+              in the matter, never just what's loaded on this page. */}
+          <a
+            href={`/v1/matters/${matterId}/jobs/export`}
+            className="text-sm text-muted hover:text-foreground"
+          >
+            Export jobs CSV →
+          </a>
         </div>
       </div>
       <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">

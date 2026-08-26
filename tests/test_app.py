@@ -336,6 +336,82 @@ def test_audit_pagination_returns_a_page_but_still_verifies_the_full_chain(clien
     ][1:3]
 
 
+def test_audit_export_returns_every_event_as_csv_never_paginated(client):
+    import csv
+    import io
+
+    m = client.post("/v1/matters", json={"name": "export-audit"}).json()["id"]
+    for i in range(3):
+        client.put(f"/v1/matters/{m}/acl", json={"user_id": f"reviewer{i}", "perm": "read"})
+    full_total = client.get(f"/v1/matters/{m}/audit").json()["total"]
+    assert full_total >= 4  # matter.create + 3 grants
+
+    r = client.get(f"/v1/matters/{m}/audit/export")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert r.headers["x-chain-ok"] == "true"
+    assert r.headers["x-total-events"] == str(full_total)
+    assert f'filename="audit_{m}.csv"' in r.headers["content-disposition"]
+
+    rows = list(csv.reader(io.StringIO(r.text)))
+    assert rows[0] == ["seq", "at", "action", "actor_id", "payload_json", "prev_hash", "row_hash"]
+    assert len(rows) - 1 == full_total  # header row + one row per event, no limit/offset applied
+    assert [row[2] for row in rows[1:]].count("acl.grant") == 3
+
+
+def test_audit_export_requires_admin_perm(tmp_path, monkeypatch):
+    from app.config import Config
+    from app.security import issue_session
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw-export-acl")
+    cfg = Config(tmp_path / "data")
+    c = TestClient(create_app(cfg.data_root))
+    assert c.post("/v1/auth/login", json={"password": "pw-export-acl"}).status_code == 200
+
+    m = c.post("/v1/matters", json={"name": "export-acl"}).json()["id"]
+    alice = "oidc:alice"
+    c.put(f"/v1/matters/{m}/acl", json={"user_id": alice, "perm": "read"})
+
+    c.cookies.set("cc_session", issue_session(cfg, alice))
+    r = c.get(f"/v1/matters/{m}/audit/export")
+    assert r.status_code == 403
+
+
+def test_jobs_export_returns_every_job_as_csv_and_the_route_is_not_shadowed(client):
+    """The literal path segment "export" must reach export_jobs, not be
+    swallowed by GET .../jobs/{job_id} matching "export" as a job id --
+    that route is registered first in the file, so ordering matters."""
+    import csv
+    import io
+
+    m = client.post("/v1/matters", json={"name": "export-jobs"}).json()["id"]
+    doc_ids = []
+    for i in range(3):
+        data = (FIXTURES / "spa.txt").read_bytes()
+        r = client.post(
+            f"/v1/matters/{m}/documents",
+            files={"file": (f"doc{i}.txt", data, "application/octet-stream")},
+        )
+        doc_ids.append(r.json()["id"])
+    for doc_id in doc_ids:
+        client.post(f"/v1/matters/{m}/documents/{doc_id}/inspect-jobs")
+
+    r = client.get(f"/v1/matters/{m}/jobs/export")
+    assert r.status_code == 200  # not a 404 "job not found" from get_job
+    assert r.headers["content-type"].startswith("text/csv")
+    assert r.headers["x-total-jobs"] == "3"
+    assert f'filename="jobs_{m}.csv"' in r.headers["content-disposition"]
+
+    rows = list(csv.reader(io.StringIO(r.text)))
+    assert rows[0] == [
+        "job_id", "document_id", "document_filename", "kind", "policy_id",
+        "status", "error", "verification_pass", "created_utc", "finished_utc",
+    ]
+    assert len(rows) - 1 == 3
+    assert {row[2] for row in rows[1:]} == {"doc0.txt", "doc1.txt", "doc2.txt"}
+    assert all(row[5] == "done" for row in rows[1:])
+
+
 def _upload(client, name: str, matter: str | None = None) -> dict:
     if matter is None:
         matter = client.post("/v1/matters", json={"name": "m"}).json()["id"]
