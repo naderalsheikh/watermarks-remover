@@ -227,6 +227,91 @@ def test_documents_and_jobs_pagination_offset_reports_correct_total_and_page(cli
     assert len(jobs_page["jobs"]) == 2
 
 
+def test_matters_search_is_server_side_and_composes_with_pagination(client):
+    """`q` narrows the ACL-scoped set on the server -- not a client-side
+    filter over one page -- and the narrowed `total` is what pagination
+    walks, so a search result can itself span multiple pages correctly."""
+    for n in ("Acme Merger", "Acme Litigation", "Acme Estate Plan", "Beta Contract"):
+        client.post("/v1/matters", json={"name": n})
+
+    acme = client.get("/v1/matters?q=acme").json()  # case-insensitive
+    assert acme["total"] == 3
+    assert {m["name"] for m in acme["matters"]} == {
+        "Acme Merger", "Acme Litigation", "Acme Estate Plan",
+    }
+    assert acme["q"] == "acme"
+
+    # The narrowed total is what offset/limit page over, not the full set.
+    page1 = client.get("/v1/matters?q=acme&limit=2&offset=0").json()
+    assert page1["total"] == 3 and len(page1["matters"]) == 2
+    page2 = client.get("/v1/matters?q=acme&limit=2&offset=2").json()
+    assert len(page2["matters"]) == 1
+    seen = {m["id"] for m in page1["matters"]} | {m["id"] for m in page2["matters"]}
+    assert len(seen) == 3  # no dupes/gaps across the two pages of the search
+
+    none = client.get("/v1/matters?q=nonexistent-xyz").json()
+    assert none["total"] == 0 and none["matters"] == []
+
+    unfiltered = client.get("/v1/matters").json()
+    assert unfiltered["total"] == 4
+    assert unfiltered["q"] == ""
+
+
+def test_matters_search_wildcards_are_escaped_not_interpreted(client):
+    """A literal '%' or '_' typed into the search box must match itself,
+    not act as a SQL LIKE wildcard -- otherwise "50% Settlement" would
+    silently behave like a fuzzy search instead of an exact substring one."""
+    client.post("/v1/matters", json={"name": "50% Settlement"})
+    client.post("/v1/matters", json={"name": "50X Settlement"})  # would match if % were a wildcard
+
+    r = client.get("/v1/matters?q=50%25").json()  # '%25' is a URL-encoded literal '%'
+    assert r["total"] == 1
+    assert r["matters"][0]["name"] == "50% Settlement"
+
+
+def test_documents_search_is_server_side_and_scoped_to_the_matter(client):
+    m = client.post("/v1/matters", json={"name": "search-docs"}).json()["id"]
+    other_m = client.post("/v1/matters", json={"name": "other"}).json()["id"]
+    data = (FIXTURES / "spa.txt").read_bytes()
+    for name in ("contract_final.txt", "contract_draft.txt", "memo.txt"):
+        client.post(
+            f"/v1/matters/{m}/documents",
+            files={"file": (name, data, "application/octet-stream")},
+        )
+    client.post(
+        f"/v1/matters/{other_m}/documents",
+        files={"file": ("contract_final.txt", data, "application/octet-stream")},
+    )
+
+    r = client.get(f"/v1/matters/{m}/documents?q=contract").json()
+    assert r["total"] == 2  # scoped to this matter, never the other one's match
+    assert {d["filename"] for d in r["documents"]} == {"contract_final.txt", "contract_draft.txt"}
+    assert r["q"] == "contract"
+
+    none = client.get(f"/v1/matters/{m}/documents?q=nope").json()
+    assert none["total"] == 0
+
+
+def test_matters_search_never_surfaces_a_matter_outside_acl_scope(tmp_path, monkeypatch):
+    """Search is chained onto the same ACL-scoped query as the unfiltered
+    list -- a principal with no read grant on a matching matter must get
+    zero results for it, exactly as the unfiltered list already would."""
+    from app.config import Config
+    from app.security import issue_session
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw-search-acl")
+    cfg = Config(tmp_path / "data")
+    c = TestClient(create_app(cfg.data_root))
+    assert c.post("/v1/auth/login", json={"password": "pw-search-acl"}).status_code == 200
+
+    c.post("/v1/matters", json={"name": "Acme Confidential Merger"})
+
+    alice = "oidc:alice"
+    c.cookies.set("cc_session", issue_session(cfg, alice))
+    r = c.get("/v1/matters?q=acme").json()
+    assert r["total"] == 0 and r["matters"] == []  # no ACL grant -> invisible to search too
+
+
 def test_audit_pagination_returns_a_page_but_still_verifies_the_full_chain(client):
     """Chain verification must not be weakened by pagination -- it always
     covers every event, even when only a page of them is returned for

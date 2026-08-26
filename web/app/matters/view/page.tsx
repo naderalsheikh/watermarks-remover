@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { computeProductionReviewState } from "@/lib/productionReview";
 import { useApiData } from "@/lib/useApi";
 import { usePaginatedList } from "@/lib/usePaginatedList";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import type { BulkJobsResponse, Document, Job, Matter, Policy } from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -647,14 +648,21 @@ function MatterView({
   highlightDocId: string | null;
 }) {
   const matterQ = useApiData(() => api.get<Matter>(`/v1/matters/${matterId}`), `matter:${matterId}`);
+  const [docSearch, setDocSearch] = useState("");
+  const debouncedDocSearch = useDebouncedValue(docSearch.trim(), 300);
   const docsQ = usePaginatedList<Document>(
     (offset) =>
       api
         .get<{ documents: Document[]; total: number }>(
-          `/v1/matters/${matterId}/documents?limit=${PAGE_SIZE}&offset=${offset}`,
+          `/v1/matters/${matterId}/documents?limit=${PAGE_SIZE}&offset=${offset}` +
+            `&q=${encodeURIComponent(debouncedDocSearch)}`,
         )
         .then((r) => ({ items: r.documents, total: r.total })),
-    `docs:${matterId}`,
+    // Search runs on the server (same GET, `q` param) across every
+    // document in this matter, not just what's loaded -- changing it
+    // resets pagination to page 1 of the new result, like a matter-id
+    // change does elsewhere.
+    `docs:${matterId}:${debouncedDocSearch}`,
   );
   const jobsQ = usePaginatedList<Job>(
     (offset) =>
@@ -699,15 +707,13 @@ function MatterView({
     }
   }
 
-  const [docSearch, setDocSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | StatusTone>("all");
-  // Both filters run only against the documents/jobs loaded so far
-  // (accumulated via "Load more", see usePaginatedList) — same "loaded,
-  // not the whole matter" scope as the matters-list search.
+  // docSearch above already narrowed docsQ.items on the server; this filter
+  // only applies the status facet, and only over what's loaded so far
+  // (accumulated via "Load more") — status isn't a server-side query
+  // param, since it's derived from job history, not a stored document
+  // field, so it can't honestly claim to cover documents not yet loaded.
   const filteredDocs = docsQ.items.filter((doc) => {
-    if (docSearch.trim() && !doc.filename.toLowerCase().includes(docSearch.trim().toLowerCase())) {
-      return false;
-    }
     if (statusFilter !== "all") {
       const docJobs = jobsQ.items
         .filter((j) => j.document_id === doc.id)
@@ -797,7 +803,9 @@ function MatterView({
       {docsQ.error && <p className="text-sm text-red-600">{docsQ.error}</p>}
       {!docsQ.loading && docsQ.items.length === 0 && (
         <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
-          No documents yet — upload one above to inspect or sanitize it.
+          {debouncedDocSearch
+            ? `No documents match "${debouncedDocSearch}".`
+            : "No documents yet — upload one above to inspect or sanitize it."}
         </div>
       )}
 
@@ -805,8 +813,9 @@ function MatterView({
             <>
               {docsQ.total > docsQ.items.length && (
                 <p className="mb-2 text-xs text-muted">
-                  Loaded {docsQ.items.length} of {docsQ.total} documents — search and filters below
-                  only cover what&apos;s loaded.
+                  Loaded {docsQ.items.length} of {docsQ.total}
+                  {debouncedDocSearch ? " matching" : ""} documents — the status filter below only
+                  covers what&apos;s loaded.
                 </p>
               )}
 
@@ -865,6 +874,10 @@ function MatterView({
               placeholder="Search documents by filename…"
               className="w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-accent"
             />
+            <p className="text-xs text-muted">
+              Searches every document in this matter on the server. The status filter below only
+              covers documents already loaded.
+            </p>
             <div className="flex flex-wrap gap-1.5">
               <button
                 onClick={() => setStatusFilter("all")}
@@ -893,7 +906,7 @@ function MatterView({
           </div>
 
           {filteredDocs.length === 0 ? (
-            <p className="text-sm text-muted">No loaded documents match this search/filter.</p>
+            <p className="text-sm text-muted">No loaded documents match this status filter.</p>
           ) : (
             <>
               <label className="mb-2 flex items-center gap-2 text-xs text-muted">

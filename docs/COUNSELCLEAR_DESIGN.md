@@ -1368,3 +1368,39 @@ with description, known-refusal-class disclosure, shared optional
 reason), and a per-document results table with status badges, reasons,
 and job links. Tests: `tests/test_bulk_jobs.py` (8). Full suite green
 (1074 collected); frontend gates green.
+
+### PR 24 — Server-side search for matters and documents — implemented (2026-08-25)
+
+Matters and per-matter documents were only ever searchable client-side,
+over whatever page happened to be loaded — accurate while pagination was
+new and corpora were small, but the exact honesty gap the "loaded-so-far"
+disclosure exists to name once a real corpus outgrows one page: a matter
+named something a reviewer typed could sit unloaded on page 3 and never
+appear.
+
+- **`GET /v1/matters` and `GET /v1/matters/{id}/documents` take a new `q`
+  param** (`service/app/main.py`): case-insensitive substring match
+  (`ilike`) against `Matter.name` / `Document.filename`, chained onto the
+  *same* filtered query pagination and ACL-scoping already ran on — so
+  search can never surface a matter outside what the principal could
+  already list, and the narrowed `total` (echoed back alongside the
+  results) is what offset/limit page over, not the unfiltered set. A new
+  `_escape_like()` escapes literal `%`/`_`/`\` in the query so a name like
+  "50% Settlement" is matched literally, not as a wildcard.
+- **Frontend**: a new `useDebouncedValue` hook (`web/lib/useDebouncedValue.ts`,
+  300ms) feeds the search text into the `key` `usePaginatedList` already
+  resets on, so a changed search re-fetches page 1 of the new server-side
+  result exactly like a matter-id change does — no new pagination
+  machinery needed. The matters list and the matter-view document list
+  both switched from client-side `.filter()` over loaded items to this;
+  the document list's status filter (derived from job history, not a
+  stored field) stays client-side/loaded-so-far, and its copy says so
+  explicitly rather than letting two different scopes read as one.
+- Tests: 4 new (`tests/test_app.py`) — search composes correctly with
+  pagination across multiple pages of a narrowed result, wildcard
+  characters are escaped, document search is scoped to its matter (not
+  leaking a same-named file from another matter), and search never
+  surfaces a matter outside ACL scope for a principal with no read grant.
+  Full suite green (1078 collected); frontend gates green; verified live
+  in the browser (debounced to one request per pause in typing, not one
+  per keystroke; `50%` matched only the literal name).

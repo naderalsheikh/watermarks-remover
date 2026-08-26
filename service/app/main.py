@@ -62,6 +62,18 @@ from .storage import original_key, storage_from_config
 # test_worker_isolation.py::test_no_decision_marker_stays_in_sync_with_policies.
 NO_DECISION_MARKER = "no operator decision was supplied"
 
+
+def _escape_like(q: str) -> str:
+    """Escape SQL LIKE/ILIKE wildcards in a user-supplied search string.
+
+    Without this, a literal percent sign or underscore typed into a search
+    box would act as a wildcard instead of matching itself -- e.g.
+    searching a matter named "50% Settlement" would silently behave like a
+    fuzzy search instead of an exact substring one. Callers pass a single
+    backslash as the ilike() escape character to match this.
+    """
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 # Four frozen v1 default policies (docs/COUNSELCLEAR_DESIGN.md, "Key
 # Decisions" #5, and the full subtype table under Policy Engine). Literal
 # ids/labels here, not an import of scripts.policies: main.py stays out of
@@ -668,6 +680,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s: Session = Depends(db_session),
         limit: int = 100,
         offset: int = 0,
+        q: str = "",
     ):
         limit = min(max(1, limit), 500)  # server-capped, never unbounded
         offset = max(0, offset)
@@ -676,6 +689,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
         ]
         base = s.query(Matter).filter(Matter.id.in_(matter_ids))
+        q = q.strip()
+        if q:
+            # Search runs against the same ACL-scoped set as everything
+            # else here -- it can never surface a matter name the caller
+            # couldn't otherwise list. ilike() compiles to a case-insensitive
+            # LIKE on every backend this app supports (sqlite/Postgres).
+            base = base.filter(Matter.name.ilike(f"%{_escape_like(q)}%", escape="\\"))
         total = base.count()
         matters = base.order_by(Matter.created_utc.desc()).offset(offset).limit(limit)
         return {
@@ -683,6 +703,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "total": total,
             "offset": offset,
             "limit": limit,
+            "q": q,
         }
 
     @app.post("/v1/matters")
@@ -766,12 +787,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s: Session = Depends(db_session),
         limit: int = 100,
         offset: int = 0,
+        q: str = "",
     ):
         limit = min(max(1, limit), 500)  # server-capped, never unbounded
         offset = max(0, offset)
         _require(matter_id, "read", s, user)
         _matter(matter_id, s)
         base = s.query(Document).filter_by(matter_id=matter_id)
+        q = q.strip()
+        if q:
+            base = base.filter(Document.filename.ilike(f"%{_escape_like(q)}%", escape="\\"))
         total = base.count()
         docs = base.order_by(Document.created_utc.desc()).offset(offset).limit(limit)
         return {
@@ -779,6 +804,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "total": total,
             "offset": offset,
             "limit": limit,
+            "q": q,
         }
 
     @app.get("/v1/matters/{matter_id}/documents/{doc_id}")
