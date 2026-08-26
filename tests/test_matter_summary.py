@@ -146,6 +146,11 @@ def test_summary_lists_unreviewed_findings_and_refused(env):
     assert "good.docm" in body
     assert "macro.docm" in body
     assert "j-unreviewed" in body
+    # PR 33: every attention item with a job_id links to that job's
+    # custody certificate, so a reviewer can go straight from "why does
+    # this need attention" to the disclosure document for it.
+    assert f'href="/v1/matters/{mid}/jobs/j-unreviewed/certificate"' in body
+    assert f'href="/v1/matters/{mid}/jobs/{refused["id"]}/certificate"' in body
 
 
 def test_summary_recent_events_disclose_partial_coverage(env):

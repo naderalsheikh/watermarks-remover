@@ -32,7 +32,7 @@ from . import oidc as oidc_mod
 # inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
 # isolated worker processes (see app.runner). A test enforces the ban.
 from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, perms_of, revoke
-from .audit import append_event, verify_chain
+from .audit import append_event, event_hash, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
 from .dispatcher import BatchDispatcher
@@ -64,6 +64,15 @@ from .storage import original_key, storage_from_config
 # never to decide anything. Kept in sync by
 # test_worker_isolation.py::test_no_decision_marker_stays_in_sync_with_policies.
 NO_DECISION_MARKER = "no operator decision was supplied"
+# scripts.policies.OPERATOR_KEPT_MARKER / APPROVED_BUT_NO_OP_MARKER, same
+# PR 17 literal-not-imported reason and the same sync test. Used by the
+# custody certificate (PR 33) to distinguish, in a manifest's actions[],
+# an operator's own reviewed "keep" decision (OPERATOR_KEPT_MARKER) and an
+# "approve" that this policy structurally resolves to a no-op keep anyway
+# (APPROVED_BUT_NO_OP_MARKER) from an unreviewed keep (NO_DECISION_MARKER
+# above) — the same string-distinction reason policies.py itself gives.
+OPERATOR_KEPT_MARKER = "reviewed and kept by operator"
+APPROVED_BUT_NO_OP_MARKER = "approved, but this subtype has no strip action under this policy"
 
 
 def _escape_like(q: str) -> str:
@@ -135,7 +144,19 @@ def _render_matter_summary_html(
                 if item.get("job_id"):
                     ref_bits.append(f"job id: {esc(item['job_id'])}")
                 ref = f" ({', '.join(ref_bits)})" if ref_bits else ""
-                attention_html += f"<li>{esc(item['detail'])}{ref}</li>"
+                # Every attention item with a job_id belongs to *this*
+                # matter (_attention_items was called with matter_ids=[this
+                # matter] for the summary route, unlike the dashboard's
+                # multi-matter call) -- safe to build the link from this
+                # function's own matter_id param rather than trusting an
+                # unscoped item['matter_id'].
+                cert_link = (
+                    f' <a href="/v1/matters/{esc(matter_id)}/jobs/{esc(item["job_id"])}/certificate">'
+                    "certificate</a>"
+                    if item.get("job_id")
+                    else ""
+                )
+                attention_html += f"<li>{esc(item['detail'])}{ref}{cert_link}</li>"
             attention_html += "</ul>"
 
     job_status_html = "".join(
@@ -217,6 +238,196 @@ Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
 {"Verified intact" if chain_ok else "BROKEN"}</span> — {esc(chain_detail)}</p>
 {recent_html}
 
+<div class="disclaimer">{disclaimer}</div>
+</body>
+</html>
+"""
+
+
+def _render_job_certificate_html(
+    *,
+    matter_id: str,
+    matter_name: str,
+    document_id: str,
+    document_name: str,
+    job_id: str,
+    kind: str,
+    status: str,
+    error: str,
+    created_utc: str,
+    finished_utc: str | None,
+    original_sha256: str,
+    derivative_sha256: str | None,
+    policy_id: str | None,
+    policy_version: int | None,
+    policy_description: str | None,
+    actions: list[str],
+    findings_before: list[str],
+    inspect_findings: list[dict],
+    verification: dict | None,
+    limitations: list[str],
+    audit_event_count: int,
+    audit_integrity_ok: bool,
+    generated_at: str,
+    generated_by: str,
+) -> str:
+    """Self-contained per-job custody/transaction certificate (PR 33).
+
+    Same discipline as _render_matter_summary_html above: no external CSS/
+    JS (printable to PDF from any browser's own print dialog), every
+    dynamic value html.escape()'d, and the disclaimer is load-bearing —
+    this certifies CounselClear's own recorded transaction (what ran,
+    what the policy did, what was verified, what's disclosed as a
+    limitation), never that the document is "clean" or "safe". No
+    original bytes and no unrelated audit rows appear here — original_
+    sha256/derivative_sha256 are hashes only, and audit_event_count/
+    audit_integrity_ok are a narrow, job-scoped custody assertion (each
+    of this job's own audit rows' stored hash recomputed and checked),
+    not a walk of the matter's full chain (that's the admin-gated
+    GET .../audit route's job).
+    """
+    e = html.escape
+
+    def esc(v: object) -> str:
+        return e(str(v))
+
+    limitations_html = (
+        "<p>No limitations flagged for this job.</p>"
+        if not limitations
+        else "<ul>" + "".join(f"<li>{esc(item)}</li>" for item in limitations) + "</ul>"
+    )
+
+    policy_html = ""
+    if policy_id is not None:
+        policy_html = (
+            "<h2>Policy</h2>"
+            f"<p><code>{esc(policy_id)}</code> (v{esc(policy_version)})"
+            f"{f' — {esc(policy_description)}' if policy_description else ''}</p>"
+        )
+
+    hashes_html = f"<p>Original SHA-256: <code>{esc(original_sha256)}</code>"
+    hashes_html += (
+        f"<br>Derivative SHA-256: <code>{esc(derivative_sha256)}</code></p>"
+        if derivative_sha256
+        else "<br>Derivative SHA-256: <em>none — no derivative was produced for this job</em></p>"
+    )
+
+    actions_html = (
+        "<p>No manifest actions recorded.</p>"
+        if not actions
+        else "<ul>" + "".join(f"<li>{esc(a)}</li>" for a in actions) + "</ul>"
+    )
+    findings_before_html = (
+        "<p>None recorded.</p>"
+        if not findings_before
+        else "<ul>" + "".join(f"<li>{esc(f)}</li>" for f in findings_before) + "</ul>"
+    )
+
+    inspect_findings_html = ""
+    if inspect_findings:
+        rows = "".join(
+            f"<tr><td>{esc(f.get('category', ''))}</td><td>{esc(f.get('subtype', ''))}</td>"
+            f"<td>{esc(f.get('risk_level', ''))}</td><td>{esc(f.get('confidence', ''))}</td></tr>"
+            for f in inspect_findings
+        )
+        inspect_findings_html = (
+            "<h2>Findings</h2>"
+            f"<p>{len(inspect_findings)} finding(s) reported. Inspection is read-only: no "
+            "derivative was produced and the original was not modified.</p>"
+            "<table><thead><tr><th>Category</th><th>Subtype</th><th>Risk</th>"
+            f"<th>Confidence</th></tr></thead><tbody>{rows}</tbody></table>"
+        )
+
+    verification_html = "<p>No verification data recorded for this job.</p>"
+    if verification:
+        v_pass = verification.get("pass")
+        checks = verification.get("checks") or []
+        checks_html = (
+            "".join(f"<li>{esc(c)}</li>" for c in checks) if checks else "<li>(no detail recorded)</li>"
+        )
+        verification_html = (
+            f"<p>Result: <span class=\"{'chain-ok' if v_pass else 'chain-broken'}\">"
+            f"{'passed' if v_pass else 'FAILED'}</span></p><ul>{checks_html}</ul>"
+        )
+
+    disclaimer = (
+        "This certificate records CounselClear's own recorded state for this single "
+        "job — what ran, what the applied policy did, what was verified, and what "
+        "is explicitly disclosed as a limitation below — as of the generation "
+        "timestamp. It is <strong>not</strong> a claim that this document is "
+        "“clean,” “safe,” or free of risk beyond what is "
+        "stated here, and it is <strong>not</strong> a legal opinion. Any "
+        "limitation listed below is part of the certificate, not a defect in it."
+    )
+
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Custody Certificate — {esc(document_name)}</title>
+<style>
+  body {{ font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 800px;
+         margin: 2rem auto; padding: 0 1rem; color: #171717; line-height: 1.5; }}
+  h1 {{ font-size: 1.5rem; margin-bottom: 0.25rem; }}
+  h2 {{ font-size: 1.1rem; margin-top: 2rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.25rem; }}
+  .meta {{ color: #6b7280; font-size: 0.9rem; }}
+  .disclaimer {{ background: #fef3c7; border: 1px solid #d97706; border-radius: 6px;
+                padding: 0.75rem 1rem; font-size: 0.9rem; margin: 1rem 0; }}
+  .limitations {{ background: #fee2e2; border: 2px solid #b91c1c; border-radius: 6px;
+                  padding: 0.75rem 1rem; margin: 1rem 0; }}
+  .limitations h2 {{ margin-top: 0; border-bottom: none; color: #b91c1c; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.85rem; margin-top: 0.5rem; }}
+  th, td {{ border: 1px solid #e5e7eb; padding: 4px 8px; text-align: left; }}
+  code {{ background: #f3f4f6; padding: 1px 4px; border-radius: 3px; word-break: break-all; }}
+  .chain-ok {{ color: #047857; font-weight: 600; }}
+  .chain-broken {{ color: #b91c1c; font-weight: 600; }}
+  .status {{ font-weight: 600; }}
+</style>
+</head>
+<body>
+<h1>Custody Certificate — {esc(document_name)}</h1>
+<p class="meta">Matter: {esc(matter_name)} (<code>{esc(matter_id)}</code>)<br>
+Document ID: <code>{esc(document_id)}</code><br>
+Job ID: <code>{esc(job_id)}</code> · kind: {esc(kind)} · status:
+<span class="status">{esc(status)}</span><br>
+Created: {esc(created_utc)} UTC{f" · Finished: {esc(finished_utc)} UTC" if finished_utc else ""}<br>
+Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
+<div class="disclaimer">{disclaimer}</div>
+
+<div class="limitations">
+<h2>Limitations — read before relying on this certificate</h2>
+{limitations_html}
+</div>
+
+{f'<div class="disclaimer"><strong>Error:</strong> {esc(error)}</div>' if error else ""}
+
+<h2>Hashes</h2>
+{hashes_html}
+
+{policy_html}
+{inspect_findings_html}
+
+<h2>Manifest actions</h2>
+{actions_html}
+
+<h2>Findings before sanitization</h2>
+{findings_before_html}
+
+<h2>Verification</h2>
+{verification_html}
+
+<h2>Custody record</h2>
+<p>{esc(audit_event_count)} audit event(s) recorded for this job in the matter's
+hash-chained audit log; each recomputed and confirmed to match its stored hash:
+<span class="{"chain-ok" if audit_integrity_ok else "chain-broken"}">
+{"OK" if audit_integrity_ok else "MISMATCH"}</span>. This is a check of this
+job's own recorded events only, not a walk of the matter's complete audit
+chain — see the matter's audit log (admin access) for that.</p>
+
+<div class="limitations">
+<h2>Limitations — read before relying on this certificate</h2>
+{limitations_html}
+</div>
 <div class="disclaimer">{disclaimer}</div>
 </body>
 </html>
@@ -1427,6 +1638,141 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if job.kind != "sanitize" or not job.result_json:
             raise HTTPException(404, "no manifest for this job")
         return JSONResponse(job.result_json.get("manifest", {}))
+
+    @app.get("/v1/matters/{matter_id}/jobs/{job_id}/certificate")
+    def job_certificate(
+        matter_id: str,
+        job_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Self-contained per-job custody/transaction certificate (PR 33).
+
+        Read-gated, same as job_manifest/job detail: every fact here is
+        already visible through those two read-gated routes (job status/
+        error/timestamps, the sanitize manifest, the document's own
+        original hash). The "custody record" section is a narrow,
+        job-scoped assertion (this job's own audit rows, hash-recomputed
+        individually) — never the matter's full audit chain or any other
+        job's rows, which is what keeps this at read rather than the
+        admin gate GET .../audit and GET .../summary both use.
+        """
+        _require(matter_id, "read", s, user)
+        matter = _matter(matter_id, s)
+        job = _job(matter_id, job_id, s)
+        doc = _document(matter_id, job.document_id, s)
+
+        result = job.result_json or {}
+        manifest = result.get("manifest") or {} if job.kind == "sanitize" else {}
+        derivative_sha256 = manifest.get("derivative", {}).get("sha256")
+        actions: list[str] = manifest.get("actions") or []
+        findings_before: list[str] = manifest.get("findings_before") or []
+        inspect_findings: list[dict] = result.get("findings") or [] if job.kind == "inspect" else []
+        verification: dict | None = manifest.get("verification") if job.kind == "sanitize" else None
+
+        policy_id = policy_version = policy_description = None
+        if job.kind == "sanitize":
+            policy_id = manifest.get("policy", {}).get("id") or job.policy_id
+            policy_version = manifest.get("policy", {}).get("version", 1)
+            policy_meta = next((p for p in POLICIES if p["id"] == policy_id), None)
+            policy_description = policy_meta["description"] if policy_meta else None
+
+        limitations: list[str] = []
+        no_decision = [a for a in actions if NO_DECISION_MARKER in a]
+        if no_decision:
+            limitations.append(
+                f"{len(no_decision)} finding(s) kept WITHOUT operator review "
+                f"({NO_DECISION_MARKER}): " + "; ".join(no_decision)
+            )
+        operator_kept = [a for a in actions if OPERATOR_KEPT_MARKER in a]
+        if operator_kept:
+            limitations.append(
+                f"{len(operator_kept)} finding(s) reviewed and explicitly kept by "
+                "the operator: " + "; ".join(operator_kept)
+            )
+        approved_no_op = [a for a in actions if APPROVED_BUT_NO_OP_MARKER in a]
+        if approved_no_op:
+            limitations.append(
+                f"{len(approved_no_op)} finding(s) approved by the operator but "
+                "structurally kept anyway (this policy has no strip action for "
+                "that subtype): " + "; ".join(approved_no_op)
+            )
+        if job.status in ("refused", "failed"):
+            limitations.append(
+                f"Job {job.status}: no derivative was produced. "
+                + (job.error or "no further detail recorded.")
+            )
+        if job.kind == "inspect":
+            limitations.append(
+                "This is an INSPECT-ONLY certificate: no derivative was produced "
+                "and the original document was not modified."
+            )
+        elif job.status == "done" and not derivative_sha256:
+            limitations.append(
+                "Job is done but no derivative hash is recorded — out of scope "
+                "for this certificate's custody claim."
+            )
+
+        # Narrow, job-scoped custody assertion: this job's own audit rows,
+        # individually hash-recomputed — never the matter's full chain and
+        # never another job's rows (see the route docstring above).
+        job_events = [
+            ev
+            for ev in s.query(AuditEvent)
+            .filter(AuditEvent.matter_id == matter_id, AuditEvent.action.in_(("job.inspect", "job.sanitize")))
+            .all()
+            if (ev.payload or {}).get("job_id") == job_id
+        ]
+        audit_integrity_ok = all(
+            event_hash(ev.prev_hash, ev.seq, ev.actor_id, ev.action, ev.payload) == ev.row_hash
+            for ev in job_events
+        )
+
+        body = _render_job_certificate_html(
+            matter_id=matter_id,
+            matter_name=matter.name,
+            document_id=doc.id,
+            document_name=doc.filename,
+            job_id=job.id,
+            kind=job.kind,
+            status=job.status,
+            error=job.error,
+            created_utc=job.created_utc,
+            finished_utc=job.finished_utc,
+            original_sha256=doc.sha256,
+            derivative_sha256=derivative_sha256,
+            policy_id=policy_id,
+            policy_version=policy_version,
+            policy_description=policy_description,
+            actions=actions,
+            findings_before=findings_before,
+            inspect_findings=inspect_findings,
+            verification=verification,
+            limitations=limitations,
+            audit_event_count=len(job_events),
+            audit_integrity_ok=audit_integrity_ok,
+            generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            generated_by=user,
+        )
+
+        # Mandatory on every pull, including repeats -- "who has pulled a
+        # certificate for this document, and when" is itself part of the
+        # custody record (approved product decision, 2026-08-26).
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="certificate.issued",
+            payload={
+                "job_id": job.id,
+                "document_id": doc.id,
+                "kind": job.kind,
+                "policy_id": policy_id,
+                "status": job.status,
+            },
+        )
+        s.commit()
+        return Response(content=body, media_type="text/html")
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}/bundle")
     def job_bundle(

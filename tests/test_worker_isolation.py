@@ -79,6 +79,16 @@ def test_no_decision_marker_stays_in_sync_with_policies():
     assert NO_DECISION_MARKER == policies_mod.NO_DECISION_MARKER
 
 
+def test_operator_kept_and_approved_no_op_markers_stay_in_sync_with_policies():
+    """Same doctrine as test_no_decision_marker_stays_in_sync_with_policies,
+    for the two markers the custody certificate (PR 33) also hardcodes."""
+    import policies as policies_mod
+    from app.main import APPROVED_BUT_NO_OP_MARKER, OPERATOR_KEPT_MARKER
+
+    assert OPERATOR_KEPT_MARKER == policies_mod.OPERATOR_KEPT_MARKER
+    assert APPROVED_BUT_NO_OP_MARKER == policies_mod.APPROVED_BUT_NO_OP_MARKER
+
+
 # --- engine boundary doctrine (docs/counselclear-strategy.md #4) ----------------
 #
 # test_api_module_never_imports_parsers above is the one-way guard: the

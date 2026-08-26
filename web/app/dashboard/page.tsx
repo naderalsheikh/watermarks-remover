@@ -270,6 +270,22 @@ export default function DashboardPage() {
                           >
                             View audit
                           </Link>
+                          {/* unreviewed_findings is exactly "a completed
+                              sanitize job whose manifest kept findings
+                              without operator review" (_attention_items,
+                              service/app/main.py) -- the one attention type
+                              where the limitations a certificate discloses
+                              are the whole reason the item exists. */}
+                          {item.type === "unreviewed_findings" && item.job_id && (
+                            <a
+                              href={`/v1/matters/${item.matter_id}/jobs/${item.job_id}/certificate`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-muted hover:text-foreground hover:underline"
+                            >
+                              Open certificate
+                            </a>
+                          )}
                         </div>
                       </li>
                     );

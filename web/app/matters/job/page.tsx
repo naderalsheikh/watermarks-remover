@@ -438,6 +438,18 @@ function JobView({
                   {job.kind} job
                 </h1>
                 <StatusBadge status={job.status} />
+                {(job.status === "done" ||
+                  job.status === "refused" ||
+                  job.status === "failed") && (
+                  <a
+                    href={`/v1/matters/${matterId}/jobs/${jobId}/certificate`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="ml-auto rounded-md border border-accent px-3 py-1 text-sm font-medium text-accent hover:bg-accent/10"
+                  >
+                    Open custody certificate
+                  </a>
+                )}
               </div>
               <p className="mt-1 text-sm text-muted">
                 {job.kind === "sanitize" ? `${job.policy_id} · ` : ""}started{" "}
