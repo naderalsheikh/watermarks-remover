@@ -35,9 +35,10 @@ from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, per
 from .audit import append_event, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
+from .dispatcher import BatchDispatcher
 from .malware import get_scanner
 from .migrate import upgrade_head
-from .models import AttestationUse, AuditEvent, Document, Job, Matter, MatterAcl, _now, _uuid
+from .models import AttestationUse, AuditEvent, Batch, Document, Job, Matter, MatterAcl, _now, _uuid
 from .oidc import OidcError
 from .runner import run_job, sync_job
 from .security import (
@@ -361,23 +362,35 @@ def _jlog(level: int, event: str, **fields) -> None:
 
 
 def _sweep_orphaned_jobs(s: Session) -> int:
-    """Fail jobs left queued/running by a previous process death.
+    """Fail jobs left running, or left queued with no dispatcher to resume
+    them, by a previous process death.
 
-    With in-request job execution a "running" row can only exist while the
-    request that spawned it is alive — so at boot, before the app serves
-    anything, any queued/running row is by definition orphaned: its worker
+    A "running" row can only exist while the process that flipped it to
+    running is alive — for a single-document/legacy-bulk job that's the
+    request that spawned it, and for a batch child it's the dispatcher's
+    claim (service/app/dispatcher.py) — so at boot, before the app serves
+    anything, any running row is by definition orphaned: its worker
     subprocess/container died with the old API process and sync_job will
     never run for it. Left alone it would sit "running" forever.
 
-    A single bulk UPDATE, not a load-then-mutate-per-row loop: boot already
-    blocks on this (the app must not start serving before orphans are
-    reconciled), and a restart after a long queue backlog could otherwise
-    mean thousands of individual ORM-tracked UPDATE statements before the
-    first request is served.
+    "queued" is different for PR 31's batch children: a queued row is
+    exactly the durable, restart-safe queue state (Job.batch_id IS NOT
+    NULL) — BatchDispatcher picks it back up once the new process boots,
+    same as it would have without a restart. Failing it here would be
+    wrong, not just unnecessary. A plain queued job with no batch_id has
+    no dispatcher that will ever claim it (single-document and legacy
+    /bulk-jobs routes execute inline, synchronously, within the request
+    that created the row) — that queued state is never reachable in
+    steady state, so if one is ever found orphaned it must still be
+    swept to failed, exactly as before, or it would sit stuck forever
+    with nothing to notice.
     """
     result = s.execute(
         update(Job)
-        .where(Job.status.in_(("queued", "running")))
+        .where(
+            (Job.status == "running")
+            | ((Job.status == "queued") & (Job.batch_id.is_(None)))
+        )
         .values(
             status="failed",
             error="interrupted by an application restart",
@@ -511,6 +524,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         swept = _sweep_orphaned_jobs(s)
     storage = storage_from_config(cfg)
     _log_startup_posture(cfg, swept, storage)
+    dispatcher = BatchDispatcher(
+        cfg=cfg,
+        session_factory=session_factory,
+        storage=storage,
+        max_concurrent=cfg.batch_max_concurrent,
+        no_decision_marker=NO_DECISION_MARKER,
+    )
+    dispatcher.start()
 
     # Docs are fail-closed: /docs, /redoc and /openapi.json carry no auth
     # check, so they only exist when explicitly opted in with
@@ -527,6 +548,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         redoc_url="/redoc" if docs_enabled else None,
         openapi_url="/openapi.json" if docs_enabled else None,
     )
+
+    @app.on_event("shutdown")
+    def _stop_dispatcher() -> None:
+        dispatcher.stop()
 
     access_log_enabled = os.environ.get("COUNSELCLEAR_ACCESS_LOG", "1").strip() != "0"
 
@@ -1228,6 +1253,154 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         for r in results:
             summary[r["status"]] = summary.get(r["status"], 0) + 1
         return {"results": results, "summary": summary}
+
+    def _batch_dict(b: Batch, s: Session) -> dict:
+        jobs = s.query(Job).filter(Job.batch_id == b.id).order_by(Job.created_utc).all()
+        doc_names = {
+            d.id: d.filename
+            for d in s.query(Document).filter(Document.id.in_([j.document_id for j in jobs])).all()
+        }
+        results = [
+            {
+                "document_id": j.document_id,
+                "document_name": doc_names.get(j.document_id, ""),
+                "job_id": j.id,
+                "kind": j.kind,
+                "policy_id": j.policy_id,
+                "status": j.status,
+                "error": j.error,
+            }
+            for j in jobs
+        ]
+        summary = {"requested": b.total, "done": 0, "refused": 0, "failed": 0, "queued": 0, "running": 0}
+        for r in results:
+            summary[r["status"]] = summary.get(r["status"], 0) + 1
+        return {
+            "id": b.id,
+            "matter_id": b.matter_id,
+            "kind": b.kind,
+            "policy_id": b.policy_id,
+            "total": b.total,
+            "created_utc": b.created_utc,
+            "finished_utc": b.finished_utc,
+            "results": results,
+            "summary": summary,
+        }
+
+    @app.post("/v1/matters/{matter_id}/batches")
+    def create_batch(
+        matter_id: str,
+        body: BulkJobsBody,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Async counterpart to POST bulk-jobs: returns as soon as the batch
+        and its queued child jobs are durably recorded, instead of blocking
+        the request for the full run. BatchDispatcher (PR 31) picks the
+        children up in the background; poll GET .../batches/{id} for
+        progress. Validation is identical to (and reuses) bulk_jobs's —
+        a bad request must still create nothing.
+        """
+        if body.kind not in ("inspect", "sanitize"):
+            raise HTTPException(400, f"unsupported job kind: {body.kind!r}")
+        if not body.document_ids:
+            raise HTTPException(400, "document_ids must not be empty")
+        if len(body.document_ids) > 100:
+            raise HTTPException(400, "at most 100 documents per bulk request")
+        if len(set(body.document_ids)) != len(body.document_ids):
+            raise HTTPException(400, "document_ids must not contain duplicates")
+        _require(matter_id, body.kind, s, user)
+        if body.kind == "sanitize":
+            policy = next((p for p in POLICIES if p["id"] == body.policy_id), None)
+            if policy is None:
+                raise HTTPException(400, f"unknown policy: {body.policy_id!r}")
+            if not policy["bulk_safe"]:
+                raise HTTPException(
+                    400,
+                    f"policy {body.policy_id!r} cannot be bulk-run: it requires "
+                    "per-finding decisions (or produces no derivative) — "
+                    "sanitize those documents individually",
+                )
+        found = {
+            d.id
+            for d in s.query(Document)
+            .filter(Document.matter_id == matter_id, Document.id.in_(body.document_ids))
+            .all()
+        }
+        missing = [i for i in body.document_ids if i not in found]
+        if missing:
+            raise HTTPException(400, f"not documents of this matter: {', '.join(missing)}")
+
+        batch = Batch(
+            matter_id=matter_id,
+            kind=body.kind,
+            policy_id=body.policy_id if body.kind == "sanitize" else "",
+            reason=body.reason[:500],
+            requested_by=user,
+            total=len(body.document_ids),
+        )
+        s.add(batch)
+        s.flush()  # assigns batch.id
+        job_kw = {"policy_id": body.policy_id, "reason": body.reason[:500]} if body.kind == "sanitize" else {}
+        for doc_id in body.document_ids:
+            s.add(Job(matter_id=matter_id, document_id=doc_id, kind=body.kind, batch_id=batch.id, **job_kw))
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="batch.created",
+            payload={"batch_id": batch.id, "kind": body.kind, "total": batch.total},
+        )
+        s.commit()
+        dispatcher.wake()
+        return _batch_dict(batch, s)
+
+    @app.get("/v1/matters/{matter_id}/batches/{batch_id}")
+    def get_batch(
+        matter_id: str,
+        batch_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        _require(matter_id, "read", s, user)
+        batch = s.get(Batch, batch_id)
+        if not batch or batch.matter_id != matter_id:
+            raise HTTPException(404, "batch not found")
+        return _batch_dict(batch, s)
+
+    @app.post("/v1/matters/{matter_id}/batches/{batch_id}/cancel")
+    def cancel_batch(
+        matter_id: str,
+        batch_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Cancels only children still queued -- v1 does not kill a running
+        worker subprocess (out of scope per the approved proposal). Any
+        child already running or terminal is left untouched; the response
+        reports how many were actually cancelled."""
+        batch = s.get(Batch, batch_id)
+        if not batch or batch.matter_id != matter_id:
+            raise HTTPException(404, "batch not found")
+        # Same permission the batch was created under -- whoever could
+        # start this kind of run may also stop its not-yet-started part.
+        _require(matter_id, batch.kind, s, user)
+        result = s.execute(
+            update(Job)
+            .where(Job.batch_id == batch_id, Job.status == "queued")
+            .values(status="failed", error="cancelled by operator", finished_utc=_now())
+        )
+        cancelled = result.rowcount or 0
+        if cancelled:
+            append_event(
+                s,
+                matter_id=matter_id,
+                actor_id=user,
+                action="batch.cancelled",
+                payload={"batch_id": batch_id, "cancelled": cancelled},
+            )
+        s.commit()
+        return _batch_dict(batch, s)
 
     @app.get("/v1/matters/{matter_id}/jobs")
     def list_jobs(

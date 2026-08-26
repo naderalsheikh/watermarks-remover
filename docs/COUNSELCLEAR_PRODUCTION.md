@@ -49,6 +49,19 @@ browser ────────────────────────
   (`COUNSELCLEAR_DATABASE_URL`); SQLite is single-writer by design.
 - The login throttle and ClamAV-definition cache are per-process; behind
   replicas, enforce connection-level rate limits at the proxy too.
+- **Async batch dispatch (PR 31) is concurrency-bounded per process, not
+  cluster-wide.** `POST .../batches` durably queues child Job rows and
+  each `cc-api` process runs its own in-process `BatchDispatcher`
+  (`COUNSELCLEAR_BATCH_MAX_CONCURRENT`, default 4) against them. The
+  per-job *claim* is a real conditional `UPDATE ... WHERE status='queued'`,
+  so two dispatchers — in one process or across replicas sharing Postgres
+  — can never both execute the same job; that correctness guarantee holds
+  under N replicas. The *concurrency cap* does not: with N replicas the
+  effective global ceiling is `N × COUNSELCLEAR_BATCH_MAX_CONCURRENT`, not
+  the configured value, since no dispatcher knows about any other. There
+  is no cross-process lease yet. If you run multiple replicas, size
+  `COUNSELCLEAR_BATCH_MAX_CONCURRENT` down accordingly, or restrict batch
+  submission to a single replica, until a shared lease is added.
 
 ## 2. Images: pin everything
 

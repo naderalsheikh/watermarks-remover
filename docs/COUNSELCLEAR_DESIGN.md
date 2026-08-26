@@ -1739,3 +1739,69 @@ confirmed Access/Audit log/Summary report links, per-document Inspect/
 Sanitize, and the bulk bar all still render and enable correctly against
 the now-shared permission helpers, and the dashboard still renders
 correctly against the extracted `dashboardAttention` functions.
+
+### PR 31 — Async bulk execution: Batch resource + in-process dispatcher — backend implemented (2026-08-26)
+
+`POST /v1/matters/{id}/bulk-jobs` (PR 23) ran every child job synchronously
+inside the request — fine for a handful of documents, but a 100-document
+sanitize batch could hold the request (and an anyio worker thread) for the
+sum of every job's runtime, with no way for a client to see progress or
+partial results before the whole thing finished or timed out. This pass
+adds an async counterpart without touching that endpoint's existing
+behavior.
+
+- **`Batch` model + `Job.batch_id`** (`app/models.py`, alembic `0006`):
+  one `Batch` row per `POST .../batches` submission; children are
+  ordinary `Job` rows carrying `batch_id`, so every existing job-detail,
+  manifest, and bundle route works unchanged for a batch child. `NULL`
+  for every job from the synchronous single-document routes and the
+  still-live legacy `/bulk-jobs` endpoint.
+- **`BatchDispatcher`** (`app/dispatcher.py`, new): a daemon-thread poll
+  loop over a bounded `ThreadPoolExecutor`
+  (`COUNSELCLEAR_BATCH_MAX_CONCURRENT`, default 4). The `jobs` table is
+  the durable queue — no Redis/Celery/broker, per the approved proposal.
+  Each child is claimed with a conditional `UPDATE jobs SET
+  status='running' WHERE id=:id AND status='queued'` *before* calling the
+  existing `run_job`/`sync_job` (which itself sets status
+  unconditionally) — this is what actually prevents two racing claims
+  from double-executing one job, and it holds correctly across processes
+  sharing a database even though the *concurrency cap* is per-process
+  only (documented in `docs/COUNSELCLEAR_PRODUCTION.md` §1). Batch
+  completion is claimed the same way (conditional `UPDATE batches SET
+  finished_utc=:now WHERE id=:id AND finished_utc IS NULL`) so two
+  children finishing near-simultaneously can't both fire
+  `batch.completed`.
+- **Orphan sweep refined** (`_sweep_orphaned_jobs`): `running` still
+  always fails on boot (whatever claimed it died with the old process).
+  `queued` now only fails when `batch_id IS NULL` — a batch-child queued
+  row is the durable queue itself and the new dispatcher resumes it on
+  the next boot; a plain single-document queued row still has nothing
+  that will ever pick it up, so it's swept exactly as before PR 31.
+- **Routes** (`app/main.py`): `POST /v1/matters/{id}/batches` (same
+  validation as `bulk_jobs` — kind, non-empty, 100-doc cap, no
+  duplicates, ACL before rule disclosure, bulk-safe policy check,
+  document-membership — all before any row is created), `GET
+  .../batches/{batch_id}` (poll — same `results[]`/`summary` shape as
+  the synchronous endpoint's response), `POST
+  .../batches/{batch_id}/cancel` (queued-only, per the approved scope —
+  v1 does not kill a running worker subprocess).
+- **Audit**: `batch.created` at submission; each child still gets its own
+  `job.inspect`/`job.sanitize` event (now carrying `batch_id`), appended
+  from the dispatcher's completion path rather than a request handler;
+  `batch.completed` with per-status counts once every child leaves
+  queued/running.
+- **Multi-replica**: explicitly documented, not solved — see
+  `docs/COUNSELCLEAR_PRODUCTION.md` §1. Per-job execution is safe under N
+  replicas; the concurrency cap is not (`N × max_concurrent`, not
+  `max_concurrent`).
+
+Backend only — frontend cutover (`BulkRunPanel`/`BulkResults` calling the
+new endpoints and polling) is a separate, later commit; the old
+synchronous `/bulk-jobs` endpoint stays live and unmodified until that
+cutover is verified. Full backend suite green (1100 passed, 1 skipped —
+scipy unavailable, pre-existing), `ruff check` clean. New:
+`tests/test_batches.py` (create-returns-immediately, partial-mixed-result
+polling, concurrency-cap enforcement, `batch_id`-carrying audit events
+plus `batch.created`/`batch.completed`, ACL-before-children, 100-doc cap,
+queued-only cancel) and a direct orphan-sweep unit test in
+`tests/test_prod_hardening.py` for the batch-child queued-survives case.

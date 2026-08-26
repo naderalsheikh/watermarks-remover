@@ -23,7 +23,7 @@ from app.config import Config
 from app.db import make_engine, make_session_factory
 from app.main import create_app
 from app.migrate import upgrade_head
-from app.models import Document, Job, Matter
+from app.models import Batch, Document, Job, Matter
 from app.security import LoginThrottle
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "legal"
@@ -89,6 +89,38 @@ def test_orphaned_jobs_are_failed_on_startup(tmp_path):
         assert "restart" in s.get(Job, "jrunning").error
         assert s.get(Job, "jqueued").status == "failed"
         assert s.get(Job, "jdone").status == "done"
+
+
+def test_sweep_fails_running_batch_child_but_preserves_queued_batch_child(tmp_path):
+    """PR 31: a batch-child 'queued' row IS the durable queue -- the
+    dispatcher resumes it after a restart, unlike a plain single-document
+    'queued' row (covered above), which has nothing left to ever run it.
+    A batch-child 'running' row is still orphaned the same as any other:
+    whatever dispatcher claimed it died with the old process.
+
+    Calls _sweep_orphaned_jobs directly rather than booting a full app, so
+    this can't race the now-live BatchDispatcher picking the queued row up
+    before the assertions run.
+    """
+    from app.main import _sweep_orphaned_jobs
+
+    _cfg, sf, _pw = _seed_app(tmp_path)
+    with sf() as s:
+        _seed_matter_doc(s)
+        s.add(Batch(id="b1", matter_id="m", kind="inspect", requested_by="operator", total=2))
+        s.flush()
+        s.add(Job(id="bjrunning", matter_id="m", document_id="d", kind="inspect", status="running", batch_id="b1"))
+        s.add(Job(id="bjqueued", matter_id="m", document_id="d", kind="inspect", status="queued", batch_id="b1"))
+        s.commit()
+
+    with sf() as s:
+        swept = _sweep_orphaned_jobs(s)
+    assert swept == 1
+
+    with sf() as s:
+        assert s.get(Job, "bjrunning").status == "failed"
+        assert "restart" in s.get(Job, "bjrunning").error
+        assert s.get(Job, "bjqueued").status == "queued"
 
 
 def test_clean_boot_sweeps_nothing(tmp_path):

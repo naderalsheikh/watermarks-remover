@@ -97,12 +97,36 @@ KNOWN_PERMS = (
 OWNER_PERMS: tuple[str, ...] = tuple(p for p in KNOWN_PERMS if p != "download_original")
 
 
+class Batch(Base):
+    """PR 31: one row per async bulk-run submission; children are ordinary
+    Job rows carrying this id in Job.batch_id. finished_utc is set exactly
+    once, by BatchDispatcher's atomic completion claim, when every child
+    has left queued/running -- see service/app/dispatcher.py.
+    """
+
+    __tablename__ = "batches"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default=_uuid)
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # inspect | sanitize
+    policy_id: Mapped[str] = mapped_column(String(40), default="")
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    requested_by: Mapped[str] = mapped_column(String(64))
+    total: Mapped[int] = mapped_column()
+    created_utc: Mapped[str] = mapped_column(String(32), default=_now)
+    finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
     id: Mapped[str] = mapped_column(String(16), primary_key=True, default=_uuid)
     matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), index=True)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
+    # PR 31: set only for children of an async Batch; NULL for jobs created
+    # by the synchronous single-document routes or the legacy synchronous
+    # /bulk-jobs endpoint.
+    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(16))  # inspect | sanitize
     policy_id: Mapped[str] = mapped_column(String(40), default="external_sharing")
     reason: Mapped[str] = mapped_column(String(500), default="")
