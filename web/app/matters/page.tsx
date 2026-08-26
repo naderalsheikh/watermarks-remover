@@ -74,6 +74,7 @@ export default function MattersPage() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="New matter name"
+            aria-label="New matter name"
             className="flex-1 rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:border-accent"
           />
           <button
@@ -105,6 +106,7 @@ export default function MattersPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search matters by name…"
+          aria-label="Search matters by name"
           className="mb-1 w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-accent"
         />
         <p className="mb-3 text-xs text-muted">

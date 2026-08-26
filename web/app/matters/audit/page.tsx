@@ -96,7 +96,7 @@ function EventRow({
   return (
     <tr className="border-b border-border align-top last:border-0">
       <td className="px-3 py-2 font-mono text-xs text-muted">{ev.seq}</td>
-      <td className="px-3 py-2 font-mono text-xs">{formatTimestamp(ev.at)}</td>
+      <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{formatTimestamp(ev.at)}</td>
       <td className="px-3 py-2 text-sm font-medium">
         <span className="mr-1.5 inline-block rounded bg-black/[0.05] px-1.5 py-0.5 text-xs font-normal capitalize text-muted dark:bg-white/[0.08]">
           {CATEGORY_LABEL[categoryOf(ev.action)]}
@@ -257,7 +257,8 @@ function AuditView({ matterId }: { matterId: string }) {
               <div className="mb-3 flex flex-wrap gap-1.5">
                 <button
                   onClick={() => setCategoryFilter("all")}
-                  className={`rounded px-2 py-1 text-xs ${
+                  aria-pressed={categoryFilter === "all"}
+                  className={`rounded px-2 py-1.5 text-xs ${
                     categoryFilter === "all"
                       ? "bg-accent text-white"
                       : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -269,7 +270,8 @@ function AuditView({ matterId }: { matterId: string }) {
                   <button
                     key={cat}
                     onClick={() => setCategoryFilter(cat)}
-                    className={`rounded px-2 py-1 text-xs ${
+                    aria-pressed={categoryFilter === cat}
+                    className={`rounded px-2 py-1.5 text-xs ${
                       categoryFilter === cat
                         ? "bg-accent text-white"
                         : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -291,8 +293,14 @@ function AuditView({ matterId }: { matterId: string }) {
                   are visible rather than silently renumbered.
                 </p>
               )}
+              {/* min-w-full lets the table grow to its natural content
+                  width, not shrink to it; without an explicit min-width,
+                  `w-full` forced every cell (the # WHEN ACTION ACTOR PAYLOAD
+                  PREV/ROW HASH columns) to squeeze into the viewport and
+                  wrap into unreadably tall cells on a phone instead of the
+                  wrapper's overflow-x-auto actually engaging. */}
               <div className="overflow-x-auto rounded-md border border-border">
-                <table className="w-full border-collapse text-left">
+                <table className="w-full min-w-[1100px] border-collapse text-left">
                   <thead>
                     <tr className="border-b border-border text-xs uppercase tracking-wide text-muted">
                       <th className="px-3 py-2 font-medium">#</th>

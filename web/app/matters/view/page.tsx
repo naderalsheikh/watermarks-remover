@@ -725,20 +725,26 @@ function MatterView({
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
-      <div className="flex items-center justify-between">
-        <Link href="/matters" className="text-sm text-muted hover:text-foreground">
+      {/* flex-wrap on both levels, whitespace-nowrap on every link: with
+          4 links total this row has no room to stay on one line on a
+          phone-width viewport, and letting the arrow glyph itself wrap
+          away from its label (the un-wrapped version) reads as broken
+          text rather than a normal multi-line nav. Each link now wraps
+          as one intact unit instead. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+        <Link href="/matters" className="whitespace-nowrap text-sm text-muted hover:text-foreground">
           ← Matters
         </Link>
-        <div className="flex gap-4">
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
           <Link
             href={`/matters/access?id=${matterId}`}
-            className="text-sm text-muted hover:text-foreground"
+            className="whitespace-nowrap text-sm text-muted hover:text-foreground"
           >
             Access →
           </Link>
           <Link
             href={`/matters/audit?id=${matterId}`}
-            className="text-sm text-muted hover:text-foreground"
+            className="whitespace-nowrap text-sm text-muted hover:text-foreground"
           >
             Audit log →
           </Link>
@@ -747,7 +753,7 @@ function MatterView({
               in the matter, never just what's loaded on this page. */}
           <a
             href={`/v1/matters/${matterId}/jobs/export`}
-            className="text-sm text-muted hover:text-foreground"
+            className="whitespace-nowrap text-sm text-muted hover:text-foreground"
           >
             Export jobs CSV →
           </a>
@@ -782,12 +788,16 @@ function MatterView({
         </p>
       )}
 
-      <form onSubmit={upload} className="mb-8 flex items-center gap-2">
+      {/* flex-wrap + min-w-0: a native file input has an intrinsic content
+          width ("Choose File" + filename) that a plain flex-1 does not
+          shrink below (flex children default to min-width:auto), which
+          was overflowing the viewport horizontally below phone width. */}
+      <form onSubmit={upload} className="mb-8 flex flex-wrap items-center gap-2">
         <input
           ref={fileInput}
           type="file"
           required
-          className="flex-1 text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-transparent file:px-3 file:py-1.5 file:text-sm"
+          className="min-w-0 flex-1 text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-transparent file:px-3 file:py-1.5 file:text-sm"
         />
         <button
           type="submit"
@@ -881,6 +891,7 @@ function MatterView({
               value={docSearch}
               onChange={(e) => setDocSearch(e.target.value)}
               placeholder="Search documents by filename…"
+              aria-label="Search documents by filename"
               className="w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-accent"
             />
             <p className="text-xs text-muted">
@@ -890,7 +901,8 @@ function MatterView({
             <div className="flex flex-wrap gap-1.5">
               <button
                 onClick={() => setStatusFilter("all")}
-                className={`rounded px-2 py-1 text-xs ${
+                aria-pressed={statusFilter === "all"}
+                className={`rounded px-2 py-1.5 text-xs ${
                   statusFilter === "all"
                     ? "bg-accent text-white"
                     : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -902,7 +914,8 @@ function MatterView({
                 <button
                   key={tone}
                   onClick={() => setStatusFilter(tone)}
-                  className={`rounded px-2 py-1 text-xs ${
+                  aria-pressed={statusFilter === tone}
+                  className={`rounded px-2 py-1.5 text-xs ${
                     statusFilter === tone
                       ? "bg-accent text-white"
                       : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"

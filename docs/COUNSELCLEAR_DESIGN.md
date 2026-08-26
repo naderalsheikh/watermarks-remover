@@ -1492,3 +1492,66 @@ green; verified live — both exports fetched directly against a running
 backend, confirmed valid CSV with correct headers and complete row
 counts, including the jobs export specifically returning 200 with real
 rows rather than being shadowed.
+
+### PR 27 — Mobile/accessibility pass across the six main routes — implemented (2026-08-25)
+
+Audited `/dashboard`, `/matters`, `/matters/view`, `/matters/job`,
+`/matters/audit`, `/matters/access` at a 375px viewport with real seeded
+data (mixed job outcomes, an 8-event audit chain). Pure frontend, no
+backend change. Found and fixed, route by route:
+
+- **Dashboard**: the attention-item and recent-activity rows packed a
+  badge, matter/document name, and timestamp onto one `flex justify-between`
+  line with `truncate` — at phone width this left almost no room for the
+  name, cutting "Accessibility Audit Matter" down to 2-3 unreadable
+  characters. Fixed by stacking the timestamp below the title on narrow
+  screens (`flex-col sm:flex-row`) and dropping `truncate` so the full
+  name wraps instead of vanishing. Filter tabs gained `aria-pressed` (the
+  active tab was color-only before, invisible to a screen reader) and
+  slightly taller touch padding.
+- **Matter view**: the top nav (← Matters / Access / Audit log / Export
+  jobs CSV — 4 links) had no `flex-wrap`, so on a narrow viewport
+  individual link text itself broke mid-phrase ("←" and "Matters" on
+  separate lines) instead of each link wrapping as an intact unit — fixed
+  with `flex-wrap` on the container and `whitespace-nowrap` on each link.
+  The upload form's native `<input type="file">` has an unshrinkable
+  intrinsic content width that plain `flex-1` doesn't shrink below
+  (flex children default to `min-width: auto`), overflowing the page
+  horizontally by ~30px below phone width — fixed with `min-w-0` on the
+  input and `flex-wrap` on the form. Status filter buttons gained
+  `aria-pressed` and taller padding, matching the dashboard tabs.
+- **Audit log**: the real fix in this pass. The table had `w-full` inside
+  its `overflow-x-auto` wrapper, which forces the table to the
+  container's width instead of its natural content width — so instead of
+  scrolling horizontally, every cell wrapped internally, and the WHEN
+  column in particular (a breakable string competing against the
+  payload column's `max-w-md` box) collapsed to ~80px and turned each
+  timestamp into a 7-line unreadable stack. Fixed with `min-w-[1100px]`
+  on the table (so the wrapper's `overflow-x-auto` actually engages) plus
+  `whitespace-nowrap` on the WHEN cell specifically (auto table layout
+  still squeezes breakable columns first even inside a wide enough
+  table). Category filter buttons gained `aria-pressed`.
+- **Matters list, job detail, access panel**: audited, no fixes needed —
+  already responsive (job detail's top nav has only 2 links and never
+  wrapped badly; access panel and matters list rows don't pack a badge +
+  name + timestamp onto one line the way dashboard/audit did).
+- **Inputs relying only on `placeholder`** (new-matter-name, matters
+  search, document search) gained explicit `aria-label`s matching their
+  placeholder text — the browser does fall back to placeholder as an
+  accessible name when nothing else is present, but an explicit label
+  doesn't depend on that fallback holding across browsers/screen readers.
+- **Keyboard focus**: audited, no fix needed — verified live
+  (`getComputedStyle` on a focused button) that this app never strips the
+  browser's default focus outline; it was already visible everywhere
+  tested (buttons, tabs, links).
+
+Frontend gates green (`tsc`, `eslint`, `vitest`, `next build`). No
+backend touched, so no backend suite run. Verified live at both a 375px
+mobile viewport and an ~800px narrow-desktop viewport for every fix:
+zero horizontal page overflow (`document.documentElement.scrollWidth -
+clientWidth === 0`) on all six routes post-fix (the matter-view page
+measured +31px of unwanted overflow before the upload-form fix), the
+audit table's own container confirmed independently scrollable
+(`scrollWidth > clientWidth`) while the page itself stays fixed-width,
+and the dashboard/matter-view/audit-log truncation fixes screenshotted
+before and after.
