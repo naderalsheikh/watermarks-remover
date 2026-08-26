@@ -40,7 +40,17 @@ The test velocity and reliability come from the strict Engine vs. Product Shell 
 
 Keep multi-user identity, queuing, database persistence, deployment topology, audit routing, and auth strictly in the control plane (`service/app/`). The same core legal guarantees should hold whether CounselClear runs as a local CLI tool, a single-tenant Docker container, or an enterprise SaaS cluster.
 
-`tests/test_worker_isolation.py` enforces this boundary in both directions: `test_api_module_never_imports_parsers` bans the control plane from importing the engine's parsers, and `test_engine_scripts_never_import_control_plane_or_orm_or_web_framework` bans the engine from importing the control plane, an ORM/session library, a web framework, or a control-plane-style HTTP client. This is not a blanket ban on the engine's own network I/O — several modules make outbound calls to their own optional, config-gated sidecar services (the SynthID scorer HTTP sidecar, the watermark-rewrite network, the MarkLLM/KGW detector workers), and every one degrades gracefully when unconfigured. That is a pre-existing, intentional engine capability, not control-plane leakage.
+`tests/test_worker_isolation.py` enforces this boundary in both directions: `test_api_module_never_imports_parsers` bans the control plane from importing the engine's parsers, and `test_engine_scripts_never_import_control_plane_or_orm_or_web_framework` bans the engine from importing the control plane, an ORM/session library, a web framework, or a control-plane-style HTTP client (`app.*`, SQLAlchemy, FastAPI/Starlette, `requests` — and by extension any database client, auth library, or queue client, none of which currently appear in the engine and none of which are exempted below).
+
+**Optional sidecar/tool calls are the narrow exception, not the default — and only within these bounds** (2026-08-26 clarification): the SynthID scorer HTTP sidecar, the watermark-rewrite network, and the MarkLLM/KGW detector workers are allowed to exist as engine-adjacent tool execution only because every one of them is:
+
+- **Explicit and config-gated** — off unless a specific env var (`WATERMARKS_SYNTHID_SCORER_URL`, `COUNSELCLEAR_REWRITE_NETWORK`, etc.) turns it on; never reached by accident or by default.
+- **Deterministic enough to test, or safely skipped/degraded when unavailable** — "unconfigured" returns `None`; a sidecar that's down returns an `available: False` error dict, never an exception that takes the job down with it.
+- **Never used for custody or audit writes** — a sidecar result is scoring/detection input folded into the engine's own returned result; it never itself writes a WORM original, a manifest, or an audit event. Those stay exclusively in the control plane's own write paths.
+- **Never allowed to change product state outside the returned engine result** — a sidecar can enrich what one engine call returns; it cannot create a job, touch the database, or trigger anything the control plane didn't itself decide to do with that return value.
+- **Documented as engine-adjacent tool execution, not a control-plane dependency** — called out by name (as here) whenever the doctrine or design docs describe the engine boundary, so it never gets waved through as an unexamined exception.
+
+A new engine capability that reaches outside the process and doesn't clearly satisfy all five bars above is not a sidecar exception — it's a boundary violation, full stop. Arbitrary network calls from engine code are not allowed under any framing.
 
 ## 5. Claims Must Be Evidence-Bound
 
