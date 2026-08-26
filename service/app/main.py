@@ -76,6 +76,12 @@ POLICIES = [
             "embedded objects, and custom XML; accepts all tracked changes; "
             "flags headers/footers and hidden content for review."
         ),
+        # bulk_safe: the subtype table has NO approve-default cells, so a
+        # sanitize needs no per-finding decisions (main.py stays out of the
+        # engine's import graph; tests/test_bulk_jobs.py keeps this flag in
+        # sync with policies.py). Still refuses whole documents on macros /
+        # digital signatures — disclosed pre-submit, refused per document.
+        "bulk_safe": True,
     },
     {
         "id": "privacy_only",
@@ -85,6 +91,9 @@ POLICIES = [
             "and GPS location. Keeps comments, tracked changes, and C2PA "
             "provenance untouched."
         ),
+        # Decision-free like external_sharing; its keeps are policy-default
+        # keeps, never no-decision keeps, so no manifest marker is produced.
+        "bulk_safe": True,
     },
     {
         "id": "production",
@@ -93,6 +102,10 @@ POLICIES = [
             "Litigation production: most findings require an explicit "
             "per-finding approve/keep decision instead of an automatic strip."
         ),
+        # Approve-default cells (comments, tracked changes, hidden content,
+        # embedded objects, attachments, links, ...) demand a per-document
+        # decision workflow — never bulk-run without one.
+        "bulk_safe": False,
     },
     {
         "id": "evidence_preservation",
@@ -101,6 +114,9 @@ POLICIES = [
             "Inspect-only — never produces a derivative. Preserves the "
             "original for evidentiary integrity."
         ),
+        # Not bulk-safe: sanitize under this policy produces no derivative,
+        # so a "bulk sanitize" would silently mean "bulk inspect".
+        "bulk_safe": False,
     },
 ]
 
@@ -127,6 +143,21 @@ class SanitizeBody(BaseModel):
     # attestation token issued by POST /v1/attestations. Absent = Layer A
     # only. The token is verified server-side before the job is created.
     layer_b: LayerBBody | None = None
+
+
+class BulkJobsBody(BaseModel):
+    """One request, one job per document — each job audited individually.
+
+    Deliberately narrow: inspect (any document) or sanitize (bulk_safe
+    policies only — see POLICIES). No attestation, no finding_decisions,
+    no layer_b: those are per-document workflows and bulk is never allowed
+    to launder them into a blanket run.
+    """
+
+    document_ids: list[str]
+    kind: str
+    policy_id: str = "external_sharing"
+    reason: str = ""
 
 
 class LayerBBody(BaseModel):
@@ -912,6 +943,117 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
         )
         return _job_dict(finished)
+
+    @app.post("/v1/matters/{matter_id}/bulk-jobs")
+    def bulk_jobs(
+        matter_id: str,
+        body: BulkJobsBody,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Run one job per selected document; every job audited individually.
+
+        The batch convenience for low-risk cases only. Request shape is
+        validated fully up front (kind, non-empty, cap, duplicates, ACL,
+        policy bulk-safety, document membership) so a bad request starts
+        nothing. Each job then goes through the exact per-document path —
+        its own row, its own worker run, its own audit event with its own
+        status — and the response returns one result per document, so a
+        refusal or failure of one document is visible next to the successes
+        instead of being laundered into a vague "bulk succeeded".
+        """
+        if body.kind not in ("inspect", "sanitize"):
+            raise HTTPException(400, f"unsupported job kind: {body.kind!r}")
+        if not body.document_ids:
+            raise HTTPException(400, "document_ids must not be empty")
+        if len(body.document_ids) > 100:
+            raise HTTPException(400, "at most 100 documents per bulk request")
+        if len(set(body.document_ids)) != len(body.document_ids):
+            raise HTTPException(400, "document_ids must not contain duplicates")
+        # Same permission check as the per-document routes (inspect→inspect,
+        # sanitize→sanitize), first — no rule disclosure to the unauthorized.
+        _require(matter_id, body.kind, s, user)
+        if body.kind == "sanitize":
+            policy = next((p for p in POLICIES if p["id"] == body.policy_id), None)
+            if policy is None:
+                raise HTTPException(400, f"unknown policy: {body.policy_id!r}")
+            if not policy["bulk_safe"]:
+                raise HTTPException(
+                    400,
+                    f"policy {body.policy_id!r} cannot be bulk-run: it requires "
+                    "per-finding decisions (or produces no derivative) — "
+                    "sanitize those documents individually",
+                )
+        found = {
+            d.id
+            for d in s.query(Document)
+            .filter(Document.matter_id == matter_id, Document.id.in_(body.document_ids))
+            .all()
+        }
+        missing = [i for i in body.document_ids if i not in found]
+        if missing:
+            raise HTTPException(
+                400, f"not documents of this matter: {', '.join(missing)}"
+            )
+
+        results: list[dict] = []
+        for doc_id in body.document_ids:
+            doc = s.get(Document, doc_id)
+            job_kw = (
+                {"policy_id": body.policy_id, "reason": body.reason[:500]}
+                if body.kind == "sanitize"
+                else {}
+            )
+            job = _create_job(matter_id, doc_id, body.kind, s, **job_kw)
+            _execute_job(job.id, kind=body.kind)
+            s.expire_all()
+            finished = _job(matter_id, job.id, s)
+            result = finished.result_json or {}
+            if body.kind == "sanitize":
+                actions = (result.get("manifest") or {}).get("actions") or []
+                no_decision_count = sum(1 for a in actions if NO_DECISION_MARKER in a)
+                append_event(
+                    s,
+                    matter_id=matter_id,
+                    actor_id=user,
+                    action="job.sanitize",
+                    payload={
+                        "job_id": job.id,
+                        "document_id": doc_id,
+                        "policy_id": body.policy_id,
+                        "status": finished.status,
+                        "verification_pass": result.get("verification_pass"),
+                        "no_decision_count": no_decision_count,
+                    },
+                )
+            else:
+                append_event(
+                    s,
+                    matter_id=matter_id,
+                    actor_id=user,
+                    action="job.inspect",
+                    payload={
+                        "job_id": job.id,
+                        "document_id": doc_id,
+                        "status": finished.status,
+                        "findings_count": len(result.get("findings") or []),
+                    },
+                )
+            results.append(
+                {
+                    "document_id": doc_id,
+                    "document_name": doc.filename,
+                    "job_id": job.id,
+                    "kind": body.kind,
+                    "policy_id": body.policy_id,
+                    "status": finished.status,
+                    "error": finished.error,
+                }
+            )
+        summary = {"requested": len(results), "done": 0, "refused": 0, "failed": 0, "queued": 0, "running": 0}
+        for r in results:
+            summary[r["status"]] = summary.get(r["status"], 0) + 1
+        return {"results": results, "summary": summary}
 
     @app.get("/v1/matters/{matter_id}/jobs")
     def list_jobs(

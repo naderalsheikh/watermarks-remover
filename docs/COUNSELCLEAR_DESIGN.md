@@ -1335,3 +1335,36 @@ Overview/Matters nav). Totals cards, job-status chips, attention rows that
 deep-link into the matter view (`?doc=` highlight), and humanized recent
 activity. Frontend gates green (`tsc`, `eslint`, `vitest`, `next build`);
 backend: 8 new tests, full suite green (1066 collected).
+
+### PR 23 — Bulk inspect/sanitize (`POST /v1/matters/{id}/bulk-jobs`) — implemented (2026-08-25)
+
+One request, one job per selected document — each job audited individually
+(`job.inspect` / `job.sanitize` events with their own job id and status),
+each outcome returned per document (`results[]` + `summary`), so a
+refusal or failure is as visible as the successes. Deliberately narrow:
+
+- **Request validation is all-or-nothing**: kind ∈ {inspect, sanitize},
+  non-empty `document_ids`, ≤ 100, no duplicates, ACL (`inspect` or
+  `sanitize` perm, checked before any rule disclosure), and every id must
+  be a document of the matter — a bad request starts no jobs at all.
+- **Sanitize is gated on `POLICIES[].bulk_safe`** (new flag, literal in
+  main.py kept in sync with `scripts/policies.py` by
+  `test_bulk_safe_flags_match_policy_engine`): bulk-safe ⟺ no
+  approve-default subtype cells, so no per-finding decisions are required
+  — `external_sharing` and `privacy_only` only. `production` (approve
+  defaults) and `evidence_preservation` (no derivative) are rejected 400
+  with the reason; the UI offers only bulk-safe policies. No
+  attestation, no `finding_decisions`, no Layer B in bulk — those stay
+  per-document workflows.
+- **Refusal classes are disclosed pre-submit and surface per document**:
+  macro-enabled files and digital signatures (attestation required) come
+  back as individual `refused` results with the policy's reason, never a
+  silent skip.
+
+UI (matter view): per-row selection checkboxes + "select all loaded"
+(honestly scoped to loaded documents — same loaded-so-far rule as the
+search), a bulk bar with count, a pre-submit panel (count, policy choice
+with description, known-refusal-class disclosure, shared optional
+reason), and a per-document results table with status badges, reasons,
+and job links. Tests: `tests/test_bulk_jobs.py` (8). Full suite green
+(1074 collected); frontend gates green.

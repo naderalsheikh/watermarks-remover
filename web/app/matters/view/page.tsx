@@ -7,7 +7,7 @@ import { api } from "@/lib/api";
 import { computeProductionReviewState } from "@/lib/productionReview";
 import { useApiData } from "@/lib/useApi";
 import { usePaginatedList } from "@/lib/usePaginatedList";
-import type { Document, Job, Matter, Policy } from "@/lib/types";
+import type { BulkJobsResponse, Document, Job, Matter, Policy } from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
 
@@ -301,6 +301,8 @@ function DocumentRow({
   policies,
   onJobStarted,
   highlighted,
+  selected,
+  onToggleSelected,
 }: {
   matterId: string;
   doc: Document;
@@ -308,6 +310,8 @@ function DocumentRow({
   policies: Policy[];
   onJobStarted: () => void;
   highlighted: boolean;
+  selected: boolean;
+  onToggleSelected: (id: string, checked: boolean) => void;
 }) {
   const [sanitizing, setSanitizing] = useState(false);
   const [inspecting, setInspecting] = useState(false);
@@ -340,31 +344,42 @@ function DocumentRow({
       ref={rowRef}
       className={`px-4 py-3 ${highlighted ? "bg-accent/10 ring-1 ring-inset ring-accent" : ""}`}
     >
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <p className="truncate font-medium">{doc.filename}</p>
-          <p className="truncate font-mono text-xs text-muted" title={doc.sha256}>
-            {formatBytes(doc.bytes)} · sha256:{doc.sha256.slice(0, 16)}…
-          </p>
-          <p className={`mt-1 text-xs ${STATUS_TONE_CLASS[nextStep.tone]}`}>
-            <span className="font-medium">{nextStep.label}</span>
-            <span className="text-muted"> — {nextStep.detail}</span>
-          </p>
-        </div>
-        <div className="flex shrink-0 gap-2">
-          <button
-            onClick={inspect}
-            disabled={inspecting}
-            className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
-          >
-            {inspecting ? "Inspecting…" : "Inspect"}
-          </button>
-          <button
-            onClick={() => setSanitizing((v) => !v)}
-            className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-          >
-            Sanitize
-          </button>
+      <div className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(e) => onToggleSelected(doc.id, e.target.checked)}
+          aria-label={`Select ${doc.filename}`}
+          className="mt-1 shrink-0"
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <p className="truncate font-medium">{doc.filename}</p>
+              <p className="truncate font-mono text-xs text-muted" title={doc.sha256}>
+                {formatBytes(doc.bytes)} · sha256:{doc.sha256.slice(0, 16)}…
+              </p>
+              <p className={`mt-1 text-xs ${STATUS_TONE_CLASS[nextStep.tone]}`}>
+                <span className="font-medium">{nextStep.label}</span>
+                <span className="text-muted"> — {nextStep.detail}</span>
+              </p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <button
+                onClick={inspect}
+                disabled={inspecting}
+                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+              >
+                {inspecting ? "Inspecting…" : "Inspect"}
+              </button>
+              <button
+                onClick={() => setSanitizing((v) => !v)}
+                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+              >
+                Sanitize
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -398,6 +413,175 @@ function DocumentRow({
         </ul>
       )}
     </li>
+  );
+}
+
+function BulkRunPanel({
+  matterId,
+  docIds,
+  kind,
+  policies,
+  onClose,
+  onDone,
+}: {
+  matterId: string;
+  docIds: string[];
+  kind: "inspect" | "sanitize";
+  policies: Policy[];
+  onClose: () => void;
+  onDone: (res: BulkJobsResponse) => void;
+}) {
+  // Only policies the backend marks bulk-safe are offered: no approve-
+  // default subtype cells, so no per-finding decisions are required. The
+  // same filter the server enforces — the UI can't even offer production.
+  const bulkSafe = policies.filter((p) => p.bulk_safe);
+  const [policyId, setPolicyId] = useState(bulkSafe[0]?.id ?? "");
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const selectedPolicy = bulkSafe.find((p) => p.id === policyId);
+
+  async function submit() {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const body =
+        kind === "sanitize"
+          ? { document_ids: docIds, kind, policy_id: policyId, reason }
+          : { document_ids: docIds, kind };
+      const res = await api.post<BulkJobsResponse>(
+        `/v1/matters/${matterId}/bulk-jobs`,
+        body,
+      );
+      onDone(res);
+      onClose();
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Bulk run failed to start");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="mb-4 space-y-3 rounded-md border border-border bg-black/[0.02] p-3 dark:bg-white/[0.02]">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-medium">
+            {kind === "sanitize" ? "Bulk sanitize" : "Bulk inspect"} — {docIds.length} document
+            {docIds.length === 1 ? "" : "s"} selected
+          </p>
+          {kind === "inspect" ? (
+            <p className="mt-1 text-xs text-muted">
+              Inspection is read-only: it only reports what&apos;s inside each document. No
+              derivative is produced and nothing is modified.
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-muted">
+              Sanitization runs per document; every outcome is reported individually below.
+            </p>
+          )}
+        </div>
+        <button onClick={onClose} className="text-sm text-muted hover:text-foreground">
+          Cancel
+        </button>
+      </div>
+
+      {kind === "sanitize" && (
+        <>
+          <div>
+            <label className="mb-1 block text-xs font-medium">Policy</label>
+            <select
+              value={policyId}
+              onChange={(e) => setPolicyId(e.target.value)}
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            >
+              {bulkSafe.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            {selectedPolicy && (
+              <p className="mt-1 text-xs text-muted">{selectedPolicy.description}</p>
+            )}
+          </div>
+          <div className="rounded-md border border-amber-600/40 bg-amber-600/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+            <p className="font-medium">Known refusal classes</p>
+            <p className="mt-1">
+              Documents that hit a policy refusal class — macro-enabled files, digitally signed
+              documents without an attestation — are <strong>refused, not skipped</strong>: each
+              one shows its own &quot;refused&quot; result with the reason. Bulk runs never use
+              per-finding decisions or Layer B rewrites.
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium">
+              Reason (optional, shared across all selected documents)
+            </label>
+            <input
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            />
+          </div>
+        </>
+      )}
+
+      {submitError && <p className="text-xs text-red-600">{submitError}</p>}
+      <div className="flex gap-2">
+        <button
+          onClick={submit}
+          disabled={submitting || (kind === "sanitize" && !policyId)}
+          className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {submitting
+            ? "Running…"
+            : kind === "sanitize"
+              ? "Run bulk sanitize"
+              : "Run bulk inspect"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Per-document results of the last bulk run — deliberately a row per
+// document (filename, status, error, job link) so a refusal or failure is
+// as visible as the successes; never a vague "bulk succeeded".
+function BulkResults({
+  matterId,
+  results,
+}: {
+  matterId: string;
+  results: BulkJobsResponse;
+}) {
+  const s = results.summary;
+  return (
+    <div className="mb-4 rounded-md border border-border">
+      <div className="border-b border-border px-4 py-2 text-xs text-muted">
+        {s.done} done · {s.refused} refused · {s.failed} failed · {s.queued} queued · {s.running}{" "}
+        running — per document:
+      </div>
+      <ul className="divide-y divide-border">
+        {results.results.map((r) => (
+          <li key={r.job_id} className="flex items-center justify-between gap-3 px-4 py-2 text-sm">
+            <div className="min-w-0">
+              <p className="truncate font-medium">{r.document_name}</p>
+              {r.error && <p className="truncate text-xs text-muted">{r.error}</p>}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <StatusBadge status={r.status} />
+              <Link
+                href={`/matters/job?matter=${matterId}&job=${r.job_id}`}
+                className="text-xs font-medium hover:underline"
+              >
+                Open
+              </Link>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -485,6 +669,16 @@ function MatterView({
   const fileInput = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Bulk selection: ids of loaded documents. Deliberately scoped to what's
+  // loaded (same "loaded-so-far" honesty as the search/filter) — the bulk
+  // bar labels it as such, and the backend refuses ids that aren't
+  // documents of this matter, so a stale selection can't silently no-op.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState<"inspect" | "sanitize" | null>(null);
+  const [bulkResults, setBulkResults] = useState<BulkJobsResponse | null>(null);
+  const bulkSafePolicies = (policiesQ.data?.policies ?? []).filter((p) => p.bulk_safe);
+  const allLoadedSelected =
+    docsQ.items.length > 0 && docsQ.items.every((d) => selected.has(d.id));
 
   async function upload(e: React.FormEvent) {
     e.preventDefault();
@@ -607,15 +801,64 @@ function MatterView({
         </div>
       )}
 
-      {!docsQ.loading && docsQ.items.length > 0 && (
-        <>
-          {docsQ.total > docsQ.items.length && (
-            <p className="mb-2 text-xs text-muted">
-              Loaded {docsQ.items.length} of {docsQ.total} documents — search and filters below
-              only cover what&apos;s loaded.
-            </p>
-          )}
-          <div className="mb-3 space-y-2">
+          {!docsQ.loading && docsQ.items.length > 0 && (
+            <>
+              {docsQ.total > docsQ.items.length && (
+                <p className="mb-2 text-xs text-muted">
+                  Loaded {docsQ.items.length} of {docsQ.total} documents — search and filters below
+                  only cover what&apos;s loaded.
+                </p>
+              )}
+
+              {bulkResults && <BulkResults matterId={matterId} results={bulkResults} />}
+
+              {bulkAction && (
+                <BulkRunPanel
+                  matterId={matterId}
+                  docIds={[...selected]}
+                  kind={bulkAction}
+                  policies={policiesQ.data?.policies ?? []}
+                  onClose={() => setBulkAction(null)}
+                  onDone={(res) => {
+                    setBulkResults(res);
+                    setSelected(new Set());
+                    jobsQ.reload();
+                    docsQ.reload();
+                  }}
+                />
+              )}
+
+              {selected.size > 0 && !bulkAction && (
+                <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-border bg-black/[0.02] px-3 py-2 dark:bg-white/[0.02]">
+                  <span className="text-sm font-medium">
+                    {selected.size} of {docsQ.items.length} loaded documents selected
+                  </span>
+                  <button
+                    onClick={() => setSelected(new Set())}
+                    className="text-xs text-muted hover:text-foreground"
+                  >
+                    Clear
+                  </button>
+                  <div className="ml-auto flex gap-2">
+                    <button
+                      onClick={() => setBulkAction("inspect")}
+                      className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                    >
+                      Bulk inspect
+                    </button>
+                    {bulkSafePolicies.length > 0 && (
+                      <button
+                        onClick={() => setBulkAction("sanitize")}
+                        className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                      >
+                        Bulk sanitize…
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="mb-3 space-y-2">
             <input
               value={docSearch}
               onChange={(e) => setDocSearch(e.target.value)}
@@ -652,19 +895,44 @@ function MatterView({
           {filteredDocs.length === 0 ? (
             <p className="text-sm text-muted">No loaded documents match this search/filter.</p>
           ) : (
-            <ul className="divide-y divide-border rounded-md border border-border">
-              {filteredDocs.map((doc) => (
-                <DocumentRow
-                  key={doc.id}
-                  matterId={matterId}
-                  doc={doc}
-                  jobs={jobsQ.items}
-                  policies={policiesQ.data?.policies ?? []}
-                  onJobStarted={jobsQ.reload}
-                  highlighted={doc.id === highlightDocId}
+            <>
+              <label className="mb-2 flex items-center gap-2 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={allLoadedSelected}
+                  onChange={(e) =>
+                    setSelected(
+                      e.target.checked
+                        ? new Set(docsQ.items.map((d) => d.id))
+                        : new Set(),
+                    )
+                  }
                 />
-              ))}
-            </ul>
+                Select all {docsQ.items.length} loaded documents
+              </label>
+              <ul className="divide-y divide-border rounded-md border border-border">
+                {filteredDocs.map((doc) => (
+                  <DocumentRow
+                    key={doc.id}
+                    matterId={matterId}
+                    doc={doc}
+                    jobs={jobsQ.items}
+                    policies={policiesQ.data?.policies ?? []}
+                    onJobStarted={jobsQ.reload}
+                    highlighted={doc.id === highlightDocId}
+                    selected={selected.has(doc.id)}
+                    onToggleSelected={(id, checked) =>
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        if (checked) next.add(id);
+                        else next.delete(id);
+                        return next;
+                      })
+                    }
+                  />
+                ))}
+              </ul>
+            </>
           )}
           {docsQ.hasMore && (
             <button

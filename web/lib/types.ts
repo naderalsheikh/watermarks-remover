@@ -11,7 +11,7 @@ export type Document = {
   created_utc: string;
 };
 
-export type Policy = { id: string; label: string; description: string };
+export type Policy = { id: string; label: string; description: string; bulk_safe: boolean };
 
 export type JobKind = "inspect" | "sanitize";
 // service/app/runner.py's terminal set is ("done", "refused", "failed") —
@@ -158,6 +158,32 @@ export type Dashboard = {
   };
   attention: AttentionItem[];
   recent: DashboardRecent[];
+};
+
+// POST /v1/matters/{id}/bulk-jobs — one job per document, each audited and
+// reported individually (service/app/main.py bulk_jobs). `status` and
+// `error` are per-document: a refused or failed job shows up next to the
+// successes, never laundered into a blanket "bulk succeeded".
+export type BulkJobResult = {
+  document_id: string;
+  document_name: string;
+  job_id: string;
+  kind: JobKind;
+  policy_id: string;
+  status: JobStatus;
+  error: string;
+};
+
+export type BulkJobsResponse = {
+  results: BulkJobResult[];
+  summary: {
+    requested: number;
+    done: number;
+    refused: number;
+    failed: number;
+    queued: number;
+    running: number;
+  };
 };
 
 export const KNOWN_PERMS = [
