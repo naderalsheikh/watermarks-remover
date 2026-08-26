@@ -13,6 +13,11 @@ import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
 
 const PAGE_SIZE = 50;
+// Matches service/app/main.py bulk_jobs's hard cap ("at most 100
+// documents per bulk request") -- kept in sync by eye, not imported,
+// since the frontend has no build-time link to the backend's constant;
+// tests/test_bulk_jobs.py pins the backend side of this number.
+const BULK_MAX_DOCUMENTS = 100;
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -304,6 +309,7 @@ function DocumentRow({
   highlighted,
   selected,
   onToggleSelected,
+  perms,
 }: {
   matterId: string;
   doc: Document;
@@ -313,6 +319,7 @@ function DocumentRow({
   highlighted: boolean;
   selected: boolean;
   onToggleSelected: (id: string, checked: boolean) => void;
+  perms: Set<string>;
 }) {
   const [sanitizing, setSanitizing] = useState(false);
   const [inspecting, setInspecting] = useState(false);
@@ -368,14 +375,17 @@ function DocumentRow({
             <div className="flex shrink-0 gap-2">
               <button
                 onClick={inspect}
-                disabled={inspecting}
+                disabled={inspecting || !perms.has("inspect")}
+                title={perms.has("inspect") ? undefined : "You don't have inspect permission on this matter"}
                 className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
               >
                 {inspecting ? "Inspecting…" : "Inspect"}
               </button>
               <button
                 onClick={() => setSanitizing((v) => !v)}
-                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                disabled={!perms.has("sanitize")}
+                title={perms.has("sanitize") ? undefined : "You don't have sanitize permission on this matter"}
+                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
               >
                 Sanitize
               </button>
@@ -487,6 +497,18 @@ function BulkRunPanel({
         </button>
       </div>
 
+      {/* Defense in depth: the bulk bar already disables the button that
+          opens this panel once selection exceeds the cap, but this panel
+          is the actual pre-submit confirmation, so it re-checks rather
+          than trusting the caller never to render it over the limit. */}
+      {docIds.length > BULK_MAX_DOCUMENTS && (
+        <div className="rounded-md border border-red-600/40 bg-red-600/10 px-3 py-2 text-xs text-red-700 dark:text-red-400">
+          {docIds.length} documents selected, but bulk actions are limited to{" "}
+          {BULK_MAX_DOCUMENTS} at a time. Close this panel and deselect{" "}
+          {docIds.length - BULK_MAX_DOCUMENTS} to continue.
+        </div>
+      )}
+
       {kind === "sanitize" && (
         <>
           <div>
@@ -532,7 +554,9 @@ function BulkRunPanel({
       <div className="flex gap-2">
         <button
           onClick={submit}
-          disabled={submitting || (kind === "sanitize" && !policyId)}
+          disabled={
+            submitting || (kind === "sanitize" && !policyId) || docIds.length > BULK_MAX_DOCUMENTS
+          }
           className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
           {submitting
@@ -648,6 +672,10 @@ function MatterView({
   highlightDocId: string | null;
 }) {
   const matterQ = useApiData(() => api.get<Matter>(`/v1/matters/${matterId}`), `matter:${matterId}`);
+  // Empty (not "everything") while matterQ hasn't resolved yet -- a
+  // permission-gated control should never render as usable before we
+  // actually know the principal has the perm, only after.
+  const perms = new Set(matterQ.data?.perms ?? []);
   const [docSearch, setDocSearch] = useState("");
   const debouncedDocSearch = useDebouncedValue(docSearch.trim(), 300);
   const docsQ = usePaginatedList<Document>(
@@ -736,39 +764,54 @@ function MatterView({
           ← Matters
         </Link>
         <div className="flex flex-wrap gap-x-4 gap-y-1">
-          <Link
-            href={`/matters/access?id=${matterId}`}
-            className="whitespace-nowrap text-sm text-muted hover:text-foreground"
-          >
-            Access →
-          </Link>
-          <Link
-            href={`/matters/audit?id=${matterId}`}
-            className="whitespace-nowrap text-sm text-muted hover:text-foreground"
-          >
-            Audit log →
-          </Link>
+          {/* Access/Audit log/Summary report are all admin-gated server-side
+              (GET .../acl, .../audit, .../summary) -- hidden rather than
+              shown-disabled, since a link either goes somewhere or it
+              doesn't; there's no useful "why" to explain for a plain
+              navigation link the way there is for an action button below.
+              Not rendered at all until matterQ resolves (perms starts
+              empty), so nothing flashes visible-then-hidden. */}
+          {perms.has("admin") && (
+            <Link
+              href={`/matters/access?id=${matterId}`}
+              className="whitespace-nowrap text-sm text-muted hover:text-foreground"
+            >
+              Access →
+            </Link>
+          )}
+          {perms.has("admin") && (
+            <Link
+              href={`/matters/audit?id=${matterId}`}
+              className="whitespace-nowrap text-sm text-muted hover:text-foreground"
+            >
+              Audit log →
+            </Link>
+          )}
           {/* Plain <a>, not the api client: a CSV file download, same
               pattern as the job page's bundle download. Exports every job
-              in the matter, never just what's loaded on this page. */}
+              in the matter, never just what's loaded on this page. Read-
+              gated, not admin -- always safe to show once this page has
+              loaded at all (reaching it already required read). */}
           <a
             href={`/v1/matters/${matterId}/jobs/export`}
             className="whitespace-nowrap text-sm text-muted hover:text-foreground"
           >
             Export jobs CSV →
           </a>
-          {/* Opens in a new tab, not a download: the report is served
-              inline HTML meant to be read there, or saved as a PDF via
-              the browser's own print dialog -- not silently downloaded
-              like the CSV exports above. */}
-          <a
-            href={`/v1/matters/${matterId}/summary`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="whitespace-nowrap text-sm text-muted hover:text-foreground"
-          >
-            Summary report →
-          </a>
+          {perms.has("admin") && (
+            // Opens in a new tab, not a download: the report is served
+            // inline HTML meant to be read there, or saved as a PDF via
+            // the browser's own print dialog -- not silently downloaded
+            // like the CSV export above.
+            <a
+              href={`/v1/matters/${matterId}/summary`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="whitespace-nowrap text-sm text-muted hover:text-foreground"
+            >
+              Summary report →
+            </a>
+          )}
         </div>
       </div>
       <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">
@@ -803,22 +846,33 @@ function MatterView({
       {/* flex-wrap + min-w-0: a native file input has an intrinsic content
           width ("Choose File" + filename) that a plain flex-1 does not
           shrink below (flex children default to min-width:auto), which
-          was overflowing the viewport horizontally below phone width. */}
-      <form onSubmit={upload} className="mb-8 flex flex-wrap items-center gap-2">
+          was overflowing the viewport horizontally below phone width.
+          Disabled (not hidden), unlike the nav links above: this is an
+          action a reviewer might reasonably expect to have and the
+          "why can't I do this" explanation is worth keeping visible,
+          same reasoning as the per-document/bulk buttons below. */}
+      <form onSubmit={upload} className="mb-1 flex flex-wrap items-center gap-2">
         <input
           ref={fileInput}
           type="file"
           required
-          className="min-w-0 flex-1 text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-transparent file:px-3 file:py-1.5 file:text-sm"
+          disabled={!perms.has("upload")}
+          className="min-w-0 flex-1 text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-transparent file:px-3 file:py-1.5 file:text-sm disabled:opacity-50"
         />
         <button
           type="submit"
-          disabled={uploading}
+          disabled={uploading || !perms.has("upload")}
+          title={perms.has("upload") ? undefined : "You don't have upload permission on this matter"}
           className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
           {uploading ? "Uploading…" : "Upload"}
         </button>
       </form>
+      <p className="mb-8 h-4 text-xs text-muted">
+        {!matterQ.loading &&
+          !perms.has("upload") &&
+          "You don't have upload permission on this matter."}
+      </p>
       {uploadError && (
         <p className="mb-4 rounded-md border border-red-600/30 bg-red-600/5 px-3 py-2 text-sm text-red-600">
           {uploadError}
@@ -869,32 +923,52 @@ function MatterView({
               )}
 
               {selected.size > 0 && !bulkAction && (
-                <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-border bg-black/[0.02] px-3 py-2 dark:bg-white/[0.02]">
-                  <span className="text-sm font-medium">
-                    {selected.size} of {docsQ.items.length} loaded documents selected
-                  </span>
-                  <button
-                    onClick={() => setSelected(new Set())}
-                    className="text-xs text-muted hover:text-foreground"
-                  >
-                    Clear
-                  </button>
-                  <div className="ml-auto flex gap-2">
+                <div className="mb-3 rounded-md border border-border bg-black/[0.02] px-3 py-2 dark:bg-white/[0.02]">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-sm font-medium">
+                      {selected.size} of {docsQ.items.length} loaded documents selected
+                    </span>
                     <button
-                      onClick={() => setBulkAction("inspect")}
-                      className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                      onClick={() => setSelected(new Set())}
+                      className="text-xs text-muted hover:text-foreground"
                     >
-                      Bulk inspect
+                      Clear
                     </button>
-                    {bulkSafePolicies.length > 0 && (
-                      <button
-                        onClick={() => setBulkAction("sanitize")}
-                        className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-                      >
-                        Bulk sanitize…
-                      </button>
-                    )}
+                    <div className="ml-auto flex gap-2">
+                      {perms.has("inspect") && (
+                        <button
+                          onClick={() => setBulkAction("inspect")}
+                          disabled={selected.size > BULK_MAX_DOCUMENTS}
+                          className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+                        >
+                          Bulk inspect
+                        </button>
+                      )}
+                      {perms.has("sanitize") && bulkSafePolicies.length > 0 && (
+                        <button
+                          onClick={() => setBulkAction("sanitize")}
+                          disabled={selected.size > BULK_MAX_DOCUMENTS}
+                          className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+                        >
+                          Bulk sanitize…
+                        </button>
+                      )}
+                    </div>
                   </div>
+                  {/* Disclosed here, before the pre-submit panel even
+                      opens, not just inside it -- the backend hard-caps a
+                      bulk request at 100 documents (service/app/main.py
+                      bulk_jobs); "select all loaded" across a few pages
+                      can exceed that with nothing in the confirmation
+                      panel warning about it, so a submit would otherwise
+                      only fail with a raw 400 after the user already
+                      clicked through. */}
+                  {selected.size > BULK_MAX_DOCUMENTS && (
+                    <p className="mt-2 text-xs text-red-600">
+                      Bulk actions are limited to {BULK_MAX_DOCUMENTS} documents at a time.
+                      Deselect {selected.size - BULK_MAX_DOCUMENTS} to continue.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -976,6 +1050,7 @@ function MatterView({
                         return next;
                       })
                     }
+                    perms={perms}
                   />
                 ))}
               </ul>

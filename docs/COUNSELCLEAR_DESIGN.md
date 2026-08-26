@@ -1614,3 +1614,72 @@ session cookie) and through the actual UI link — confirmed the rendered
 `<title>`, totals, the refused-job attention item with its document/job
 reference, and "Verified intact — N events intact" all matched the real
 seeded state.
+
+### PR 29 — Permission-aware UI, dashboard disclosure split, bulk cap disclosure — implemented (2026-08-25)
+
+Follow-up to a gaps audit run after PR 28: the dashboard disclosed
+admin-class detail (refused/failed reasons, cross-matter recent audit
+events with actor IDs) to any `read`-scoped principal, while the
+near-identical content on `GET .../audit` and `GET .../summary`
+correctly required `admin` — an inconsistency the summary route's own
+docstring argued against without the dashboard following its own logic.
+Operator decision (2026-08-25): keep `/audit` and `/summary` admin-only;
+split the dashboard by permission instead of loosening the others.
+
+- **Per-matter permission surface**: `GET /v1/matters/{id}` and
+  `POST /v1/matters` now return the calling principal's own `perms` on
+  that matter (`service/app/acl.py`'s existing `perms_of()`, not a new
+  computation) — `_matter_dict()` takes them as an optional param so
+  `list_matters` (no per-row perms; would be an N+1 query for a value
+  the matters-list UI doesn't need) is unaffected.
+- **Dashboard disclosure split** (`_attention_items()` unchanged; the
+  dashboard route filters its output): "stale" attention items and the
+  `recent[]` audit-activity feed are audit-derived (staleness compares
+  `AuditEvent` timestamps; `recent` *is* an audit-event feed) and now
+  require `admin` on that specific matter, same gate as `GET .../audit`.
+  `unreviewed_findings`/`refused`/`failed` stay at `read` scope — their
+  detail (manifest actions, `job.error`) is already visible through
+  read-gated per-job routes, so the dashboard isn't the first place it
+  would leak. New `admin_matters` count in the response lets the UI
+  explain *why* something is empty rather than rendering an
+  indistinguishable "nothing here."
+- **Frontend hides or disables every control the audit found could 403**:
+  Access/Audit log/Summary report links hidden entirely when not admin
+  (a link with no destination isn't worth showing disabled); Upload and
+  per-document Inspect/Sanitize buttons stay visible but disabled with a
+  `title` naming the missing permission; bulk inspect/sanitize buttons
+  hidden per-kind when that perm is missing. Nothing renders as
+  "available" before the matter fetch resolves — perms starts as an
+  empty set, so a permission-gated control never flashes usable-then-
+  hidden.
+- **Bulk 100-document cap disclosed before submit, not after**: the
+  pre-submit panel used to say nothing about the backend's hard cap, so
+  "select all loaded" across 3+ pages could reach a raw 400 after the
+  user had already confirmed. The bulk bar now disables "Bulk
+  inspect"/"Bulk sanitize…" and shows the exact deselect count once
+  selection exceeds 100; `BulkRunPanel` re-checks the same cap
+  independently (defense in depth, since it's the actual pre-submit
+  confirmation).
+
+Tests: 5 new (`test_dashboard_shows_refused_failed_and_unreviewed_detail_to_read_only_principal`,
+`test_bulk_inspect_and_sanitize_perms_are_independent` plus an inspect-
+without-perm case added to the existing kind-perm test,
+`test_matter_get_reports_only_the_calling_principals_own_perms`,
+`test_jobs_export_is_read_gated_not_admin_gated`,
+`test_summary_requires_admin_specifically_not_just_broad_perms`), plus
+the existing `test_dashboard_scopes_everything_to_readable_matters`
+rewritten for the new split (it previously locked in the leakier
+behavior as intended). Full suite green (1092 collected); frontend gates
+green. Verified live end-to-end as a real limited principal, not just
+via the test suite: minted a genuine session token for `oidc:alice`
+(read-only on one matter, admin on none), drove the actual running app
+as her — confirmed Access/Audit log/Summary report links absent,
+Upload/Inspect/Sanitize disabled with the right `title` text, no bulk
+buttons offered, and the dashboard showing totals with the exact
+disclosure copy explaining why stale/recent were empty — then compared
+against the operator (full admin) seeing everything, including the
+audit-event feed with actor IDs. The 100-document bulk cap was also
+verified at the literal boundary: seeded 101 documents, loaded and
+selected all of them, confirmed the exact "Deselect 1 to continue"
+message and disabled buttons, then deselected one and confirmed they
+re-enabled at exactly 100.

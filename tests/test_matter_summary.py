@@ -66,6 +66,21 @@ def test_summary_requires_admin_perm(env):
     assert r.status_code == 403
 
 
+def test_summary_requires_admin_specifically_not_just_broad_perms(env):
+    """read + upload + inspect + sanitize (everything but admin) must
+    still 403 -- the summary report discloses audit-chain status and
+    refusal/failure reasons, the same class of detail GET .../audit
+    gates, so it isn't enough to be a heavily-permissioned reviewer."""
+    c, _, cfg = env
+    mid = c.post("/v1/matters", json={"name": "m"}).json()["id"]
+    bob = "oidc:bob"
+    for perm in ("read", "upload", "inspect", "sanitize"):
+        c.put(f"/v1/matters/{mid}/acl", json={"user_id": bob, "perm": perm})
+
+    c.cookies.set("cc_session", issue_session(cfg, bob))
+    assert c.get(f"/v1/matters/{mid}/summary").status_code == 403
+
+
 def test_summary_shows_totals_and_verified_chain(env):
     c, _, _ = env
     mid = c.post("/v1/matters", json={"name": "Totals Matter"}).json()["id"]

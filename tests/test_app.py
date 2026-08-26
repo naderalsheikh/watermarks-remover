@@ -84,11 +84,39 @@ def test_auth_required_and_login_flow(tmp_path, monkeypatch):
 def test_matter_create_and_get(client):
     r = client.post("/v1/matters", json={"name": "Project Dandelion"})
     mid = r.json()["id"]
+    # Creator gets every bootstrap perm except download_original (a
+    # deliberate, explicit-grant-only perm — see app.acl.bootstrap_operator).
+    assert sorted(r.json()["perms"]) == sorted(
+        ["read", "upload", "inspect", "sanitize", "admin"]
+    )
     r2 = client.get(f"/v1/matters/{mid}")
     assert r2.json()["name"] == "Project Dandelion"
+    assert sorted(r2.json()["perms"]) == sorted(r.json()["perms"])
     # Uniform 403 for nonexistent + unauthorized (permission check first,
     # like every other matter-scoped route) — no ID-existence oracle.
     assert client.get("/v1/matters/nope").status_code == 403
+
+
+def test_matter_get_reports_only_the_calling_principals_own_perms(tmp_path, monkeypatch):
+    """The frontend uses this to hide/disable controls a limited principal
+    can't use -- it must reflect exactly what THAT principal was granted,
+    never the full set or another principal's grants."""
+    from app.config import Config
+    from app.security import issue_session
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw-perms")
+    cfg = Config(tmp_path / "data")
+    c = TestClient(create_app(cfg.data_root))
+    assert c.post("/v1/auth/login", json={"password": "pw-perms"}).status_code == 200
+    mid = c.post("/v1/matters", json={"name": "m"}).json()["id"]
+
+    alice = "oidc:alice"
+    c.put(f"/v1/matters/{mid}/acl", json={"user_id": alice, "perm": "read"})
+    c.put(f"/v1/matters/{mid}/acl", json={"user_id": alice, "perm": "inspect"})
+
+    c.cookies.set("cc_session", issue_session(cfg, alice))
+    body = c.get(f"/v1/matters/{mid}").json()
+    assert sorted(body["perms"]) == ["inspect", "read"]  # not sanitize/admin/upload
 
 
 def test_auth_config_is_unauthenticated_and_reports_oidc_off(tmp_path, monkeypatch):
@@ -410,6 +438,29 @@ def test_jobs_export_returns_every_job_as_csv_and_the_route_is_not_shadowed(clie
     assert len(rows) - 1 == 3
     assert {row[2] for row in rows[1:]} == {"doc0.txt", "doc1.txt", "doc2.txt"}
     assert all(row[5] == "done" for row in rows[1:])
+
+
+def test_jobs_export_is_read_gated_not_admin_gated(tmp_path, monkeypatch):
+    """Unlike audit/summary export (admin), jobs export matches the plain
+    jobs-list route: read is enough, and a principal with no grant at all
+    still gets 403 rather than an ID-existence oracle."""
+    from app.config import Config
+    from app.security import issue_session
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw-jobs-export-acl")
+    cfg = Config(tmp_path / "data")
+    c = TestClient(create_app(cfg.data_root))
+    assert c.post("/v1/auth/login", json={"password": "pw-jobs-export-acl"}).status_code == 200
+    mid = c.post("/v1/matters", json={"name": "m"}).json()["id"]
+
+    reader = "oidc:reader"
+    c.put(f"/v1/matters/{mid}/acl", json={"user_id": reader, "perm": "read"})
+    c.cookies.set("cc_session", issue_session(cfg, reader))
+    assert c.get(f"/v1/matters/{mid}/jobs/export").status_code == 200
+
+    stranger = "oidc:stranger"
+    c.cookies.set("cc_session", issue_session(cfg, stranger))
+    assert c.get(f"/v1/matters/{mid}/jobs/export").status_code == 403
 
 
 def _upload(client, name: str, matter: str | None = None) -> dict:

@@ -31,7 +31,7 @@ from . import oidc as oidc_mod
 # PR 17 doctrine: this module must NOT import engine_api / custody or call
 # inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
 # isolated worker processes (see app.runner). A test enforces the ban.
-from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, revoke
+from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, perms_of, revoke
 from .audit import append_event, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
@@ -871,7 +871,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             payload={"name": body.name},
         )
         s.commit()
-        return _matter_dict(matter)
+        return _matter_dict(matter, perms_of(s, matter.id, user))
 
     @app.get("/v1/matters/{matter_id}")
     def get_matter(
@@ -881,7 +881,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # unauthorized), matching every other matter-scoped route — the
         # old existence-first order leaked an ID-existence oracle.
         _require(matter_id, "read", s, user)
-        return _matter_dict(_matter(matter_id, s))
+        return _matter_dict(_matter(matter_id, s), perms_of(s, matter_id, user))
 
     # --- documents ----------------------------------------------------------
 
@@ -1612,8 +1612,31 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         "loaded-so-far"), every number here is a server-computed total over
         the *full* ACL-visible set — no pagination, no accumulated pages —
         so the dashboard can present these as global truth for the
-        principal's corpus. All read-only aggregates; chain integrity is
-        still the per-matter audit endpoint's job, not this summary's.
+        principal's corpus.
+
+        Disclosure is split by permission level, not just by readability
+        (operator decision, 2026-08-25 — this dashboard previously showed
+        every read-scoped matter's audit actor IDs and recent-event feed
+        to any reader, while the near-identical content on GET .../audit
+        and GET .../summary correctly required admin; that was an
+        inconsistency this endpoint's own contract should never have had):
+
+        - totals: read-scoped, as before -- server-computed counts over
+          every readable matter, no per-matter admin requirement.
+        - attention items whose detail is already visible through a
+          read-gated per-job route (unreviewed_findings via the manifest
+          route, refused/failed via the job detail route's `error` field)
+          stay at read scope -- the dashboard isn't disclosing anything a
+          read principal couldn't already fetch one document at a time.
+        - "stale" attention items are audit-derived (they compare a
+          matter's last AuditEvent timestamp, not just job/document
+          activity, against a cutoff) and audit itself is admin-gated, so
+          they're now scoped to matters this principal administers only.
+        - recent[] (the cross-matter audit-event feed: action, actor_id,
+          timestamp) is audit content the same way GET .../audit is, so
+          it's now built only from matters this principal administers,
+          not every readable one. Empty (not an error) when the principal
+          administers none of their readable matters.
         """
         matter_ids = [
             r[0]
@@ -1627,9 +1650,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
             "attention": [],
             "recent": [],
+            "admin_matters": 0,
         }
         if not matter_ids:
             return empty
+
+        admin_matter_ids = {
+            r[0]
+            for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="admin").distinct()
+            if r[0] in set(matter_ids)
+        }
 
         total_matters = s.query(Matter).filter(Matter.id.in_(matter_ids)).count()
         total_documents = (
@@ -1648,15 +1678,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         matter_names = dict(
             s.query(Matter.id, Matter.name).filter(Matter.id.in_(matter_ids)).all()
         )
-        attention = _attention_items(s, matter_ids, matter_names)
+        attention = [
+            item
+            for item in _attention_items(s, matter_ids, matter_names)
+            if item["type"] != "stale" or item["matter_id"] in admin_matter_ids
+        ]
 
         recent_rows = (
             s.query(AuditEvent, Matter.name)
             .join(Matter, Matter.id == AuditEvent.matter_id)
-            .filter(AuditEvent.matter_id.in_(matter_ids))
+            .filter(AuditEvent.matter_id.in_(admin_matter_ids))
             .order_by(AuditEvent.at.desc())
             .limit(10)
             .all()
+            if admin_matter_ids
+            else []
         )
         return {
             "totals": {
@@ -1675,6 +1711,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 }
                 for e, name in recent_rows
             ],
+            "admin_matters": len(admin_matter_ids),
         }
 
     # --- helpers ------------------------------------------------------------
@@ -1829,8 +1866,17 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             raise HTTPException(404, "job not found")
         return j
 
-    def _matter_dict(m: Matter) -> dict:
-        return {"id": m.id, "name": m.name, "created_utc": m.created_utc}
+    def _matter_dict(m: Matter, perms: list[str] | None = None) -> dict:
+        d: dict = {"id": m.id, "name": m.name, "created_utc": m.created_utc}
+        # perms is the calling principal's OWN grants on this matter --
+        # only computed by routes that already know who's asking (get_matter,
+        # create_matter), not list_matters (would be an N+1 query per row
+        # for a value the matters-list UI doesn't currently need). The
+        # frontend uses this to hide or disable controls that would 403
+        # rather than let a limited-permission reviewer hit dead ends.
+        if perms is not None:
+            d["perms"] = perms
+        return d
 
     def _doc_dict(d: Document) -> dict:
         return {

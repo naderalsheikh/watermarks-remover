@@ -203,6 +203,40 @@ def test_bulk_requires_the_kind_perm(env):
     assert "sanitize" in r.json()["detail"]
     assert c.get(f"/v1/matters/{mid}/jobs").json()["total"] == 0
 
+    # read alone doesn't cover bulk inspect either -- inspect is its own
+    # perm, not implied by read.
+    r = _bulk(c, mid, [d], "inspect")
+    assert r.status_code == 403
+    assert "inspect" in r.json()["detail"]
+    assert c.get(f"/v1/matters/{mid}/jobs").json()["total"] == 0
+
+
+def test_bulk_inspect_and_sanitize_perms_are_independent(env):
+    """A principal with only inspect can bulk-inspect but not bulk-
+    sanitize, and vice versa -- the two kinds don't imply each other,
+    matching the per-document routes' own separate perm checks."""
+    c, sf, cfg = env
+    mid = _matter(c)
+    d1 = _upload(c, mid, "spa.docx")
+    d2 = _upload(c, mid, "spa.txt")
+    inspector, sanitizer = "oidc:inspector", "oidc:sanitizer"
+    with sf() as s:
+        s.add(MatterAcl(matter_id=mid, user_id=inspector, perm="read"))
+        s.add(MatterAcl(matter_id=mid, user_id=inspector, perm="inspect"))
+        s.add(MatterAcl(matter_id=mid, user_id=sanitizer, perm="read"))
+        s.add(MatterAcl(matter_id=mid, user_id=sanitizer, perm="sanitize"))
+        s.commit()
+
+    c.cookies.set("cc_session", issue_session(cfg, inspector))
+    assert _bulk(c, mid, [d1], "inspect").status_code == 200
+    r = _bulk(c, mid, [d2], "sanitize")
+    assert r.status_code == 403 and "sanitize" in r.json()["detail"]
+
+    c.cookies.set("cc_session", issue_session(cfg, sanitizer))
+    assert _bulk(c, mid, [d2], "sanitize").status_code == 200
+    r = _bulk(c, mid, [d1], "inspect")
+    assert r.status_code == 403 and "inspect" in r.json()["detail"]
+
 
 # --- bulk_safe flag stays honest against the engine ----------------------------
 

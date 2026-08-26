@@ -1,6 +1,11 @@
 export type AuthConfig = { oidc_enabled: boolean };
 
-export type Matter = { id: string; name: string; created_utc: string };
+// `perms` is present on POST /v1/matters and GET /v1/matters/{id} (the
+// caller's own grants on this matter, service/app/main.py's _matter_dict)
+// -- not on list_matters items, which don't compute it per-row. Frontend
+// uses it to hide/disable controls that would otherwise 403.
+export type Matter = { id: string; name: string; created_utc: string; perms?: string[] };
+export type Perm = "read" | "upload" | "inspect" | "sanitize" | "download_original" | "admin";
 
 export type Document = {
   id: string;
@@ -150,6 +155,13 @@ export type DashboardRecent = {
   at: string;
 };
 
+// admin_matters: how many of the principal's readable matters they also
+// administer (service/app/main.py dashboard, 2026-08-25 disclosure split)
+// -- "stale" attention items and `recent` are scoped to those matters
+// only, since both are audit-derived and audit itself is admin-gated
+// (same as GET .../audit). refused/failed/unreviewed_findings stay at
+// read scope: their detail is already visible through read-gated
+// per-job routes, so the dashboard isn't the first place it leaks.
 export type Dashboard = {
   totals: {
     matters: number;
@@ -158,6 +170,7 @@ export type Dashboard = {
   };
   attention: AttentionItem[];
   recent: DashboardRecent[];
+  admin_matters: number;
 };
 
 // POST /v1/matters/{id}/bulk-jobs — one job per document, each audited and

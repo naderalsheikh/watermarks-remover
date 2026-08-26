@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format";
 import { useApiData } from "@/lib/useApi";
-import type { Finding, Job, Manifest } from "@/lib/types";
+import type { Finding, Job, Manifest, Matter } from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
 
@@ -363,6 +363,14 @@ function JobView({
     () => api.get<Job>(`/v1/matters/${matterId}/jobs/${jobId}`),
     `job:${matterId}:${jobId}`,
   );
+  // Only fetched for its perms -- to decide whether "Audit log →" (admin-
+  // gated server-side) is worth showing, same reasoning as the matter
+  // view page.
+  const matterQ = useApiData(
+    () => api.get<Matter>(`/v1/matters/${matterId}`),
+    `matter:${matterId}`,
+  );
+  const perms = new Set(matterQ.data?.perms ?? []);
   const isPending = job?.status === "queued" || job?.status === "running";
   // Job execution is synchronous within the request that starts it (see
   // service/app/main.py's _execute_job), so "running" is rarely observed
@@ -403,12 +411,14 @@ function JobView({
         <Link href={`/matters/view?id=${matterId}`} className="text-sm text-muted hover:text-foreground">
           ← Matter
         </Link>
-        <Link
-          href={`/matters/audit?id=${matterId}`}
-          className="text-sm text-muted hover:text-foreground"
-        >
-          Audit log →
-        </Link>
+        {perms.has("admin") && (
+          <Link
+            href={`/matters/audit?id=${matterId}`}
+            className="text-sm text-muted hover:text-foreground"
+          >
+            Audit log →
+          </Link>
+        )}
       </div>
 
       <div className="mt-4">

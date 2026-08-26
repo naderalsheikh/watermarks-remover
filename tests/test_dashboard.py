@@ -246,15 +246,20 @@ def test_dashboard_empty_corpus(env):
 
 
 def test_dashboard_scopes_everything_to_readable_matters(env):
-    """A principal with read on one matter must see exactly that corpus —
-    totals, attention, and recent — with no cross-matter leakage."""
+    """A principal with read on one matter must see exactly that corpus's
+    totals -- no cross-matter leakage -- but audit-derived detail (stale,
+    recent) requires admin on that specific matter, not just read (operator
+    decision, 2026-08-25): read alone must not surface "stale" (it's
+    derived from AuditEvent timestamps, the same audit content GET
+    .../audit gates behind admin) or the recent-activity feed."""
     c, sf, cfg = env
     alice = "oidc:alice"
     with sf() as s:
         _seed_matter(s, "m1", "Alice's", created_days_ago=10, docs=[("d1", "a.docx")])
         _seed_matter(s, "m2", "Operator's", docs=[("d2", "b.docx")])
         _seed_job(s, "j1", "m2", "d2", status="failed", error="boom")
-        # Alice gets read on m1 only (created 10 days ago, no activity).
+        # Alice gets read on m1 only (created 10 days ago, no activity) --
+        # deliberately not admin.
         s.add(MatterAcl(matter_id="m1", user_id=alice, perm="read"))
         s.commit()
 
@@ -263,14 +268,64 @@ def test_dashboard_scopes_everything_to_readable_matters(env):
     assert body["totals"]["matters"] == 1
     assert body["totals"]["documents"] == 1
     assert body["totals"]["jobs"]["failed"] == 0  # m2's failure invisible
+    assert body["attention"] == []  # "stale" hidden: read only, not admin
+    assert body["recent"] == []  # audit-event feed hidden: no admin matters
+    assert body["admin_matters"] == 0
+
+    # Grant alice admin on the same matter too -- the stale item and m1's
+    # audit activity now surface. (Seeded directly, like the ACL grant
+    # above, so a real AuditEvent row -- normally written by the PUT
+    # .../acl route's append_event() call -- is added by hand here too.
+    # Backdated to match m1's own "10 days ago, no activity" staleness --
+    # a *recent* event would un-stale the matter and defeat the point.)
+    with sf() as s:
+        s.add(MatterAcl(matter_id="m1", user_id=alice, perm="admin"))
+        _seed_audit(s, "ev-m1", "m1", 0, "matter.create", _ts(10))
+        s.commit()
+    body = c.get("/v1/dashboard").json()
     assert [a["type"] for a in body["attention"]] == ["stale"]
     assert body["attention"][0]["matter_id"] == "m1"
+    assert body["admin_matters"] == 1
+    assert len(body["recent"]) >= 1
+    assert all(e["matter_id"] == "m1" for e in body["recent"])
 
-    # The operator still sees the full corpus.
+    # The operator still sees the full corpus (admin on both matters).
     c.cookies.set("cc_session", issue_session(cfg, OPERATOR))
     body = c.get("/v1/dashboard").json()
     assert body["totals"]["matters"] == 2
     assert [a["type"] for a in body["attention"]] == ["failed", "stale"]
+    assert body["admin_matters"] == 2
+
+
+def test_dashboard_shows_refused_failed_and_unreviewed_detail_to_read_only_principal(env):
+    """Unlike "stale", refused/failed/unreviewed_findings detail is already
+    visible through read-gated per-job routes (job.error via GET .../jobs/
+    {id}, the manifest's actions list via GET .../jobs/{id}/manifest) -- so
+    a read-only, non-admin principal must still see the FULL item, not a
+    count with detail withheld. Not admin-gated, unlike "stale"."""
+    c, sf, cfg = env
+    alice = "oidc:alice"
+    with sf() as s:
+        _seed_matter(s, "m1", "Read Only Matter", docs=[("d1", "a.docx"), ("d2", "b.docx")])
+        _seed_job(s, "j-failed", "m1", "d1", status="failed", error="boom")
+        _seed_job(
+            s,
+            "j-unreviewed",
+            "m1",
+            "d2",
+            status="done",
+            manifest_actions=[f"comments_and_notes: kept: {NO_DECISION_MARKER}"],
+        )
+        s.add(MatterAcl(matter_id="m1", user_id=alice, perm="read"))
+        s.commit()
+
+    c.cookies.set("cc_session", issue_session(cfg, alice))
+    body = c.get("/v1/dashboard").json()
+    assert body["admin_matters"] == 0  # confirms this isn't "she's secretly admin"
+    types = {a["type"] for a in body["attention"]}
+    assert types == {"failed", "unreviewed_findings"}
+    failed_item = next(a for a in body["attention"] if a["type"] == "failed")
+    assert failed_item["detail"] == "boom"
 
 
 # --- recent activity ----------------------------------------------------------
