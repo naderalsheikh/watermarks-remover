@@ -23,7 +23,7 @@ from app.config import Config
 from app.db import make_engine, make_session_factory
 from app.main import create_app
 from app.migrate import upgrade_head
-from app.models import Batch, Document, Job, Matter
+from app.models import AuditEvent, Batch, Document, Job, Matter
 from app.security import LoginThrottle
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "legal"
@@ -114,13 +114,79 @@ def test_sweep_fails_running_batch_child_but_preserves_queued_batch_child(tmp_pa
         s.commit()
 
     with sf() as s:
-        swept = _sweep_orphaned_jobs(s)
+        swept, affected_batch_ids = _sweep_orphaned_jobs(s)
     assert swept == 1
+    assert affected_batch_ids == ["b1"]
 
     with sf() as s:
         assert s.get(Job, "bjrunning").status == "failed"
         assert "restart" in s.get(Job, "bjrunning").error
         assert s.get(Job, "bjqueued").status == "queued"
+
+
+def test_boot_sweep_completes_a_batch_whose_last_child_was_running(tmp_path):
+    """Regression: the boot orphan sweep fails a batch child's 'running'
+    row the same as any other, but that used to be the only place a
+    batch's completion was ever (re-)checked from -- nothing re-checked
+    the *batch* itself after a restart, so a batch whose only outstanding
+    child was 'running' when the old process died was left with
+    finished_utc=None and no batch.completed event forever, even after
+    every one of its children reached a terminal state.
+
+    Two batches distinguish "sweep can finish it" from "sweep still
+    correctly leaves it incomplete": b_done's one child was running (and
+    is now the only child, so failing it finishes the batch); b_pending
+    has a running child too, but also a sibling still sitting queued, so
+    the batch must stay open after the sweep.
+
+    The dispatcher's own poll thread is disabled (monkeypatched start()
+    -> no-op): the sweep-triggered completion check under test runs
+    synchronously during create_app, before the dispatcher would ever
+    start, but a *live* dispatcher would then immediately go claim
+    b_pending's still-queued jp2 (its seeded Document is a bare stub with
+    no real storage_path) and race the assertions below -- disabling it
+    keeps this deterministic without touching what's under test.
+    """
+    monkey_dispatcher = pytest.MonkeyPatch()
+    monkey_dispatcher.setattr("app.dispatcher.BatchDispatcher.start", lambda self: None)
+    cfg, sf, pw = _seed_app(tmp_path)
+    with sf() as s:
+        _seed_matter_doc(s)
+        s.add(Batch(id="b_done", matter_id="m", kind="inspect", requested_by="operator", total=1))
+        s.add(Batch(id="b_pending", matter_id="m", kind="inspect", requested_by="operator", total=2))
+        s.flush()
+        s.add(Job(id="jd1", matter_id="m", document_id="d", kind="inspect", status="running", batch_id="b_done"))
+        s.add(Job(id="jp1", matter_id="m", document_id="d", kind="inspect", status="running", batch_id="b_pending"))
+        s.add(Job(id="jp2", matter_id="m", document_id="d", kind="inspect", status="queued", batch_id="b_pending"))
+        s.commit()
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setenv("COUNSELCLEAR_LOCAL_PASSWORD", pw)
+    try:
+        c = TestClient(create_app(cfg.data_root))
+        assert c.get("/health").status_code == 200
+    finally:
+        monkey.undo()
+        monkey_dispatcher.undo()
+
+    with sf() as s:
+        assert s.get(Job, "jd1").status == "failed"
+        assert s.get(Job, "jp1").status == "failed"
+        assert s.get(Job, "jp2").status == "queued"  # untouched -- still the durable queue
+
+        b_done = s.get(Batch, "b_done")
+        assert b_done.finished_utc is not None
+        b_pending = s.get(Batch, "b_pending")
+        assert b_pending.finished_utc is None  # jp2 is still outstanding
+
+        completed_actions = (
+            s.query(AuditEvent)
+            .filter(AuditEvent.matter_id == "m", AuditEvent.action == "batch.completed")
+            .all()
+        )
+    assert len(completed_actions) == 1
+    assert completed_actions[0].payload["batch_id"] == "b_done"
+    assert completed_actions[0].payload["failed"] == 1
 
 
 def test_clean_boot_sweeps_nothing(tmp_path):

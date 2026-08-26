@@ -139,12 +139,30 @@ class BatchDispatcher:
 
         s2 = self._session_factory()
         try:
-            res = run_job(self._cfg, s2, job_id, kind=kind, storage=self._storage)
-            sync_job(s2, job_id, res)
+            try:
+                res = run_job(self._cfg, s2, job_id, kind=kind, storage=self._storage)
+                sync_job(s2, job_id, res)
+            except Exception as e:
+                # run_job/sync_job already have their own internal error
+                # handling for the failures they anticipate (worker
+                # timeout, bad launch config, ...) -- this is the backstop
+                # for something they didn't: an unexpected exception here
+                # would otherwise leave the job stuck at "running" forever
+                # (it was already claimed above) and, worse, the batch
+                # polling forever since nothing would ever check it for
+                # completion again.
+                log.exception("batch dispatcher: job %s raised unexpectedly", job_id)
+                s2.rollback()
+                job = s2.get(Job, job_id)
+                if job is not None and job.status not in ("done", "refused", "failed"):
+                    job.status = "failed"
+                    job.error = f"internal dispatcher error: {type(e).__name__}: {e}"[:1000]
+                    job.finished_utc = _now()
+                    s2.commit()
             finished = s2.get(Job, job_id)
             batch = s2.get(Batch, batch_id)
             self._append_child_audit(s2, finished, batch)
-            self._maybe_complete_batch(s2, batch_id)
+            self.check_batch_completion(s2, batch_id)
         finally:
             s2.close()
 
@@ -185,7 +203,20 @@ class BatchDispatcher:
                 },
             )
 
-    def _maybe_complete_batch(self, s: Session, batch_id: str) -> None:
+    def check_batch_completion(self, s: Session, batch_id: str) -> None:
+        """Fire batch.completed exactly once, the moment every child of
+        this batch has left queued/running -- a no-op if the batch isn't
+        actually done yet, or was already marked done.
+
+        Public (not `_run_one_inner`-only) because a child can also leave
+        queued/running from outside the dispatcher's own run loop: a
+        cancel that fails every still-queued child (main.py's
+        cancel_batch), or the boot orphan sweep failing a running child
+        after a restart (main.py's _sweep_orphaned_jobs). Both call this
+        directly so a batch whose last child finishes that way still gets
+        marked complete and still gets its batch.completed audit event,
+        instead of polling forever.
+        """
         remaining = (
             s.query(Job)
             .filter(Job.batch_id == batch_id, Job.status.in_(("queued", "running")))

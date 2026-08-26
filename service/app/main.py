@@ -361,7 +361,7 @@ def _jlog(level: int, event: str, **fields) -> None:
     log.log(level, json.dumps(payload, separators=(",", ":"), default=str))
 
 
-def _sweep_orphaned_jobs(s: Session) -> int:
+def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
     """Fail jobs left running, or left queued with no dispatcher to resume
     them, by a previous process death.
 
@@ -386,7 +386,23 @@ def _sweep_orphaned_jobs(s: Session) -> int:
     steady state, so if one is ever found orphaned it must still be
     swept to failed, exactly as before, or it would sit stuck forever
     with nothing to notice.
+
+    Returns the sweep count and the distinct batch_ids of any batch
+    children this sweep just failed out of "running" — the caller must
+    still check each one for completion (BatchDispatcher.
+    check_batch_completion): failing a batch's last outstanding child
+    here, on boot, is exactly as capable of finishing that batch as
+    failing it mid-run is, and nothing else will ever check for it.
+    Queued rows are excluded on purpose: they're untouched by this sweep
+    (see above), so they can't be the trigger for a batch just finishing.
     """
+    affected_batch_ids = [
+        row[0]
+        for row in s.query(Job.batch_id)
+        .filter(Job.status == "running", Job.batch_id.isnot(None))
+        .distinct()
+        .all()
+    ]
     result = s.execute(
         update(Job)
         .where(
@@ -400,7 +416,7 @@ def _sweep_orphaned_jobs(s: Session) -> int:
         )
     )
     s.commit()
-    return result.rowcount or 0
+    return result.rowcount or 0, affected_batch_ids
 
 
 def _log_startup_posture(cfg: Config, swept: int, storage) -> None:
@@ -522,10 +538,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         window_s=cfg.login_window_s,
         lockout_s=cfg.login_lockout_s,
     )
-    with session_factory() as s:
-        swept = _sweep_orphaned_jobs(s)
     storage = storage_from_config(cfg)
-    _log_startup_posture(cfg, swept, storage)
     dispatcher = BatchDispatcher(
         cfg=cfg,
         session_factory=session_factory,
@@ -533,6 +546,15 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         max_concurrent=cfg.batch_max_concurrent,
         no_decision_marker=NO_DECISION_MARKER,
     )
+    with session_factory() as s:
+        swept, affected_batch_ids = _sweep_orphaned_jobs(s)
+        # A batch whose last outstanding child was just failed by the
+        # sweep above (its child was "running" when the old process
+        # died) would otherwise never get marked complete or get its
+        # batch.completed event -- nothing else ever re-checks it.
+        for batch_id in affected_batch_ids:
+            dispatcher.check_batch_completion(s, batch_id)
+    _log_startup_posture(cfg, swept, storage)
     dispatcher.start()
 
     # Docs are fail-closed: /docs, /redoc and /openapi.json carry no auth
@@ -1293,6 +1315,17 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 payload={"batch_id": batch_id, "cancelled": cancelled},
             )
         s.commit()
+        # Cancelling every still-queued child can itself be what finishes
+        # the batch (nothing was ever claimed by the dispatcher to trigger
+        # its own completion check) -- most visibly when the whole batch
+        # is cancelled before the dispatcher claims anything at all.
+        dispatcher.check_batch_completion(s, batch_id)
+        # check_batch_completion writes finished_utc via a raw UPDATE,
+        # bypassing this session's identity map -- without a refresh the
+        # `batch` object below (loaded before the check ran) would still
+        # show finished_utc=None in the response even after a completing
+        # cancel (expire_on_commit=False, see db.make_session_factory).
+        s.refresh(batch)
         return _batch_dict(batch, s)
 
     @app.get("/v1/matters/{matter_id}/jobs")

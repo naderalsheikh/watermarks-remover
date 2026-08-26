@@ -381,6 +381,86 @@ def test_cancel_batch_only_touches_still_queued_children(tmp_path, monkeypatch):
     _wait_batch_done(c, mid, bid)
 
 
+def test_cancel_all_before_any_child_claimed_completes_the_batch(tmp_path, monkeypatch):
+    """Regression: cancelling a batch used to only touch the child Job
+    rows -- nothing ever re-checked the batch itself for completion
+    unless the dispatcher had claimed and finished at least one child.
+    A batch cancelled in its entirety before the dispatcher claims
+    anything (every child still queued) used to be left with
+    finished_utc=None forever and no batch.completed event, even though
+    every child had reached a terminal state.
+
+    The dispatcher's own poll thread is disabled here (monkeypatched
+    start() -> no-op) so this is deterministic: no child is ever claimed,
+    by construction, rather than by winning a race against a live poll
+    loop.
+    """
+    monkeypatch.setattr("app.dispatcher.BatchDispatcher.start", lambda self: None)
+    c, sf, _ = _build_env(tmp_path, monkeypatch)
+    mid = _matter(c)
+    docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt")]
+
+    r = _create_batch(c, mid, docs, "inspect")
+    assert r.status_code == 200, r.text
+    bid = r.json()["id"]
+    assert r.json()["summary"]["queued"] == 2  # nothing claimed -- the poll loop never ran
+
+    cancel = c.post(f"/v1/matters/{mid}/batches/{bid}/cancel")
+    assert cancel.status_code == 200, cancel.text
+    body = cancel.json()
+    assert body["finished_utc"] is not None
+    assert all(res["status"] == "failed" for res in body["results"])
+    assert body["summary"]["failed"] == 2
+
+    with sf() as s:
+        from app.models import Batch
+
+        assert s.get(Batch, bid).finished_utc is not None
+    completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
+    assert len(completed) == 1
+    assert completed[0]["payload"] == {"batch_id": bid, "total": 2, "done": 0, "refused": 0, "failed": 2}
+
+
+# --- dispatcher exception hardening -----------------------------------------------
+
+
+def test_unexpected_dispatcher_exception_fails_the_child_and_completes_the_batch(env, monkeypatch):
+    """Regression: run_job/sync_job raising something neither anticipates
+    (not a caught worker timeout/launch failure) used to leave the job
+    stuck at "running" forever -- it had already been claimed -- and the
+    batch polling forever alongside it, since nothing else would ever
+    re-check it for completion.
+    """
+
+    def _boom(cfg, s, job_id, kind="inspect", storage=None):
+        raise RuntimeError("simulated unexpected dispatcher failure")
+
+    monkeypatch.setattr("app.dispatcher.run_job", _boom)
+    c, _, _ = env
+    mid = _matter(c)
+    d = _upload(c, mid, "spa.docx")
+
+    r = _create_batch(c, mid, [d], "inspect")
+    assert r.status_code == 200, r.text
+    bid = r.json()["id"]
+
+    final = _wait_batch_done(c, mid, bid)  # must not hang -- this is the regression
+    assert final["results"][0]["status"] == "failed"
+    assert "internal dispatcher error" in final["results"][0]["error"]
+    assert "RuntimeError" in final["results"][0]["error"]
+    assert final["summary"] == {
+        "requested": 1,
+        "done": 0,
+        "refused": 0,
+        "failed": 1,
+        "queued": 0,
+        "running": 0,
+    }
+    completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
+    assert len(completed) == 1
+    assert completed[0]["payload"]["failed"] == 1
+
+
 # --- ported from the retired tests/test_bulk_jobs.py (PR 31 commit 3) -----------
 #
 # The synchronous /bulk-jobs endpoint (PR 23) was retired once the frontend
