@@ -52,9 +52,9 @@ class FakeClient:
             raise airlock.AirlockError(f"job {job_id} did not reach a terminal state within {timeout_s:.0f}s")
         return {"id": job_id, "status": self.job_status, "error": self.job_error}
 
-    def get_manifest(self, matter_id: str, job_id: str) -> dict | None:
-        self.calls.append("get_manifest")
-        return {
+    def get_release_packet_zip(self, matter_id: str, job_id: str) -> bytes | None:
+        self.calls.append("get_release_packet_zip")
+        manifest = {
             "policy": {"id": "external_sharing", "version": 1},
             "derivative": {"sha256": "d" * 64, "filename": "doc.sanitized.docx"},
             "actions": [
@@ -65,12 +65,12 @@ class FakeClient:
             "findings_before": ["docx-comments: 1 comment(s)"],
             "verification": {"pass": True, "checks": []},
         }
-
-    def get_bundle_zip(self, matter_id: str, job_id: str) -> bytes | None:
-        self.calls.append("get_bundle_zip")
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("manifest.json", "{}")
+            zf.writestr("manifest.json", json.dumps(manifest))
+            zf.writestr("report.json", json.dumps({"verification": manifest["verification"]}))
+            zf.writestr("certificate.html", "<!doctype html><html><body>certificate</body></html>")
+            zf.writestr("README.txt", "CounselClear release packet\n")
             zf.writestr("derivative/doc.sanitized.docx", b"fake derivative bytes")
         return buf.getvalue()
 
@@ -103,21 +103,24 @@ def test_run_airlock_success_writes_derivative_manifest_certificate_and_summary(
     assert result.status == "done"
     assert (out / "doc.sanitized.docx").read_bytes() == b"fake derivative bytes"
     assert json.loads((out / "manifest.json").read_text())["derivative"]["sha256"] == "d" * 64
+    assert (out / "report.json").exists()
     assert (out / "certificate.html").read_bytes().startswith(b"<!doctype html>")
     summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
     assert summary["status"] == "done"
     assert summary["job_id"] == "job1"
     assert summary["document_id"] == "doc1"
     assert set(summary["files_written"]) == {
-        "doc.sanitized.docx", "manifest.json", "certificate.html", "AIRLOCK_RESULT.json",
+        "doc.sanitized.docx", "manifest.json", "report.json", "certificate.html", "AIRLOCK_RESULT.json",
     }
     # The no-decision action from the fake manifest must surface as a
     # limitation, not get silently absorbed into "success".
     assert len(result.limitations) == 1
     assert "no operator decision was supplied" in result.limitations[0]
+    # One release-packet call gets derivative + manifest + report +
+    # certificate together -- not three separate requests for the same
+    # content (get_certificate_html is refused/failed-only, see below).
     assert client.calls == [
-        "upload_document", "sanitize", "wait_for_terminal",
-        "get_manifest", "get_bundle_zip", "get_certificate_html",
+        "upload_document", "sanitize", "wait_for_terminal", "get_release_packet_zip",
     ]
 
 
@@ -142,8 +145,7 @@ def test_run_airlock_refused_job_writes_certificate_and_summary_without_derivati
     assert summary["error"] == "plan refused: macro-enabled file"
     assert any("refused" in item for item in summary["limitations"])
     # done-only steps must never fire for a refused job.
-    assert "get_manifest" not in client.calls
-    assert "get_bundle_zip" not in client.calls
+    assert "get_release_packet_zip" not in client.calls
     assert "get_certificate_html" in client.calls
 
 
@@ -283,6 +285,7 @@ def test_airlock_cli_end_to_end_against_a_real_server(tmp_path, live_server):
 
     assert result.status == "done"
     assert (out / "manifest.json").exists()
+    assert (out / "report.json").exists()
     assert (out / "certificate.html").read_bytes().startswith(b"<!doctype html>")
     assert any(out.glob("*.docx"))
     summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())

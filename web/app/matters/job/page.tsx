@@ -293,21 +293,30 @@ function BundleContents({
   const hasKeptWithoutReview = manifest.actions.some((a) => a.includes(NO_DECISION_MARKER));
   return (
     <div className="mt-3 text-xs text-muted">
-      <p className="font-medium text-foreground">What&apos;s in this zip</p>
+      <p className="font-medium text-foreground">What&apos;s in this release packet</p>
       <ul className="mt-1 list-inside list-disc space-y-1">
+        <li>
+          <code className="font-mono">derivative/{manifest.derivative.filename}</code> — the
+          sanitized output.
+        </li>
+        <li>
+          <code className="font-mono">certificate.html</code> — the same custody certificate
+          available on its own above: identity, policy, hashes, verification, and every
+          limitation, in one self-contained page.
+        </li>
         <li>
           <code className="font-mono">manifest.json</code> — the full custody record shown
           above: policy, every finding, every action taken (including anything kept without
           review), and the verification results.
         </li>
         <li>
-          <code className="font-mono">derivative/{manifest.derivative.filename}</code> — the
-          sanitized output.
-        </li>
-        <li>
           <code className="font-mono">report.json</code> — a smaller extract: verification
           results and the pre-sanitize findings list only, not the full action-by-action record
           (that&apos;s manifest.json).
+        </li>
+        <li>
+          <code className="font-mono">README.txt</code> — names every file above for someone
+          opening this packet without this page.
         </li>
         {includeOriginal && (
           <li>
@@ -438,9 +447,18 @@ function JobView({
                   {job.kind} job
                 </h1>
                 <StatusBadge status={job.status} />
-                {(job.status === "done" ||
-                  job.status === "refused" ||
-                  job.status === "failed") && (
+                {/* A done sanitize job has a release packet (below) as its
+                    primary output -- the packet already embeds this same
+                    certificate, so the header link would be a second,
+                    competing "main" action. Every other terminal case
+                    (refused/failed -- no derivative, so no packet either;
+                    a done inspect -- inspection never produces one) has
+                    nothing else to be the primary action, so the
+                    certificate stays here, prominent, as the one thing
+                    to open. */}
+                {(job.status === "refused" ||
+                  job.status === "failed" ||
+                  (job.status === "done" && job.kind === "inspect")) && (
                   <a
                     href={`/v1/matters/${matterId}/jobs/${jobId}/certificate`}
                     target="_blank"
@@ -506,7 +524,10 @@ function JobView({
             )}
 
             {job.status === "done" && job.kind === "sanitize" && (
-              <div className="mb-6 rounded-md border border-border p-4">
+              <div className="mb-6 rounded-md border-2 border-accent p-4">
+                <p className="mb-3 text-sm font-medium">
+                  Release packet — the sanitized document and its proof, together
+                </p>
                 <div className="flex flex-wrap items-center gap-3">
                   <label className="flex items-center gap-2 text-sm">
                     <input
@@ -514,15 +535,32 @@ function JobView({
                       checked={includeOriginal}
                       onChange={(e) => setIncludeOriginal(e.target.checked)}
                     />
-                    Include original in bundle
+                    Include original in packet
                   </label>
                   <a
                     href={`/v1/matters/${matterId}/jobs/${jobId}/bundle${includeOriginal ? "?include_original=true" : ""}`}
                     className="ml-auto rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-white hover:opacity-90"
                   >
-                    Download bundle
+                    Download release packet
                   </a>
                 </div>
+                {/* The packet already embeds this exact certificate
+                    (certificate.html) -- this is only for reading it
+                    without downloading/unzipping anything, not a second
+                    "main" action next to the packet button above. */}
+                <p className="mt-2 text-xs text-muted">
+                  Includes the derivative, manifest, and custody certificate. Prefer to read
+                  the certificate first?{" "}
+                  <a
+                    href={`/v1/matters/${matterId}/jobs/${jobId}/certificate`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium text-accent hover:underline"
+                  >
+                    Open it on its own
+                  </a>
+                  .
+                </p>
                 {manifest && (
                   <BundleContents manifest={manifest} includeOriginal={includeOriginal} />
                 )}

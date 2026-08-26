@@ -1689,29 +1689,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             raise HTTPException(404, "no manifest for this job")
         return JSONResponse(job.result_json.get("manifest", {}))
 
-    @app.get("/v1/matters/{matter_id}/jobs/{job_id}/certificate")
-    def job_certificate(
-        matter_id: str,
-        job_id: str,
-        user: str = Depends(principal),
-        s: Session = Depends(db_session),
-    ):
-        """Self-contained per-job custody/transaction certificate (PR 33).
-
-        Read-gated, same as job_manifest/job detail: every fact here is
-        already visible through those two read-gated routes (job status/
-        error/timestamps, the sanitize manifest, the document's own
-        original hash). The "custody record" section is a narrow,
-        job-scoped assertion (this job's own audit rows, hash-recomputed
-        individually) — never the matter's full audit chain or any other
-        job's rows, which is what keeps this at read rather than the
-        admin gate GET .../audit and GET .../summary both use.
+    def _build_certificate_html(
+        s: Session, *, matter: Matter, job: Job, doc: Document, generated_by: str
+    ) -> tuple[str, str | None]:
+        """Shared by job_certificate (PR 33) and job_bundle (PR 36, the
+        release packet): the exact same certificate content either way,
+        so a certificate pulled standalone and one embedded in a release
+        packet can never read differently for the same job. Returns
+        (html_body, policy_id) -- callers append their own certificate.issued
+        audit event (payload needs policy_id, job/doc ids callers already
+        have) rather than this helper doing it, since job_bundle commits
+        it alongside its own bundle.download event in one place.
         """
-        _require(matter_id, "read", s, user)
-        matter = _matter(matter_id, s)
-        job = _job(matter_id, job_id, s)
-        doc = _document(matter_id, job.document_id, s)
-
         result = job.result_json or {}
         manifest = result.get("manifest") or {} if job.kind == "sanitize" else {}
         derivative_sha256 = manifest.get("derivative", {}).get("sha256")
@@ -1769,9 +1758,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         job_events = [
             ev
             for ev in s.query(AuditEvent)
-            .filter(AuditEvent.matter_id == matter_id, AuditEvent.action.in_(("job.inspect", "job.sanitize")))
+            .filter(AuditEvent.matter_id == matter.id, AuditEvent.action.in_(("job.inspect", "job.sanitize")))
             .all()
-            if (ev.payload or {}).get("job_id") == job_id
+            if (ev.payload or {}).get("job_id") == job.id
         ]
         audit_integrity_ok = all(
             event_hash(ev.prev_hash, ev.seq, ev.actor_id, ev.action, ev.payload) == ev.row_hash
@@ -1779,7 +1768,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
 
         body = _render_job_certificate_html(
-            matter_id=matter_id,
+            matter_id=matter.id,
             matter_name=matter.name,
             document_id=doc.id,
             document_name=doc.filename,
@@ -1802,16 +1791,23 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             audit_event_count=len(job_events),
             audit_integrity_ok=audit_integrity_ok,
             generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
-            generated_by=user,
+            generated_by=generated_by,
         )
+        return body, policy_id
 
+    def _append_certificate_issued(
+        s: Session, *, matter_id: str, actor_id: str, job: Job, doc: Document, policy_id: str | None
+    ) -> None:
         # Mandatory on every pull, including repeats -- "who has pulled a
         # certificate for this document, and when" is itself part of the
-        # custody record (approved product decision, 2026-08-26).
+        # custody record (approved product decision, 2026-08-26). A
+        # release packet embedding the certificate (job_bundle, PR 36) is
+        # just as much an issuance as the standalone route, so it fires
+        # this too, alongside its own bundle.download event.
         append_event(
             s,
             matter_id=matter_id,
-            actor_id=user,
+            actor_id=actor_id,
             action="certificate.issued",
             payload={
                 "job_id": job.id,
@@ -1821,6 +1817,38 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "status": job.status,
             },
         )
+
+    @app.get("/v1/matters/{matter_id}/jobs/{job_id}/certificate")
+    def job_certificate(
+        matter_id: str,
+        job_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Self-contained per-job custody/transaction certificate (PR 33).
+
+        Read-gated, same as job_manifest/job detail: every fact here is
+        already visible through those two read-gated routes (job status/
+        error/timestamps, the sanitize manifest, the document's own
+        original hash). The "custody record" section is a narrow,
+        job-scoped assertion (this job's own audit rows, hash-recomputed
+        individually) — never the matter's full audit chain or any other
+        job's rows, which is what keeps this at read rather than the
+        admin gate GET .../audit and GET .../summary both use.
+
+        Secondary discovery path since PR 36: the primary one is the
+        release packet (job_bundle below), which embeds this same
+        content. This route stays for direct/standalone access -- a
+        link shared on its own, or opened without downloading the whole
+        packet.
+        """
+        _require(matter_id, "read", s, user)
+        matter = _matter(matter_id, s)
+        job = _job(matter_id, job_id, s)
+        doc = _document(matter_id, job.document_id, s)
+
+        body, policy_id = _build_certificate_html(s, matter=matter, job=job, doc=doc, generated_by=user)
+        _append_certificate_issued(s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id)
         s.commit()
         return Response(content=body, media_type="text/html")
 
@@ -1832,17 +1860,32 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         user: str = Depends(principal),
         s: Session = Depends(db_session),
     ):
+        """The release packet (PR 36): everything a recipient needs for one
+        sanitize job's output travels together by default, the way a
+        DocuSign certificate travels with the document it signs --
+        derivative, manifest.json, report.json, the same custody
+        certificate job_certificate serves standalone, and a README
+        naming what each file is. Never alters the derivative itself to
+        embed the certificate (see docs/release-packet-pdf-append.md for
+        why a PDF-embedded certificate page was evaluated and deferred,
+        not adopted) -- the certificate is a sibling file, not baked into
+        the bytes under custody.
+        """
         _require(matter_id, "read", s, user)
+        matter = _matter(matter_id, s)
         job = _job(matter_id, job_id, s)
+        doc = _document(matter_id, job.document_id, s)
         if job.status != "done" or not job.bundle_dir:
             raise HTTPException(409, f"job is {job.status}; no bundle")
         original_ref = None
         original_name = None
         if include_original:
             _require(matter_id, "download_original", s, user)
-            doc = s.get(Document, job.document_id)
             original_ref = doc.storage_path
             original_name = doc.filename
+
+        cert_html, policy_id = _build_certificate_html(s, matter=matter, job=job, doc=doc, generated_by=user)
+
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             bundle = Path(job.bundle_dir)
@@ -1855,8 +1898,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # entirely — that's a 409 ("no bundle"), not an unhandled 500.
             if not deriv_dir.is_dir():
                 raise HTTPException(409, f"job bundle is incomplete: {deriv_dir} missing")
-            for p in sorted(deriv_dir.iterdir()):
-                zf.write(p, arcname=f"derivative/{p.name}")
+            deriv_names = [p.name for p in sorted(deriv_dir.iterdir())]
+            for name in deriv_names:
+                zf.write(deriv_dir / name, arcname=f"derivative/{name}")
             report = {
                 "verification": (job.result_json or {}).get("manifest", {}).get("verification"),
                 "findings_before": (job.result_json or {})
@@ -1864,6 +1908,28 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 .get("findings_before"),
             }
             zf.writestr("report.json", json.dumps(report, indent=2, sort_keys=True))
+            zf.writestr("certificate.html", cert_html)
+            zf.writestr(
+                "README.txt",
+                "CounselClear release packet\n"
+                "============================\n"
+                f"Matter:   {matter.name} ({matter.id})\n"
+                f"Document: {doc.filename} ({doc.id})\n"
+                f"Job:      {job.id} ({job.kind}, {job.status})\n"
+                f"Policy:   {policy_id or '(n/a)'}\n\n"
+                "Files in this packet:\n"
+                f"  derivative/{deriv_names[0] if deriv_names else '<name>'}"
+                "   -- the sanitized document\n"
+                "  manifest.json   -- full custody manifest: hashes, policy, actions taken\n"
+                "  report.json     -- verification result and pre-sanitize findings summary\n"
+                "  certificate.html -- the custody certificate; open in a browser for a\n"
+                "                     human-readable summary, including any limitations\n"
+                "  README.txt      -- this file\n\n"
+                "certificate.html is the same certificate available on its own at\n"
+                f"/v1/matters/{matter.id}/jobs/{job.id}/certificate -- read it before\n"
+                "relying on this packet: it discloses anything kept without review,\n"
+                "reviewed-and-kept findings, and any refusal/failure, not just a pass/fail.\n",
+            )
             if original_ref and storage.exists(original_ref):
                 zf.writestr(f"original/{original_name}", storage.read(original_ref))
         append_event(
@@ -1873,11 +1939,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             action="bundle.download",
             payload={"job_id": job.id, "include_original": include_original},
         )
+        _append_certificate_issued(s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id)
         s.commit()
         return Response(
             content=buf.getvalue(),
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{job.id}-bundle.zip"'},
+            headers={"Content-Disposition": f'attachment; filename="{job.id}-release-packet.zip"'},
         )
 
     @app.get("/v1/matters/{matter_id}/acl")

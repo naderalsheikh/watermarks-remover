@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""CounselClear Airlock CLI (PR 34) — the "invisible airlock" proof of
-concept: one command, one file in, a release-ready output folder out, no
-browser required.
+"""CounselClear Airlock CLI (PR 34, release-packet terminology since
+PR 36) — the "invisible airlock" proof of concept: one command, one file
+in, a release packet out (the derivative and its custody proof, together
+by default -- see docs/COUNSELCLEAR_DESIGN.md PR 36), no browser required.
 
 Talks to an already-running CounselClear API over plain HTTP (cookie
 session login, multipart upload, JSON, and two binary downloads) --
@@ -158,20 +159,17 @@ class Client:
             job = self.get_job(matter_id, job_id)
         return job
 
-    def get_manifest(self, matter_id: str, job_id: str) -> dict | None:
-        status, body, _ctype = self._raw("GET", f"/v1/matters/{matter_id}/jobs/{job_id}/manifest")
-        if status == 404:
-            return None
-        if status >= 400:
-            raise AirlockError(f"GET manifest failed ({status}): {body.decode(errors='replace')}")
-        return json.loads(body)
-
-    def get_bundle_zip(self, matter_id: str, job_id: str) -> bytes | None:
+    def get_release_packet_zip(self, matter_id: str, job_id: str) -> bytes | None:
+        """The release packet (service/app/main.py's job_bundle route,
+        PR 36): derivative + manifest.json + report.json + certificate.html
+        + README.txt, all in one zip -- the same thing the web UI's
+        "Download release packet" button fetches. None if the job isn't
+        done (nothing to package) or the packet is incomplete server-side."""
         status, body, _ctype = self._raw("GET", f"/v1/matters/{matter_id}/jobs/{job_id}/bundle")
-        if status in (404, 409):  # 409: job not done / bundle incomplete
+        if status in (404, 409):  # 409: job not done / release packet incomplete
             return None
         if status >= 400:
-            raise AirlockError(f"GET bundle failed ({status}): {body.decode(errors='replace')}")
+            raise AirlockError(f"GET release packet failed ({status}): {body.decode(errors='replace')}")
         return body
 
     def get_certificate_html(self, matter_id: str, job_id: str) -> bytes:
@@ -261,29 +259,42 @@ def run_airlock(
     )
 
     if job["status"] == "done":
-        manifest = client.get_manifest(matter_id, job_id)
-        bundle_zip = client.get_bundle_zip(matter_id, job_id)
-        if bundle_zip is not None:
-            with zipfile.ZipFile(io.BytesIO(bundle_zip)) as zf:
-                for name in zf.namelist():
+        # One call gets everything: derivative, manifest.json, report.json,
+        # and certificate.html all travel together in the release packet
+        # (the same one the web UI's "Download release packet" button
+        # fetches) -- not three separate requests for the same content.
+        packet_zip = client.get_release_packet_zip(matter_id, job_id)
+        if packet_zip is not None:
+            with zipfile.ZipFile(io.BytesIO(packet_zip)) as zf:
+                names = zf.namelist()
+                for name in names:
                     if name.startswith("derivative/") and not name.endswith("/"):
                         deriv_name = Path(name).name
                         (output_dir / deriv_name).write_bytes(zf.read(name))
                         result.files_written.append(deriv_name)
-        if manifest is not None:
-            (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
-            result.files_written.append("manifest.json")
-            actions = manifest.get("actions") or []
-            result.limitations = [a for a in actions if any(m in a for m in _LIMITATION_MARKERS)]
+                if "manifest.json" in names:
+                    manifest = json.loads(zf.read("manifest.json"))
+                    (output_dir / "manifest.json").write_text(
+                        json.dumps(manifest, indent=2, sort_keys=True)
+                    )
+                    result.files_written.append("manifest.json")
+                    actions = manifest.get("actions") or []
+                    result.limitations = [a for a in actions if any(m in a for m in _LIMITATION_MARKERS)]
+                if "report.json" in names:
+                    (output_dir / "report.json").write_bytes(zf.read("report.json"))
+                    result.files_written.append("report.json")
+                if "certificate.html" in names:
+                    (output_dir / "certificate.html").write_bytes(zf.read("certificate.html"))
+                    result.files_written.append("certificate.html")
     else:
-        # refused/failed: no derivative, no manifest (job.result_json is
-        # None for either outcome -- see service/app/worker.py's finish()).
-        # The certificate below still renders correctly for both.
+        # refused/failed: no derivative, so no release packet either (the
+        # server 409s -- see get_release_packet_zip). The standalone
+        # certificate route still renders correctly for both outcomes, so
+        # that's this CLI's only source for certificate.html here.
         result.limitations = [f"job {job['status']}: {result.error or 'no further detail recorded'}"]
-
-    cert_html = client.get_certificate_html(matter_id, job_id)
-    (output_dir / "certificate.html").write_bytes(cert_html)
-    result.files_written.append("certificate.html")
+        cert_html = client.get_certificate_html(matter_id, job_id)
+        (output_dir / "certificate.html").write_bytes(cert_html)
+        result.files_written.append("certificate.html")
 
     result.files_written.append("AIRLOCK_RESULT.json")
     (output_dir / "AIRLOCK_RESULT.json").write_text(json.dumps(result.to_dict(), indent=2, sort_keys=True))

@@ -561,11 +561,21 @@ def test_sanitize_job_privacy_bundle_excludes_original(client):
 
     bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{job_id}/bundle")
     assert bundle.status_code == 200
+    assert bundle.headers["content-disposition"].endswith('-release-packet.zip"')
     with zipfile.ZipFile(io.BytesIO(bundle.content)) as zf:
         names = zf.namelist()
+        cert_html = zf.read("certificate.html").decode()
+        readme = zf.read("README.txt").decode()
     assert not any(n.startswith("original/") for n in names)
+    # PR 36: the release packet -- derivative, manifest, report, the same
+    # custody certificate available standalone, and a README naming each
+    # file, all travel together by default.
     assert "manifest.json" in names and "report.json" in names
     assert any(n.startswith("derivative/") for n in names)
+    assert "certificate.html" in names
+    assert "README.txt" in names
+    assert "STANDALONE EXPORT" in cert_html  # the real certificate, not a stub
+    assert "certificate.html" in readme and "manifest.json" in readme
 
 
 def test_include_original_denied_by_default(client):
@@ -616,6 +626,9 @@ def test_audit_chain_and_download_original_perm(client):
     assert "matter.create" in actions
     assert "document.upload" in actions
     assert "bundle.download" in actions
+    # PR 36: a release packet embeds the certificate, so downloading one
+    # is also an issuance -- same as pulling the certificate on its own.
+    assert "certificate.issued" in actions
     by_hash = {e["row_hash"]: e for e in events}
     genesis = [e for e in events if e["prev_hash"] == "0" * 64]
     assert len(genesis) == 1
