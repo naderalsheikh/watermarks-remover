@@ -38,6 +38,19 @@ def test_health_is_unauthenticated(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json() == {"ok": True}
 
 
+def test_v1_root_is_a_helpful_unauthenticated_message_not_a_bare_404(tmp_path, monkeypatch):
+    """UX coherence pass (PR 35): someone poking at --base-url or a bare
+    deployment shouldn't land on FastAPI's default {"detail":"Not Found"}
+    with zero context."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    c = TestClient(create_app(tmp_path / "d"))
+    r = c.get("/v1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["product"] == "CounselClear"
+    assert "/v1/auth/login" in body["unauthenticated_routes"]
+
+
 def test_login_cookie_not_secure_over_plain_http_and_docs_fail_closed(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
     c = TestClient(create_app(tmp_path / "d"))

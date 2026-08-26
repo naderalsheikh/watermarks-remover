@@ -727,6 +727,61 @@ function MatterStats({
   );
 }
 
+// A dedicated, labeled home for every matter-level report/export --
+// previously these lived as three unlabeled "→" links crammed into the
+// thin top nav row, indistinguishable from each other and from ordinary
+// in-app navigation (Access, Audit log). Each item here names its own
+// behavior explicitly (standalone HTML report vs. CSV download) rather
+// than relying on the reader to infer it, and custody certificates (one
+// per job, not one per matter -- there's no single link for "the"
+// certificate) get an explicit pointer to where they actually live.
+function ReportsAndExports({
+  matterId,
+  perms,
+}: {
+  matterId: string;
+  perms: string[] | undefined;
+}) {
+  const linkClass =
+    "shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]";
+  return (
+    <div className="mb-4 rounded-md border border-border p-3">
+      <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+        Reports &amp; exports
+      </h2>
+      <div className="flex flex-wrap gap-2">
+        {hasMatterPerm(perms, "admin") && (
+          <a
+            href={`/v1/matters/${matterId}/summary`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={linkClass}
+          >
+            Summary report <span className="font-normal text-muted">— HTML, opens in a new tab</span>
+          </a>
+        )}
+        {/* Plain <a>, not the api client: a CSV file download, same pattern
+            as the job page's bundle download. Exports every job in the
+            matter, never just what's loaded on this page. Read-gated, not
+            admin -- always safe to show once this page has loaded at all
+            (reaching it already required read). */}
+        <a href={`/v1/matters/${matterId}/jobs/export`} className={linkClass}>
+          Jobs CSV <span className="font-normal text-muted">— downloads immediately</span>
+        </a>
+        {hasMatterPerm(perms, "admin") && (
+          <a href={`/v1/matters/${matterId}/audit/export`} className={linkClass}>
+            Audit CSV <span className="font-normal text-muted">— downloads immediately</span>
+          </a>
+        )}
+      </div>
+      <p className="mt-2 text-xs text-muted">
+        Custody certificates are per document, not per matter — open any completed inspect or
+        sanitize job below and use its <strong>Open custody certificate</strong> link.
+      </p>
+    </div>
+  );
+}
+
 function MatterView({
   matterId,
   highlightDocId,
@@ -864,37 +919,14 @@ function MatterView({
               Audit log →
             </Link>
           )}
-          {/* Plain <a>, not the api client: a CSV file download, same
-              pattern as the job page's bundle download. Exports every job
-              in the matter, never just what's loaded on this page. Read-
-              gated, not admin -- always safe to show once this page has
-              loaded at all (reaching it already required read). */}
-          <a
-            href={`/v1/matters/${matterId}/jobs/export`}
-            className="whitespace-nowrap text-sm text-muted hover:text-foreground"
-          >
-            Export jobs CSV →
-          </a>
-          {hasMatterPerm(perms, "admin") && (
-            // Opens in a new tab, not a download: the report is served
-            // inline HTML meant to be read there, or saved as a PDF via
-            // the browser's own print dialog -- not silently downloaded
-            // like the CSV export above.
-            <a
-              href={`/v1/matters/${matterId}/summary`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="whitespace-nowrap text-sm text-muted hover:text-foreground"
-            >
-              Summary report →
-            </a>
-          )}
         </div>
       </div>
       <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">
         {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
       </h1>
       {matterQ.error && <p className="mb-4 text-sm text-red-600">{matterQ.error}</p>}
+
+      {matterQ.data && <ReportsAndExports matterId={matterId} perms={perms} />}
 
       {!docsQ.loading && (
         <MatterStats

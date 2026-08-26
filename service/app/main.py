@@ -94,6 +94,39 @@ _ATTENTION_SECTION_TITLE = {
     "stale": "Stale matter",
 }
 
+# Shared CSS for the "you are looking at a standalone export, not the live
+# app" banner every backend-rendered HTML report/certificate carries (UX
+# coherence pass, PR 35) -- both _render_matter_summary_html and
+# _render_job_certificate_html splice this in verbatim so the two reports
+# can never drift into inconsistent banner styling.
+_STANDALONE_BANNER_CSS = """
+  .standalone-banner { display: flex; align-items: center; justify-content: space-between;
+                       gap: 0.75rem; background: #eef2ff; border: 1px solid #4f46e5;
+                       border-radius: 6px; padding: 0.5rem 0.9rem; margin-bottom: 1.25rem;
+                       font-size: 0.85rem; }
+  .standalone-banner .badge { font-weight: 700; letter-spacing: 0.02em; color: #4338ca; }
+  .standalone-banner a { color: #4338ca; font-weight: 600; text-decoration: none; }
+  .standalone-banner a:hover { text-decoration: underline; }
+"""
+
+
+def _standalone_banner_html(*, back_href: str, back_label: str) -> str:
+    """Relative link back into the Next.js app: this HTML page is reached
+    either through the app's own same-origin dev proxy (next.config.ts's
+    rewrites -- so the browser's location origin is already the Next app,
+    even though this content came from the API) or, in production, through
+    nginx unifying both under one origin (docs/COUNSELCLEAR_PRODUCTION.md
+    §1) -- a relative path resolves correctly in both cases without this
+    backend needing to know the frontend's own URL."""
+    e = html.escape
+    return (
+        '<div class="standalone-banner">'
+        '<span><span class="badge">STANDALONE EXPORT</span> '
+        "— not the live CounselClear app; nothing here refreshes automatically.</span>"
+        f'<a href="{e(back_href)}">{e(back_label)}</a>'
+        "</div>"
+    )
+
 
 def _render_matter_summary_html(
     *,
@@ -217,9 +250,10 @@ def _render_matter_summary_html(
   code {{ background: #f3f4f6; padding: 1px 4px; border-radius: 3px; }}
   .chain-ok {{ color: #047857; font-weight: 600; }}
   .chain-broken {{ color: #b91c1c; font-weight: 600; }}
-</style>
+{_STANDALONE_BANNER_CSS}</style>
 </head>
 <body>
+{_standalone_banner_html(back_href=f"/matters/view?id={matter_id}", back_label="← Back to matter")}
 <h1>Matter Summary — {esc(matter_name)}</h1>
 <p class="meta">Matter ID: <code>{esc(matter_id)}</code><br>
 Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
@@ -382,9 +416,10 @@ def _render_job_certificate_html(
   .chain-ok {{ color: #047857; font-weight: 600; }}
   .chain-broken {{ color: #b91c1c; font-weight: 600; }}
   .status {{ font-weight: 600; }}
-</style>
+{_STANDALONE_BANNER_CSS}</style>
 </head>
 <body>
+{_standalone_banner_html(back_href=f"/matters/job?matter={matter_id}&job={job_id}", back_label="← Back to job")}
 <h1>Custody Certificate — {esc(document_name)}</h1>
 <p class="meta">Matter: {esc(matter_name)} (<code>{esc(matter_id)}</code>)<br>
 Document ID: <code>{esc(document_id)}</code><br>
@@ -854,6 +889,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         except Exception:
             raise HTTPException(503, "database unavailable") from None
         return {"ok": True}
+
+    @app.get("/v1")
+    def api_root():
+        """`/v1` itself carries no resource -- unauthenticated by design
+        (unlike everything under it) so a bare 404 with no context isn't
+        the first thing anyone hitting the API root sees, whether that's
+        an operator sanity-checking --base-url for tools/counselclear_airlock.py
+        or someone poking at a deployment. Lists a few well-known
+        unauthenticated routes as a starting point, not a full API index."""
+        return {
+            "product": "CounselClear",
+            "message": "This is the CounselClear API root. Authenticated resources live under /v1/...",
+            "unauthenticated_routes": ["/health", "/health/ready", "/v1/auth/login", "/v1/auth/config"],
+            "docs": "docs/COUNSELCLEAR_DESIGN.md, docs/COUNSELCLEAR_PRODUCTION.md",
+        }
 
     def principal(request: Request) -> str:
         """Auth dependency: validates the session cookie and returns the

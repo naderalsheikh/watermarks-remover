@@ -164,6 +164,11 @@ def test_certificate_content_for_completed_sanitize_job(env):
     assert "This document is clean" not in body
     assert "This document is safe" not in body
 
+    # PR 35 UX pass: standalone-export banner with a real way back to the
+    # job page this certificate belongs to.
+    assert "STANDALONE EXPORT" in body
+    assert f'href="/matters/job?matter={mid}&amp;job={job["id"]}"' in body
+
 
 # --- no-decision / operator-kept limitations --------------------------------------
 

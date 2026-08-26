@@ -97,6 +97,10 @@ def test_summary_shows_totals_and_verified_chain(env):
     assert "Documents: 2" in body
     assert "Verified intact" in body
     assert "No open attention items" in body
+    # PR 35 UX pass: a standalone-export banner with a real way back to
+    # the live app, so this page never reads as part of the main app.
+    assert "STANDALONE EXPORT" in body
+    assert f'href="/matters/view?id={mid}"' in body
     # Uses this matter's own audit trail, not a blanket claim.
     assert f"/v1/matters/{mid}/audit/export" in body
 
