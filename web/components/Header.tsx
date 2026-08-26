@@ -21,9 +21,19 @@ export function Header() {
   return (
     <header className="border-b border-border">
       <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-        <Link href="/matters" className="text-lg font-semibold tracking-tight">
-          CounselClear
-        </Link>
+        <div className="flex items-center gap-6">
+          <Link href="/dashboard" className="text-lg font-semibold tracking-tight">
+            CounselClear
+          </Link>
+          <nav className="flex items-center gap-4 text-sm text-muted">
+            <Link href="/dashboard" className="hover:text-foreground">
+              Overview
+            </Link>
+            <Link href="/matters" className="hover:text-foreground">
+              Matters
+            </Link>
+          </nav>
+        </div>
         <button
           onClick={logout}
           disabled={loggingOut}

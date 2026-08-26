@@ -10,6 +10,7 @@ import shutil
 import time
 import uuid
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import custody as custody_mod  # WORM storage only — never parses documents
@@ -17,7 +18,7 @@ from common import MAX_INPUT_BYTES  # a size constant, not a parser
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
-from sqlalchemy import text, update
+from sqlalchemy import func, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1129,7 +1130,201 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             ],
         }
 
+    @app.get("/v1/dashboard")
+    def dashboard(
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Operator overview across every matter this principal can read.
+
+        Unlike list_matters (whose frontend honestly labels itself
+        "loaded-so-far"), every number here is a server-computed total over
+        the *full* ACL-visible set — no pagination, no accumulated pages —
+        so the dashboard can present these as global truth for the
+        principal's corpus. All read-only aggregates; chain integrity is
+        still the per-matter audit endpoint's job, not this summary's.
+        """
+        matter_ids = [
+            r[0]
+            for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
+        ]
+        empty = {
+            "totals": {
+                "matters": 0,
+                "documents": 0,
+                "jobs": {"queued": 0, "running": 0, "done": 0, "failed": 0, "refused": 0},
+            },
+            "attention": [],
+            "recent": [],
+        }
+        if not matter_ids:
+            return empty
+
+        total_matters = s.query(Matter).filter(Matter.id.in_(matter_ids)).count()
+        total_documents = (
+            s.query(Document).filter(Document.matter_id.in_(matter_ids)).count()
+        )
+        job_counts = {st: 0 for st in ("queued", "running", "done", "failed", "refused")}
+        for status, n in (
+            s.query(Job.status, func.count(Job.id))
+            .filter(Job.matter_id.in_(matter_ids))
+            .group_by(Job.status)
+            .all()
+        ):
+            if status in job_counts:  # never KeyError on an unknown stored value
+                job_counts[status] = n
+
+        matter_names = dict(
+            s.query(Matter.id, Matter.name).filter(Matter.id.in_(matter_ids)).all()
+        )
+
+        attention: list[dict] = []
+
+        # Trust-critical queue 1: done sanitize jobs whose manifest kept
+        # findings without an operator decision. Every such job shipped a
+        # derivative with unreviewed keeps, so it must surface even when
+        # its status (done) looks benign. Detected the same way the
+        # job.sanitize audit event counts them (NO_DECISION_MARKER inside
+        # an action string).
+        done_sanitize = (
+            s.query(Job, Document.filename)
+            .join(Document, Document.id == Job.document_id)
+            .filter(
+                Job.matter_id.in_(matter_ids),
+                Job.kind == "sanitize",
+                Job.status == "done",
+                Job.result_json.isnot(None),
+            )
+            .order_by(Job.finished_utc.desc())
+            .all()
+        )
+        for job, doc_name in done_sanitize:
+            actions = ((job.result_json or {}).get("manifest") or {}).get("actions") or []
+            kept_unreviewed = [a for a in actions if NO_DECISION_MARKER in a]
+            if not kept_unreviewed:
+                continue
+            attention.append(
+                {
+                    "type": "unreviewed_findings",
+                    "matter_id": job.matter_id,
+                    "matter_name": matter_names.get(job.matter_id, job.matter_id),
+                    "document_id": job.document_id,
+                    "document_name": doc_name,
+                    "job_id": job.id,
+                    "detail": (
+                        f"{len(kept_unreviewed)} finding(s) kept without operator review"
+                    ),
+                    "created_utc": job.finished_utc or job.created_utc,
+                }
+            )
+
+        # Queues 2-3: refused and failed jobs — both are "correct" outcomes
+        # in different senses (policy declined vs. something broke), but
+        # either way the operator needs the list with the job's reason.
+        for status, label in (("refused", "refused"), ("failed", "failed")):
+            rows = (
+                s.query(Job, Document.filename)
+                .join(Document, Document.id == Job.document_id)
+                .filter(Job.matter_id.in_(matter_ids), Job.status == status)
+                .order_by(Job.created_utc.desc())
+                .all()
+            )
+            for job, doc_name in rows:
+                attention.append(
+                    {
+                        "type": status,  # "refused" | "failed"
+                        "matter_id": job.matter_id,
+                        "matter_name": matter_names.get(job.matter_id, job.matter_id),
+                        "document_id": job.document_id,
+                        "document_name": doc_name,
+                        "job_id": job.id,
+                        "kind": job.kind,
+                        "detail": job.error[:300] or label,
+                        "created_utc": job.created_utc,
+                    }
+                )
+
+        # Queue 4: stale matters — no audit event and no job at all in the
+        # last 7 days (matter creation counts as activity, so a fresh,
+        # untouched matter is not stale).
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        last_audit_at = dict(
+            s.query(AuditEvent.matter_id, func.max(AuditEvent.at))
+            .filter(AuditEvent.matter_id.in_(matter_ids))
+            .group_by(AuditEvent.matter_id)
+            .all()
+        )
+        last_job_at = dict(
+            s.query(Job.matter_id, func.max(Job.created_utc))
+            .filter(Job.matter_id.in_(matter_ids))
+            .group_by(Job.matter_id)
+            .all()
+        )
+        for m in s.query(Matter).filter(Matter.id.in_(matter_ids)).all():
+            latest: datetime | None = None
+            for stamp in (m.created_utc, last_audit_at.get(m.id), last_job_at.get(m.id)):
+                t = _parse_ts(stamp)
+                if t is not None and (latest is None or t > latest):
+                    latest = t
+            if latest is not None and latest < cutoff:
+                attention.append(
+                    {
+                        "type": "stale",
+                        "matter_id": m.id,
+                        "matter_name": m.name,
+                        "detail": (
+                            "no audit or job activity since "
+                            f"{latest.isoformat(timespec='seconds')}"
+                        ),
+                        "created_utc": m.created_utc,
+                    }
+                )
+
+        recent_rows = (
+            s.query(AuditEvent, Matter.name)
+            .join(Matter, Matter.id == AuditEvent.matter_id)
+            .filter(AuditEvent.matter_id.in_(matter_ids))
+            .order_by(AuditEvent.at.desc())
+            .limit(10)
+            .all()
+        )
+        return {
+            "totals": {
+                "matters": total_matters,
+                "documents": total_documents,
+                "jobs": job_counts,
+            },
+            "attention": attention,
+            "recent": [
+                {
+                    "matter_id": e.matter_id,
+                    "matter_name": name,
+                    "action": e.action,
+                    "actor_id": e.actor_id,
+                    "at": e.at,
+                }
+                for e, name in recent_rows
+            ],
+        }
+
     # --- helpers ------------------------------------------------------------
+
+    def _parse_ts(ts: str | None) -> datetime | None:
+        """ISO timestamp -> UTC-aware datetime; None for missing/unparseable.
+
+        Rows carry _now() strings ("2026-08-25T12:34:56+00:00"); tolerate
+        legacy naive strings rather than crash the whole overview on one
+        odd row.
+        """
+        if not ts:
+            return None
+        try:
+            d = datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=UTC)
+        return d.astimezone(UTC)
 
     def _matter(matter_id: str, s: Session) -> Matter:
         m = s.get(Matter, matter_id)

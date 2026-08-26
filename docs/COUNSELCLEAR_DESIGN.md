@@ -1303,3 +1303,35 @@ Setting `COUNSELCLEAR_OIDC_ISSUER` + `CLIENT_ID` + `CLIENT_SECRET` switches auth
 #### gVisor worker isolation — implemented (2026-08-23)
 
 `COUNSELCLEAR_WORKER_RUNTIME` (empty = default runc, unchanged) passes `--runtime <value>` to every per-job `docker run` in `runner.py`'s `build_docker_cmd` — e.g. `runsc` puts gVisor's userspace kernel between a hostile parser and the host, on top of the existing `--network none` / scoped-mount isolation from the hardening pass. Purely additive to PR 17's container invocation; `subprocess` mode is unaffected (no container, no runtime to select). Requires the runtime registered in the Docker daemon (`docs/COUNSELCLEAR_PRODUCTION.md` §3 has the `daemon.json` snippet and a `docker inspect` verification step) — nothing in the app validates the runtime name exists before use, so a typo surfaces as a container-start failure on the first job, not at boot. Test: `tests/test_worker_isolation.py::test_docker_cmd_selects_hardened_runtime_when_configured`.
+
+### PR 22 — Operator dashboard (`GET /v1/dashboard`) — implemented (2026-08-25)
+
+The "loaded-so-far" honesty rule inverted on purpose: where `/v1/matters`
+returns pages and the UI labels them as such, the dashboard is the one
+global view — every number is a server-computed total over the *full*
+ACL-visible corpus (`read` perm, same filter as `list_matters`), so the
+frontend may present it as global truth for that principal. Response shape
+(`web/lib/types.ts` `Dashboard`): `totals.{matters,documents,jobs.{queued,
+running,done,failed,refused}}`; `attention[]` (ordered by severity);
+`recent[]` (last 10 audit events across readable matters, with matter names).
+
+Trust-critical queues, all server-derived (no client-side scanning):
+1. **`unreviewed_findings`** — done sanitize jobs whose manifest `actions`
+   contain the same `NO_DECISION_MARKER` the `job.sanitize` audit event
+   counts (`no_decision_count`): derivatives shipped with findings kept
+   without an operator decision, even under a "done" status. Proved end to
+   end against real worker output (`tests/test_dashboard.py`).
+2. **`refused` / `failed`** — jobs by status with the job's reason/error.
+3. **`stale`** — matters with no audit event and no job for 7+ days
+   (matter creation counts as activity, so a fresh untouched matter is not
+   stale).
+
+Not done: pagination for the attention list (complete by construction at
+operator scale; revisit if a corpus ever outgrows it), per-type attention
+counts separate from the items, and any claim of cross-principal totals.
+
+UI: `/dashboard` route (root redirect now lands there; header gains
+Overview/Matters nav). Totals cards, job-status chips, attention rows that
+deep-link into the matter view (`?doc=` highlight), and humanized recent
+activity. Frontend gates green (`tsc`, `eslint`, `vitest`, `next build`);
+backend: 8 new tests, full suite green (1066 collected).

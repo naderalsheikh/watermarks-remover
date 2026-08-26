@@ -122,6 +122,44 @@ export type Audit = {
 // GET /v1/matters/{id}/acl — current access grants, one row per user_id.
 export type AclGrant = { user_id: string; perms: string[] };
 
+// GET /v1/dashboard — operator overview (service/app/main.py dashboard).
+// Unlike /v1/matters (whose list page honestly says "loaded-so-far"), every
+// number here is a server-computed total over the FULL ACL-visible corpus,
+// so the UI may present these as global truth for what this principal can
+// read. "attention" is ordered by severity: unreviewed findings first,
+// then refused, failed, stale.
+export type AttentionType = "unreviewed_findings" | "refused" | "failed" | "stale";
+
+export type AttentionItem = {
+  type: AttentionType;
+  matter_id: string;
+  matter_name: string;
+  document_id?: string;
+  document_name?: string;
+  job_id?: string;
+  kind?: JobKind;
+  detail: string;
+  created_utc: string;
+};
+
+export type DashboardRecent = {
+  matter_id: string;
+  matter_name: string;
+  action: string;
+  actor_id: string;
+  at: string;
+};
+
+export type Dashboard = {
+  totals: {
+    matters: number;
+    documents: number;
+    jobs: Record<JobStatus, number>;
+  };
+  attention: AttentionItem[];
+  recent: DashboardRecent[];
+};
+
 export const KNOWN_PERMS = [
   "read",
   "upload",
