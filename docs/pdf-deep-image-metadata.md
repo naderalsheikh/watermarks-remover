@@ -64,31 +64,57 @@ derivative it couldn't fully verify). The skip path is real and unit-tested
 actually reachable outside the two strict-tooling policies or when calling
 `clean_pdf` directly.
 
-**Known gap, not fixed, now disclosed rather than silently left implicit**:
-`privacy_only`'s PDF path (`_exiftool_privacy_pdf`) is a separate,
-narrower exiftool-only routine that never calls `clean_pdf` at all — a
-`privacy_only` sanitize job on a PDF does not strip embedded-image
-metadata today, even though the policy's own design intent (GPS-only
-strip, not `strip_all_metadata`) suggests it plausibly should. Whether
-that's the right call for `privacy_only` specifically is a policy-semantics
-question, not a bug in this work — left for a deliberate decision, not
-bundled into this pass.
+**`privacy_only` embedded-image handling — resolved in two stages.**
 
-What *was* fixed: the manifest used to say nothing about this at all —
-`findings_before` would list the embedded-image finding but `actions`
-never mentioned it, so a `privacy_only` derivative could look like a
-complete privacy strip when GPS-bearing image metadata had actually
-survived untouched inside it (confirmed live against the real API before
-the fix: exactly that gap, on a real job). `_apply_pdf` now emits an
-explicit `embedded_image_metadata: flag` record whenever this path
-leaves real metadata behind — same subtype prefix the job page's
-`EmbeddedImageNotice` already renders as "not cleared" for the
-indirect-`/Length` case, so this reached the UI with no frontend change
-at all. Proven, not just claimed: a regression test asserts the embedded
-JPEG's scan data is byte-identical before and after (the "not stripped"
-claim is actually true), that the disclosure record is present when
-metadata is, and absent when it isn't
-(`test_privacy_only_pdf_discloses_untouched_embedded_image_metadata`,
+Stage 1 (disclosure): `privacy_only`'s PDF path (`_exiftool_privacy_pdf`)
+never called `clean_pdf` at all, so a `privacy_only` sanitize job on a PDF
+didn't touch embedded-image metadata, and the manifest said nothing about
+it either — `findings_before` would list the embedded-image finding but
+`actions` never mentioned it, so a derivative could look like a complete
+privacy strip when GPS-bearing image metadata had actually survived
+untouched inside it (confirmed live against the real API before any code
+changed: exactly that gap, on a real job).
+
+Stage 2 (the policy decision, made explicitly rather than left implicit):
+`privacy_only`'s whole stated purpose is location removal without
+touching provenance. `container_meta.strip_pdf_image_gps` now reaches
+into embedded JPEGs and removes **GPS tags only** — never the rest of
+EXIF, never C2PA/JUMBF. This is architecturally different from
+`strip_pdf_image_metadata` (a pure byte-level APPn-segment splice: no
+subprocess, because removing a whole marker class needs no parsing of
+its contents): GPS coordinates live *inside* the TIFF/EXIF IFD structure
+within APP1, so there's no marker-level boundary to splice around a
+GPS-only edit. It shells out to exiftool per extracted JPEG stream — the
+same tool and the same `-gps:all=` technique already trusted for
+standalone JPEG GPS removal (`policies._exiftool_privacy_jpeg`) — and
+splices the result back in with the same xref-safe replacement mechanism,
+followed by a mandatory internal `qpdf` structural rewrite (byte-splicing
+always shifts later offsets; bundled inside the function itself so no
+caller can forget it and ship an xref-broken file).
+
+`_apply_pdf` now emits an explicit `embedded_image_metadata: strip`
+record naming exactly how many images had GPS removed, and calling out
+by name that other embedded metadata and any C2PA/JUMBF provenance were
+left untouched — never implying more was removed than actually was.
+When GPS can't be reached (exiftool unavailable, or an image's `/Length`
+is an indirect reference — the same skip-rather-than-guess rule
+`strip_pdf_image_metadata` already follows), the existing
+`embedded_image_metadata: flag` disclosure fires instead. Same subtype
+prefix the job page's `EmbeddedImageNotice` already renders, so both
+outcomes reached the UI with no frontend change at all.
+
+Proven, not just claimed: the primary regression test builds its "before"
+fixture with *real* GPS + Model EXIF tags written by exiftool itself
+(not a synthetic payload merely starting with the right marker bytes —
+exiftool can only be proven to remove real GPS IFD tags against a real
+TIFF/EXIF structure) plus a real C2PA/JUMBF marker injected alongside it,
+then reads the *result* back with exiftool to confirm GPS is genuinely
+gone and Model genuinely isn't — not inferred from byte-diffing, checked
+the same way a real consumer of the derivative would — while also
+asserting the C2PA marker's bytes survive and the scan data stays
+byte-identical throughout
+(`test_privacy_only_pdf_strips_gps_keeps_other_exif_and_provenance`,
+`test_privacy_only_pdf_flags_gps_it_cannot_reach_indirect_length`,
 `test_privacy_only_pdf_without_embedded_image_metadata_has_no_flag`).
 
 **Rejected: the Ghostscript re-encode pass.** It was built (seven

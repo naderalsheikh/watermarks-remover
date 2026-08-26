@@ -11,6 +11,7 @@ import posixpath
 import re
 import struct
 import subprocess
+import tempfile
 import threading
 import urllib.parse
 import zipfile
@@ -3379,6 +3380,119 @@ def strip_pdf_image_metadata(
     for start, end, replacement in sorted(edits, key=lambda e: e[0], reverse=True):
         out[start:end] = replacement
     return bytes(out), len(edits)
+
+
+def _exiftool_strip_jpeg_gps(exiftool_path: str, jpeg: bytes) -> bytes | None:
+    """Run `exiftool -gps:all=` on raw JPEG bytes via a temp file. Returns
+    the resulting bytes, or None on any failure -- callers treat that as
+    "leave this image untouched" (best-effort per image), not a fatal
+    error, matching this module's other per-image failure handling.
+
+    exiftool never touches JPEG scan data (SOS-to-EOI) when editing
+    metadata tags -- the same guarantee already proven byte-identical for
+    the marker-level strip_pdf_image_metadata path; this is the same tool,
+    used the same way, just asked to remove a narrower set of tags.
+    """
+    with tempfile.TemporaryDirectory(prefix="wm-gps-") as tmp:
+        tmpdir = Path(tmp)
+        src = tmpdir / "in.jpg"
+        dest = tmpdir / "out.jpg"
+        try:
+            safe_write_bytes(src, jpeg)
+            r = subprocess.run(
+                [
+                    exiftool_path,
+                    "-overwrite_original",
+                    "-gps:all=",
+                    "-o",
+                    safe_arg(str(dest)),
+                    safe_arg(str(src)),
+                ],
+                capture_output=True,
+                timeout=30,
+                check=False,
+                preexec_fn=subprocess_preexec_fn,
+            )
+        except Exception:
+            return None
+        if r.returncode != 0 or not dest.is_file():
+            return None
+        return dest.read_bytes()
+
+
+def strip_pdf_image_gps(data: bytes) -> tuple[bytes, int, list[str]]:
+    """Selectively remove GPS location tags -- only -- from every JPEG
+    image XObject in a PDF. All other EXIF (camera/author fields) and any
+    C2PA/JUMBF provenance marker are left untouched. This is
+    privacy_only's embedded-image counterpart to its own jpeg_gps: "strip"
+    cell for standalone JPEG uploads (policies._exiftool_privacy_jpeg,
+    same `exiftool -gps:all=` technique) -- privacy_only's whole point is
+    GPS removal without touching provenance, so the fix has to preserve
+    that distinction for images embedded in a PDF too, not just bare
+    JPEGs.
+
+    Unlike strip_pdf_image_metadata (a pure byte-level APPn-segment splice
+    -- no parsing of the segment's own contents, so no subprocess needed),
+    GPS coordinates live *inside* the TIFF/EXIF IFD structure within APP1,
+    not as a separate marker -- there's no marker-level boundary to splice
+    around a "GPS-only" edit. This shells out to exiftool per extracted
+    JPEG stream (the same tool already trusted for standalone JPEG GPS
+    removal) and splices its output back into the PDF using the identical
+    replacement mechanism strip_pdf_image_metadata uses.
+
+    Splicing a shorter stream in place shifts every later byte offset,
+    which breaks the xref table until rebuilt -- the same rule
+    strip_pdf_image_metadata's caller (clean_pdf) already follows.
+    Bundled *inside* this function rather than left to the caller: a
+    privacy_only PDF job normally skips the qpdf structural rewrite
+    (pdf_incremental: "keep" -- see policies._apply_pdf), but that's about
+    avoiding qpdf's broader rewrite when nothing forced one, not license
+    to ship an xref-broken file. A raw byte splice always forces one; this
+    function performs it itself so there's no path that returns a
+    structurally invalid PDF.
+
+    Returns (new_pdf_bytes, images_modified, rebuild_notes). No-op (0
+    modified, no notes) when exiftool is unavailable -- caller decides how
+    to disclose that. Images whose /Length is an indirect reference are
+    left untouched (_pdf_direct_length), same skip-rather-than-guess rule
+    as strip_pdf_image_metadata.
+    """
+    et = which("exiftool")
+    if not et:
+        return data, 0, []
+    edits: list[tuple[int, int, bytes]] = []
+    for dict_open, dict_close, start, end in _iter_pdf_image_xobject_spans(data):
+        dict_content = data[dict_open + 2 : dict_close]
+        length_info = _pdf_direct_length(dict_content)
+        if length_info is None:
+            continue
+        _old_len, len_start, len_end = length_info
+        jpeg = data[start:end]
+        if not embedded_image_metadata_present(jpeg):
+            continue
+        stripped = _exiftool_strip_jpeg_gps(et, jpeg)
+        if stripped is None or stripped == jpeg:
+            continue
+        new_dict_content = (
+            dict_content[:len_start] + str(len(stripped)).encode("ascii") + dict_content[len_end:]
+        )
+        replacement = (
+            b"<<" + new_dict_content + b">>" + data[dict_close + 2 : start] + stripped
+        )
+        edits.append((dict_open, end, replacement))
+    if not edits:
+        return data, 0, []
+    out = bytearray(data)
+    for start, end, replacement in sorted(edits, key=lambda e: e[0], reverse=True):
+        out[start:end] = replacement
+    spliced = bytes(out)
+    notes: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="wm-gps-rebuild-") as tmp:
+        rebuild_dest = Path(tmp) / "out.pdf"
+        safe_write_bytes(rebuild_dest, spliced)
+        _pdf_structural_rewrite(rebuild_dest, notes)
+        rebuilt = rebuild_dest.read_bytes()
+    return rebuilt, len(edits), notes
 
 
 def _pdf_structural_rewrite(dest: Path, actions: list[str]) -> bool:
