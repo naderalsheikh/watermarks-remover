@@ -1035,12 +1035,12 @@ function MatterView({
                   </div>
                   {/* Disclosed here, before the pre-submit panel even
                       opens, not just inside it -- the backend hard-caps a
-                      bulk request at 100 documents (service/app/main.py
-                      bulk_jobs); "select all loaded" across a few pages
-                      can exceed that with nothing in the confirmation
-                      panel warning about it, so a submit would otherwise
-                      only fail with a raw 400 after the user already
-                      clicked through. */}
+                      batch at 100 documents (service/app/main.py
+                      create_batch); "select all loaded" across a few
+                      pages can exceed that with nothing in the
+                      confirmation panel warning about it, so a submit
+                      would otherwise only fail with a raw 400 after the
+                      user already clicked through. */}
                   {isOverBulkCap(selected.size) && (
                     <p className="mt-2 text-xs text-red-600">
                       Bulk actions are limited to {BULK_MAX_DOCUMENTS} documents at a time.

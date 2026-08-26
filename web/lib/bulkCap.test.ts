@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { BULK_MAX_DOCUMENTS, bulkCapOverflow, isOverBulkCap } from "./bulkCap";
 
 describe("isOverBulkCap", () => {
-  it("matches the backend's cap exactly (service/app/main.py bulk_jobs)", () => {
+  it("matches the backend's cap exactly (service/app/main.py create_batch)", () => {
     expect(BULK_MAX_DOCUMENTS).toBe(100);
   });
 

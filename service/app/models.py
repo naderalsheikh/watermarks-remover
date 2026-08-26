@@ -124,8 +124,9 @@ class Job(Base):
     matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), index=True)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
     # PR 31: set only for children of an async Batch; NULL for jobs created
-    # by the synchronous single-document routes or the legacy synchronous
-    # /bulk-jobs endpoint.
+    # by the synchronous single-document routes (the synchronous
+    # /bulk-jobs endpoint that used to also leave this NULL was retired in
+    # PR 31 commit 3).
     batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(16))  # inspect | sanitize
     policy_id: Mapped[str] = mapped_column(String(40), default="external_sharing")

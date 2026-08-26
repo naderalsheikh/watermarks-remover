@@ -1849,3 +1849,52 @@ errors, no runaway requests) after the fix. Confirmed the old
 `/bulk-jobs` endpoint still answers correctly via a direct API call
 against the same running backend, untouched by this frontend-only
 change.
+
+#### PR 31 commit 3/3 — retire the synchronous /bulk-jobs endpoint — implemented (2026-08-26)
+
+Checked first that nothing still depended on it: grepped the repo for
+`bulk-jobs`/`bulk_jobs` across Python, TypeScript, and docs. The
+frontend cutover (commit 2) had already moved `BulkRunPanel`/
+`BulkResults` off it; nothing in `docs/COUNSELCLEAR_PRODUCTION.md`,
+`deploy/`, or `compose.yaml` referenced it as an integration point; the
+only real dependents were its own test file and a handful of stale
+comments. No compatibility concern (single-tenant internal product, no
+external API consumers), so removed rather than just deprecating.
+
+- **Removed** the `bulk_jobs` route (`POST
+  /v1/matters/{id}/bulk-jobs`) from `service/app/main.py` — the whole
+  function body, not just the decorator; `_create_job`, `_execute_job`,
+  `BulkJobsBody` (still the request body for `POST .../batches`), and
+  every single-document route are untouched, since they're shared with
+  batch execution.
+- **`tests/test_bulk_jobs.py` deleted.** Six of its eight tests were
+  ported into `tests/test_batches.py` against `create_batch` instead —
+  sanitize mixed outcomes (done + two refusal classes), the
+  `privacy_only` no-decision-marker check, non-bulk-safe policy
+  rejection, empty/duplicate/unknown-kind rejection, independent
+  inspect/sanitize perms, and the `POLICIES.bulk_safe`-matches-the-
+  policy-engine invariant. The other two (unknown-document rejection,
+  a narrower version of the kind-perm check) were already covered by
+  existing `test_batches.py` tests, so weren't duplicated.
+- **Stale comments updated**, not just deleted: `service/app/main.py`
+  (the orphan-sweep docstring, a `bulk_safe` policy comment),
+  `service/app/models.py` (`Job.batch_id`'s docstring), and the
+  frontend (`web/lib/bulkCap.ts`, `.test.ts`, `web/lib/types.ts`,
+  the bulk-cap-disclosure comment in `matters/view/page.tsx`) now point
+  at `create_batch`/`tests/test_batches.py` instead of the retired
+  route, with a one-line "formerly bulk_jobs, retired in PR 31 commit
+  3" note where the history is worth keeping. `web/lib/types.ts`'s
+  now-redundant `BulkJobsResponse` type (its shape had already
+  collapsed into `BatchResponse`) was folded away; `BulkJobResult`
+  stays, still in live use for both `BatchResponse.results` and
+  `batchCancel.ts`.
+
+Full backend suite green (1097 passed, 1 skipped — scipy, pre-existing
+— cross-checked against 1098 collected), `ruff check` clean. Frontend
+gates green (`tsc`, `eslint`, `vitest` 46/46 unchanged, `next build`).
+Live-verified against a fresh backend instance: `POST .../bulk-jobs`
+now 404s, `POST .../batches` returns 200 with an immediate `queued`
+state; a live browser bulk-sanitize run (macro-enabled + plain
+document) again showed a genuine in-flight `queued` snapshot before
+settling on the correct final split (1 done, 1 refused), with no
+console errors in a fresh tab.

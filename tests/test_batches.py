@@ -379,3 +379,141 @@ def test_cancel_batch_only_touches_still_queued_children(tmp_path, monkeypatch):
 
     worker.release(running_job)
     _wait_batch_done(c, mid, bid)
+
+
+# --- ported from the retired tests/test_bulk_jobs.py (PR 31 commit 3) -----------
+#
+# The synchronous /bulk-jobs endpoint (PR 23) was retired once the frontend
+# cut over to async batches (commit 2). Its own test file tested the route
+# directly and is gone with it; these scenarios still matter for
+# create_batch (same validation, same "never a vague blanket success"
+# guarantee) and are ported here rather than lost.
+
+
+def test_batch_sanitize_mixed_outcomes_are_per_document(env):
+    """One document sanitizes clean; the other two hit refusal classes
+    (macro-enabled file, signed PDF without attestation). The final batch
+    must show each status where it happened -- never a blanket success."""
+    c, _, _ = env
+    mid = _matter(c)
+    good = _upload(c, mid, "spa.docx")
+    macro = _upload(c, mid, "macro.docm")
+    signed = _upload(c, mid, "signed.pdf")
+
+    r = _create_batch(c, mid, [good, macro, signed], "sanitize", policy_id="external_sharing")
+    assert r.status_code == 200, r.text
+    final = _wait_batch_done(c, mid, r.json()["id"])
+    assert final["summary"] == {
+        "requested": 3,
+        "done": 1,
+        "refused": 2,
+        "failed": 0,
+        "queued": 0,
+        "running": 0,
+    }
+    by_doc = {res["document_id"]: res for res in final["results"]}
+    assert by_doc[good]["status"] == "done" and by_doc[good]["error"] == ""
+    assert by_doc[macro]["status"] == "refused"
+    assert "macro" in by_doc[macro]["error"].lower()
+    assert by_doc[signed]["status"] == "refused"
+    assert "signature" in by_doc[signed]["error"].lower()
+
+    events = [e for e in _audit_actions(c, mid) if e["action"] == "job.sanitize"]
+    assert len(events) == 3
+    statuses = {e["payload"]["document_id"]: e["payload"]["status"] for e in events}
+    assert statuses == {good: "done", macro: "refused", signed: "refused"}
+
+
+def test_batch_sanitize_privacy_only_leaves_no_no_decision_marker(env):
+    """privacy_only is bulk-safe: it has no approve-default cells, so its
+    keeps are policy-default keeps -- the manifest must contain no
+    NO_DECISION_MARKER (which would mean findings kept without review)."""
+    from app.main import NO_DECISION_MARKER
+
+    c, _, _ = env
+    mid = _matter(c)
+    d = _upload(c, mid, "spa.docx")
+
+    r = _create_batch(c, mid, [d], "sanitize", policy_id="privacy_only")
+    assert r.status_code == 200, r.text
+    final = _wait_batch_done(c, mid, r.json()["id"])
+    res = final["results"][0]
+    assert res["status"] == "done"
+    assert res["policy_id"] == "privacy_only"
+
+    manifest = c.get(f"/v1/matters/{mid}/jobs/{res['job_id']}/manifest").json()
+    assert all(NO_DECISION_MARKER not in a for a in manifest["actions"])
+
+
+def test_batch_rejects_non_bulk_safe_policies(env):
+    c, _, _ = env
+    mid = _matter(c)
+    d = _upload(c, mid, "spa.docx")
+
+    for policy_id in ("production", "evidence_preservation"):
+        r = _create_batch(c, mid, [d], "sanitize", policy_id=policy_id)
+        assert r.status_code == 400, policy_id
+        assert "per-finding decisions" in r.json()["detail"] or "no derivative" in r.json()["detail"]
+    assert c.get(f"/v1/matters/{mid}/jobs").json()["total"] == 0
+    assert all(
+        e["action"] not in ("job.inspect", "job.sanitize") for e in _audit_actions(c, mid)
+    )
+
+
+def test_batch_rejects_empty_duplicates_and_unknown_kind(env):
+    c, _, _ = env
+    mid = _matter(c)
+    d = _upload(c, mid, "spa.docx")
+
+    assert _create_batch(c, mid, [], "inspect").status_code == 400
+    assert _create_batch(c, mid, [d, d], "inspect").status_code == 400
+    assert _create_batch(c, mid, [d], "frobnicate").status_code == 400
+    assert c.get(f"/v1/matters/{mid}/jobs").json()["total"] == 0
+
+
+def test_batch_inspect_and_sanitize_perms_are_independent(env):
+    """A principal with only inspect can batch-inspect but not batch-
+    sanitize, and vice versa -- the two kinds don't imply each other,
+    matching the per-document routes' own separate perm checks."""
+    c, sf, cfg = env
+    mid = _matter(c)
+    d1 = _upload(c, mid, "spa.docx")
+    d2 = _upload(c, mid, "spa.txt")
+    inspector, sanitizer = "oidc:inspector", "oidc:sanitizer"
+    with sf() as s:
+        s.add(MatterAcl(matter_id=mid, user_id=inspector, perm="read"))
+        s.add(MatterAcl(matter_id=mid, user_id=inspector, perm="inspect"))
+        s.add(MatterAcl(matter_id=mid, user_id=sanitizer, perm="read"))
+        s.add(MatterAcl(matter_id=mid, user_id=sanitizer, perm="sanitize"))
+        s.commit()
+
+    c.cookies.set("cc_session", issue_session(cfg, inspector))
+    assert _create_batch(c, mid, [d1], "inspect").status_code == 200
+    r = _create_batch(c, mid, [d2], "sanitize")
+    assert r.status_code == 403 and "sanitize" in r.json()["detail"]
+
+    c.cookies.set("cc_session", issue_session(cfg, sanitizer))
+    assert _create_batch(c, mid, [d2], "sanitize").status_code == 200
+    r = _create_batch(c, mid, [d1], "inspect")
+    assert r.status_code == 403 and "inspect" in r.json()["detail"]
+
+
+def test_bulk_safe_flags_match_policy_engine():
+    """main.py's POLICIES literal (bulk_safe) must stay in sync with the
+    engine's actual subtype table, the same way NO_DECISION_MARKER does:
+    a bulk_safe policy must have NO approve-default subtype cells (a
+    sanitize without per-finding decisions would silently keep them), and
+    only the two decision-free derivative-producing policies are bulk-safe.
+    """
+    import policies as policies_mod
+    from app.main import POLICIES as main_policies
+
+    declared = {p["id"]: p["bulk_safe"] for p in main_policies}
+    assert set(declared) == set(policies_mod.DEFAULT_POLICIES)
+    for pid, bulk_safe in declared.items():
+        if bulk_safe:
+            assert "approve" not in set(policies_mod.DEFAULT_POLICIES[pid].values()), pid
+    assert declared["external_sharing"] is True
+    assert declared["privacy_only"] is True
+    assert declared["production"] is False
+    assert declared["evidence_preservation"] is False

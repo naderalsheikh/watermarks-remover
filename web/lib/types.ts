@@ -173,10 +173,12 @@ export type Dashboard = {
   admin_matters: number;
 };
 
-// POST /v1/matters/{id}/bulk-jobs — one job per document, each audited and
-// reported individually (service/app/main.py bulk_jobs). `status` and
-// `error` are per-document: a refused or failed job shows up next to the
-// successes, never laundered into a blanket "bulk succeeded".
+// POST/GET /v1/matters/{id}/batches[/{batch_id}] — one row per document
+// (service/app/main.py create_batch), never laundered into a vague
+// "batch succeeded". Formerly the shape the synchronous /bulk-jobs
+// endpoint (PR 23) returned directly; that endpoint was retired in PR 31
+// commit 3 once the frontend moved to polling this async resource, and
+// this result/summary shape carried over unchanged.
 export type BulkJobResult = {
   document_id: string;
   document_name: string;
@@ -187,24 +189,9 @@ export type BulkJobResult = {
   error: string;
 };
 
-export type BulkJobsResponse = {
-  results: BulkJobResult[];
-  summary: {
-    requested: number;
-    done: number;
-    refused: number;
-    failed: number;
-    queued: number;
-    running: number;
-  };
-};
-
-// POST/GET /v1/matters/{id}/batches[/{batch_id}] — the async counterpart
-// to bulk-jobs (PR 31). Same per-document results[]/summary shape as
-// BulkJobsResponse (still never a vague "batch succeeded"), plus the
-// batch's own identity and lifecycle: finished_utc is null while any
-// child is queued or running, and gets set exactly once by the backend
-// dispatcher when every child has reached a terminal state.
+// finished_utc is null while any child is queued or running, and gets
+// set exactly once by the backend dispatcher when every child has
+// reached a terminal state.
 export type BatchResponse = {
   id: string;
   matter_id: string;
@@ -214,7 +201,14 @@ export type BatchResponse = {
   created_utc: string;
   finished_utc: string | null;
   results: BulkJobResult[];
-  summary: BulkJobsResponse["summary"];
+  summary: {
+    requested: number;
+    done: number;
+    refused: number;
+    failed: number;
+    queued: number;
+    running: number;
+  };
 };
 
 export const KNOWN_PERMS = [
