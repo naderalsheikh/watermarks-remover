@@ -507,9 +507,9 @@ function MatterView({
 
   const [docSearch, setDocSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | StatusTone>("all");
-  // Both filters run only against the documents/jobs already fetched
-  // (server-capped at `limit`) — same "loaded, not the whole matter"
-  // scope as the matters-list search.
+  // Both filters run only against the documents/jobs loaded so far
+  // (accumulated via "Load more", see usePaginatedList) — same "loaded,
+  // not the whole matter" scope as the matters-list search.
   const filteredDocs = docsQ.items.filter((doc) => {
     if (docSearch.trim() && !doc.filename.toLowerCase().includes(docSearch.trim().toLowerCase())) {
       return false;
