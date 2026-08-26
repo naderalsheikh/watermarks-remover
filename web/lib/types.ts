@@ -199,6 +199,24 @@ export type BulkJobsResponse = {
   };
 };
 
+// POST/GET /v1/matters/{id}/batches[/{batch_id}] — the async counterpart
+// to bulk-jobs (PR 31). Same per-document results[]/summary shape as
+// BulkJobsResponse (still never a vague "batch succeeded"), plus the
+// batch's own identity and lifecycle: finished_utc is null while any
+// child is queued or running, and gets set exactly once by the backend
+// dispatcher when every child has reached a terminal state.
+export type BatchResponse = {
+  id: string;
+  matter_id: string;
+  kind: JobKind;
+  policy_id: string;
+  total: number;
+  created_utc: string;
+  finished_utc: string | null;
+  results: BulkJobResult[];
+  summary: BulkJobsResponse["summary"];
+};
+
 export const KNOWN_PERMS = [
   "read",
   "upload",

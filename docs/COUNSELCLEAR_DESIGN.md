@@ -1805,3 +1805,47 @@ polling, concurrency-cap enforcement, `batch_id`-carrying audit events
 plus `batch.created`/`batch.completed`, ACL-before-children, 100-doc cap,
 queued-only cancel) and a direct orphan-sweep unit test in
 `tests/test_prod_hardening.py` for the batch-child queued-survives case.
+
+#### PR 31 commit 2/3 — frontend cutover — implemented (2026-08-26)
+
+`BulkRunPanel`'s submit now calls `POST .../batches` instead of the
+synchronous `/bulk-jobs`, and `BulkResults` polls `GET
+.../batches/{id}` every 2s until `finished_utc` is set — rendering
+whatever partial mix (`queued`/`running`/`done`/`refused`/`failed`
+counts, per-document rows) is loaded on each tick rather than waiting
+for completion. A "Cancel remaining" button (visible only while the
+batch is in flight) calls `POST .../batches/{id}/cancel`; a cancelled
+child is labeled distinctly ("cancelled", not "failed") using a new
+`web/lib/batchCancel.ts` helper that checks for the exact
+`cancelled by operator` error string `cancel_batch` sets — mirrored,
+not imported, same pattern as `bulkCap.ts`'s backend-cap mirror. The
+old synchronous `/bulk-jobs` endpoint is untouched and still live
+(commit 3/3 retires it only after this cutover is verified).
+
+**Bug caught in live verification, fixed before landing:** the first
+version reloaded the documents/jobs lists from inside `BulkResults`'
+own "batch just finished" effect, guarded by a `useRef` local to that
+component. Both lists live inside `{!docsQ.loading && ...}` in the
+parent, so the reload's own `docsQ.loading = true` unmounted
+`BulkResults` — taking its guard ref with it — and the freshly
+remounted instance's effect fired the same reload again on mount,
+forever: an unbounded request loop confirmed live (thousands of
+`GET .../documents` and `.../jobs` calls in the network log, page stuck
+on the loading skeleton). Fixed by moving the "reload exactly once per
+finished batch" effect up to `MatterView`, keyed by `batch.id` in a ref
+that lives at the page level and survives `BulkResults` mounting and
+unmounting freely.
+
+Frontend gates green (`tsc`, `eslint`, `vitest` — 46 passed, +3 for
+`isCancelledResult` — `next build`); backend untouched, so the full
+backend suite was not re-run (per-pass policy: only when backend
+changes). Verified live end-to-end against a running backend: uploaded
+a mixed set (macro-enabled + plain documents), ran bulk sanitize
+through the new UI, observed a genuine in-flight snapshot (`0 done · 0
+refused · 0 failed · 3 queued · 0 running`, Cancel button present)
+before the batch progressed, and confirmed the final mixed result (6
+done, 1 refused, correct per-document badges and error text, no console
+errors, no runaway requests) after the fix. Confirmed the old
+`/bulk-jobs` endpoint still answers correctly via a direct API call
+against the same running backend, untouched by this frontend-only
+change.

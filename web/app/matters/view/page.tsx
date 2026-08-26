@@ -10,7 +10,8 @@ import { usePaginatedList } from "@/lib/usePaginatedList";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { hasMatterPerm, permissionGate } from "@/lib/matterPermissions";
 import { BULK_MAX_DOCUMENTS, bulkCapOverflow, isOverBulkCap } from "@/lib/bulkCap";
-import type { BulkJobsResponse, Document, Job, Matter, Policy } from "@/lib/types";
+import { isCancelledResult } from "@/lib/batchCancel";
+import type { BatchResponse, Document, Job, Matter, Policy } from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
 
@@ -439,7 +440,7 @@ function BulkRunPanel({
   kind: "inspect" | "sanitize";
   policies: Policy[];
   onClose: () => void;
-  onDone: (res: BulkJobsResponse) => void;
+  onDone: (batch: BatchResponse) => void;
 }) {
   // Only policies the backend marks bulk-safe are offered: no approve-
   // default subtype cells, so no per-finding decisions are required. The
@@ -459,11 +460,11 @@ function BulkRunPanel({
         kind === "sanitize"
           ? { document_ids: docIds, kind, policy_id: policyId, reason }
           : { document_ids: docIds, kind };
-      const res = await api.post<BulkJobsResponse>(
-        `/v1/matters/${matterId}/bulk-jobs`,
-        body,
-      );
-      onDone(res);
+      // Async: this returns as soon as the batch and its queued child jobs
+      // are recorded, not once every job has finished — BulkResults below
+      // takes the response and polls it to completion.
+      const batch = await api.post<BatchResponse>(`/v1/matters/${matterId}/batches`, body);
+      onDone(batch);
       onClose();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Bulk run failed to start");
@@ -571,39 +572,102 @@ function BulkRunPanel({
 
 // Per-document results of the last bulk run — deliberately a row per
 // document (filename, status, error, job link) so a refusal or failure is
-// as visible as the successes; never a vague "bulk succeeded".
+// as visible as the successes; never a vague "batch succeeded". Polls the
+// batch (PR 31: async, so most of a batch's life is spent queued/running
+// in the background) every 2s until every child leaves queued/running,
+// rendering whatever partial mix is loaded on each tick rather than
+// waiting for completion to show anything.
 function BulkResults({
   matterId,
-  results,
+  batch,
+  onUpdate,
 }: {
   matterId: string;
-  results: BulkJobsResponse;
+  batch: BatchResponse;
+  onUpdate: (batch: BatchResponse) => void;
 }) {
-  const s = results.summary;
+  const [cancelling, setCancelling] = useState(false);
+  const pending = batch.finished_utc === null;
+
+  useEffect(() => {
+    if (!pending) return;
+    const id = setInterval(async () => {
+      try {
+        const fresh = await api.get<BatchResponse>(
+          `/v1/matters/${matterId}/batches/${batch.id}`,
+        );
+        onUpdate(fresh);
+      } catch {
+        // A transient poll failure just tries again on the next tick --
+        // nothing to show the operator for one missed poll.
+      }
+    }, 2000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending, matterId, batch.id]);
+
+  async function cancel() {
+    setCancelling(true);
+    try {
+      const fresh = await api.post<BatchResponse>(
+        `/v1/matters/${matterId}/batches/${batch.id}/cancel`,
+      );
+      onUpdate(fresh);
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  const s = batch.summary;
   return (
     <div className="mb-4 rounded-md border border-border">
-      <div className="border-b border-border px-4 py-2 text-xs text-muted">
-        {s.done} done · {s.refused} refused · {s.failed} failed · {s.queued} queued · {s.running}{" "}
-        running — per document:
+      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2 text-xs text-muted">
+        <span>
+          {s.done} done · {s.refused} refused · {s.failed} failed · {s.queued} queued ·{" "}
+          {s.running} running — per document:
+        </span>
+        {pending && (
+          <button
+            onClick={cancel}
+            disabled={cancelling}
+            className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+          >
+            {cancelling ? "Cancelling…" : "Cancel remaining"}
+          </button>
+        )}
       </div>
       <ul className="divide-y divide-border">
-        {results.results.map((r) => (
-          <li key={r.job_id} className="flex items-center justify-between gap-3 px-4 py-2 text-sm">
-            <div className="min-w-0">
-              <p className="truncate font-medium">{r.document_name}</p>
-              {r.error && <p className="truncate text-xs text-muted">{r.error}</p>}
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <StatusBadge status={r.status} />
-              <Link
-                href={`/matters/job?matter=${matterId}&job=${r.job_id}`}
-                className="text-xs font-medium hover:underline"
-              >
-                Open
-              </Link>
-            </div>
-          </li>
-        ))}
+        {batch.results.map((r) => {
+          const cancelled = isCancelledResult(r);
+          return (
+            <li
+              key={r.job_id}
+              className="flex items-center justify-between gap-3 px-4 py-2 text-sm"
+            >
+              <div className="min-w-0">
+                <p className="truncate font-medium">{r.document_name}</p>
+                {r.error && !cancelled && (
+                  <p className="truncate text-xs text-muted">{r.error}</p>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {cancelled ? (
+                  <span className="rounded px-2 py-0.5 text-xs font-medium bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                    cancelled
+                  </span>
+                ) : (
+                  <StatusBadge status={r.status} />
+                )}
+                <Link
+                  href={`/matters/job?matter=${matterId}&job=${r.job_id}`}
+                  className="text-xs font-medium hover:underline"
+                >
+                  Open
+                </Link>
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -711,7 +775,20 @@ function MatterView({
   // documents of this matter, so a stale selection can't silently no-op.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkAction, setBulkAction] = useState<"inspect" | "sanitize" | null>(null);
-  const [bulkResults, setBulkResults] = useState<BulkJobsResponse | null>(null);
+  const [batch, setBatch] = useState<BatchResponse | null>(null);
+  // Reload the documents/jobs lists exactly once per batch, the moment it
+  // leaves queued/running -- keyed by batch id (a ref, not component
+  // lifetime) so it survives BulkResults unmounting/remounting and can't
+  // fire twice for the same batch or refire on every poll tick.
+  const reloadedForBatch = useRef<string | null>(null);
+  useEffect(() => {
+    if (!batch || batch.finished_utc === null) return;
+    if (reloadedForBatch.current === batch.id) return;
+    reloadedForBatch.current = batch.id;
+    jobsQ.reload();
+    docsQ.reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batch]);
   const bulkSafePolicies = (policiesQ.data?.policies ?? []).filter((p) => p.bulk_safe);
   const allLoadedSelected =
     docsQ.items.length > 0 && docsQ.items.every((d) => selected.has(d.id));
@@ -902,7 +979,7 @@ function MatterView({
                 </p>
               )}
 
-              {bulkResults && <BulkResults matterId={matterId} results={bulkResults} />}
+              {batch && <BulkResults matterId={matterId} batch={batch} onUpdate={setBatch} />}
 
               {bulkAction && (
                 <BulkRunPanel
@@ -911,9 +988,12 @@ function MatterView({
                   kind={bulkAction}
                   policies={policiesQ.data?.policies ?? []}
                   onClose={() => setBulkAction(null)}
-                  onDone={(res) => {
-                    setBulkResults(res);
+                  onDone={(newBatch) => {
+                    setBatch(newBatch);
                     setSelected(new Set());
+                    // The batch's children are now real queued Job rows --
+                    // reflect that immediately rather than waiting for the
+                    // batch to finish.
                     jobsQ.reload();
                     docsQ.reload();
                   }}
