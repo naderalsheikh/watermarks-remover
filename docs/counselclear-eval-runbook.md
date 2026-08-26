@@ -107,9 +107,12 @@ standing practice, not through a rendering test harness.
 
 ## 6. Known, documented limitations (not bugs)
 
-- `privacy_only` PDF sanitize jobs do not strip embedded-image metadata —
-  that policy's PDF path never calls the routine that does it. Flagged,
-  not fixed; see `docs/pdf-deep-image-metadata.md` ("Known gap").
+- `privacy_only` PDF sanitize jobs remove GPS/EXIF location from embedded
+  images (`exiftool -gps:all=`, byte-preserving) while leaving other
+  embedded metadata and any C2PA/JUMBF provenance untouched — both
+  outcomes are disclosed as explicit manifest actions. See
+  `docs/pdf-deep-image-metadata.md` ("`privacy_only` embedded-image
+  handling — resolved in two stages").
 - The indirect-`/Length` embedded-image "skip" case is real and unit
   tested, but unreachable through `external_sharing`/`production` sanitize
   jobs in a deployment with qpdf installed — qpdf's own structural rewrite
