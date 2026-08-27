@@ -123,6 +123,77 @@ def test_valid_packet_verifies_from_extracted_directory(tmp_path):
     assert report.valid, report.to_text()
 
 
+# --- derivative layout: nested / flat / ambiguous ------------------------------
+
+
+def test_valid_nested_derivative_passes(tmp_path):
+    """derivative/<name> -- the canonical layout every zip (and any
+    directory someone extracted a zip into with a tool that preserves
+    its structure) uses."""
+    files = _packet_files()  # _packet_files already keys the derivative as "derivative/<name>"
+    assert "derivative/out.docx" in files
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert report.valid, report.to_text()
+    deriv_check = next(fc for fc in report.file_checks if fc.name == "derivative")
+    assert deriv_check.status == "match"
+
+
+def test_valid_flat_derivative_passes(tmp_path):
+    """<name> at the top level -- the Airlock CLI's own deliberate
+    output convention (PR 34/37): easy to grab, not nested."""
+    files = _packet_files()
+    derivative_bytes = files.pop("derivative/out.docx")
+    files["out.docx"] = derivative_bytes
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert report.valid, report.to_text()
+    deriv_check = next(fc for fc in report.file_checks if fc.name == "derivative")
+    assert deriv_check.status == "match"
+
+
+def test_both_nested_and_flat_derivative_present_fails_as_ambiguous(tmp_path):
+    """Both layouts present at once must never be silently resolved by
+    preferring one -- even when the first candidate found happens to
+    match the declared hash, which is exactly the case that would let a
+    second, unexplained copy slip past a verifier that just took the
+    first match."""
+    files = _packet_files()
+    nested_bytes = files["derivative/out.docx"]
+    # The flat copy matches the declared hash too (identical bytes) --
+    # proving the failure is the ambiguity itself, not a hash mismatch
+    # that would fail for an unrelated reason anyway.
+    files["out.docx"] = nested_bytes
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid
+    deriv_check = next(fc for fc in report.file_checks if fc.name == "derivative")
+    assert deriv_check.status == "ambiguous"
+    assert "derivative/out.docx" in deriv_check.detail
+    assert "out.docx" in deriv_check.detail
+    assert "ambiguous" in deriv_check.detail.lower()
+
+
+def test_missing_derivative_still_fails(tmp_path):
+    files = _packet_files()
+    del files["derivative/out.docx"]
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid
+    deriv_check = next(fc for fc in report.file_checks if fc.name == "derivative")
+    assert deriv_check.status == "missing"
+
+
+def test_tampered_derivative_still_fails(tmp_path):
+    files = _packet_files()
+    files["derivative/out.docx"] = files["derivative/out.docx"] + b"tampered"
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid
+    deriv_check = next(fc for fc in report.file_checks if fc.name == "derivative")
+    assert deriv_check.status == "mismatch"
+
+
 # --- missing / modified file --------------------------------------------------
 
 

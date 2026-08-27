@@ -82,7 +82,7 @@ class PacketLoadError(Exception):
 @dataclass
 class FileCheck:
     name: str
-    status: str  # "match" | "mismatch" | "missing"
+    status: str  # "match" | "mismatch" | "missing" | "ambiguous"
     detail: str = ""
 
 
@@ -110,7 +110,9 @@ class VerificationReport:
         lines.append(f"  schema (required release_packet.json fields present): "
                       f"{'ok' if self.schema_ok else 'FAILED'}")
         for fc in self.file_checks:
-            marker = {"match": "ok", "mismatch": "MISMATCH", "missing": "MISSING"}[fc.status]
+            marker = {
+                "match": "ok", "mismatch": "MISMATCH", "missing": "MISSING", "ambiguous": "AMBIGUOUS",
+            }[fc.status]
             lines.append(f"  {fc.name}: {marker}" + (f" -- {fc.detail}" if fc.detail else ""))
         if self.cross_checks:
             lines.append("")
@@ -197,16 +199,37 @@ def verify_release_packet(path: Path) -> VerificationReport:
         extracted a packet into (e.g. the Airlock CLI's own output,
         which deliberately keeps the derivative at the top level for
         easy access, not nested) is still a legitimate release packet
-        layout, not a different one."""
+        layout, not a different one. Exactly one of the two layouts is
+        accepted -- if *both* candidates are present (e.g. a directory
+        with both derivative/<name> and a top-level <name>, planted
+        separately with different bytes), that is never silently
+        resolved by preferring one: it's reported as its own failure,
+        even if the first candidate found happens to match the declared
+        hash, because a verifier that silently ignores a second,
+        unexplained copy of the derivative is exactly the kind of gap
+        an adversarial packet would try to exploit."""
         if expected is None:
             file_checks.append(FileCheck(display_name, "missing", "no hash declared in release_packet.json"))
             return
-        arcname = next((n for n in arcnames if n in files), None)
-        if arcname is None:
+        present = [n for n in arcnames if n in files]
+        if len(present) > 1:
+            file_checks.append(
+                FileCheck(
+                    display_name,
+                    "ambiguous",
+                    "packet has ambiguous derivative layout: both "
+                    f"{present[0]!r} and {present[1]!r} are present. Exactly one "
+                    "of the nested (derivative/<name>) or flat (<name>) layout "
+                    "is expected, not both.",
+                )
+            )
+            return
+        if not present:
             file_checks.append(
                 FileCheck(display_name, "missing", f"none of {arcnames} present in packet")
             )
             return
+        arcname = present[0]
         actual = _sha256(files[arcname])
         if actual != expected:
             file_checks.append(
