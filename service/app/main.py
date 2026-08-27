@@ -1747,7 +1747,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         release_result = _build_release_result(
             s, matter=matter, release=release, job=finished, doc=doc, audit_refs=audit_refs
         )
-        return {"release": _release_dict(release), "job": _job_dict(finished), "release_result": release_result}
+        job_out = _job_dict(finished, release_id=release.id, profile_id=release.profile_id)
+        return {"release": _release_dict(release), "job": job_out, "release_result": release_result}
 
     @app.get("/v1/matters/{matter_id}/releases/{release_id}")
     def get_release(
@@ -1808,6 +1809,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             d.id: d.filename
             for d in s.query(Document).filter(Document.id.in_([j.document_id for j in jobs])).all()
         }
+        # release_id/profile_id (PR 40): nullable per result -- only jobs
+        # created through POST .../releases (not the raw /batches route)
+        # have a sibling Release. One batch-queried lookup, not N+1, same
+        # pattern doc_names above already uses.
+        releases_by_job = {
+            r.job_id: r
+            for r in s.query(Release).filter(Release.job_id.in_([j.id for j in jobs])).all()
+        }
         results = [
             {
                 "document_id": j.document_id,
@@ -1817,6 +1826,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "policy_id": j.policy_id,
                 "status": j.status,
                 "error": j.error,
+                "release_id": releases_by_job[j.id].id if j.id in releases_by_job else None,
+                "profile_id": releases_by_job[j.id].profile_id if j.id in releases_by_job else None,
             }
             for j in jobs
         ]
@@ -2094,10 +2105,25 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             q = q.filter_by(document_id=document_id)
         total = q.count()
         jobs = q.order_by(Job.created_utc.desc()).offset(offset).limit(limit).all()
+        # release_id/profile_id (PR 40): one batched lookup across this
+        # page's jobs, not N+1 -- an unknown mix of inspect/legacy-
+        # sanitize/release-wrapped jobs, unlike the single-job routes.
+        releases_by_job = {
+            r.job_id: r
+            for r in s.query(Release).filter(Release.job_id.in_([j.id for j in jobs])).all()
+        }
         # List view omits the full result payload (it can be large for
         # inspect jobs); the detail route carries it.
         return {
-            "jobs": [_job_dict(j, include_result=False) for j in jobs],
+            "jobs": [
+                _job_dict(
+                    j,
+                    include_result=False,
+                    release_id=releases_by_job[j.id].id if j.id in releases_by_job else None,
+                    profile_id=releases_by_job[j.id].profile_id if j.id in releases_by_job else None,
+                )
+                for j in jobs
+            ],
             "total": total,
             "offset": offset,
             "limit": limit,
@@ -2161,7 +2187,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s: Session = Depends(db_session),
     ):
         _require(matter_id, "read", s, user)
-        return _job_dict(_job(matter_id, job_id, s))
+        job = _job(matter_id, job_id, s)
+        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
+        return _job_dict(job, release_id=release.id if release else None, profile_id=release.profile_id if release else None)
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}/manifest")
     def job_manifest(
@@ -3021,7 +3049,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "created_utc": d.created_utc,
         }
 
-    def _job_dict(j: Job, *, include_result: bool = True) -> dict:
+    def _job_dict(
+        j: Job, *, include_result: bool = True, release_id: str | None = None, profile_id: str | None = None
+    ) -> dict:
+        """release_id/profile_id (PR 40): nullable, non-derived from a
+        query inside this function on purpose -- an inspect job or a job
+        from the legacy /sanitize-jobs route never has a Release wrapper
+        at all (both None is correct there, no lookup needed), and a
+        caller that just created or already loaded the Release already
+        has it in hand. Only list_matter_jobs (many jobs, unknown mix)
+        needs an actual batched lookup -- see its own call site."""
         out = {
             "id": j.id,
             "matter_id": j.matter_id,
@@ -3035,6 +3072,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "worker_image": j.worker_image,
             "created_utc": j.created_utc,
             "finished_utc": j.finished_utc,
+            "release_id": release_id,
+            "profile_id": profile_id,
         }
         if include_result and j.result_json:
             out["result"] = j.result_json

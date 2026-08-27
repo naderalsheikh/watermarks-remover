@@ -54,6 +54,25 @@ has no interactive way to supply. production is refused at the
 argument-parser level, not silently degraded, so a caller finds out
 immediately rather than after a job (or a whole batch) that would have
 needed decisions this CLI can't provide.
+
+TODO (PR 40 design note, not yet implemented): this CLI still calls
+POST .../sanitize-jobs directly (Client.sanitize()) rather than the
+Release-aware POST .../releases route the web UI now uses (PR 40's
+matter-view "Prepare Release Packet" / "Bulk release" actions). Airlock
+is arguably the MORE important adoption surface than the dashboard --
+it's the one place "every outbound document gets a release packet" can
+actually become a habit, unattended by a human clicking through a
+browser each time -- so this migration should not be deferred
+indefinitely. When it happens: Client.release() replacing
+Client.sanitize(), a --profile flag (RELEASE_PROFILES ids) replacing
+--policy, SUPPORTED_POLICIES becoming a SUPPORTED_PROFILES equivalent,
+and AIRLOCK_RESULT.json/BATCH_RESULT.json gaining release_id/
+recipient_type/purpose. Deliberately not done in the same pass as the
+web UI migration: the web UI exercises more of the single-document
+Release route's surface (layer_b, finding_decisions) in real usage,
+so it went first to surface any rough edges against a smaller,
+easier-to-fix CLI change still pending. Own scoped proposal when it's
+this CLI's turn -- see docs/COUNSELCLEAR_DESIGN.md's PR 40 entry.
 """
 
 from __future__ import annotations

@@ -99,6 +99,13 @@ export type Job = {
   created_utc: string;
   finished_utc: string | null;
   result?: JobResult;
+  // PR 40: null for an inspect job or one created via the legacy
+  // /sanitize-jobs route -- neither ever gets a Release wrapper. Present
+  // only for a job created through POST .../releases. This is the ONLY
+  // way the UI discovers a Job's Release: there's no separate "list
+  // releases" fetch or Release detail page in this pass.
+  release_id: string | null;
+  profile_id: string | null;
 };
 
 // GET /v1/matters/{id}/audit — the tamper-evident per-matter log
@@ -187,6 +194,10 @@ export type BulkJobResult = {
   policy_id: string;
   status: JobStatus;
   error: string;
+  // PR 40: same meaning as Job.release_id/profile_id above -- null unless
+  // this batch was created through POST .../releases.
+  release_id: string | null;
+  profile_id: string | null;
 };
 
 // finished_utc is null while any child is queued or running, and gets
@@ -209,6 +220,90 @@ export type BatchResponse = {
     queued: number;
     running: number;
   };
+};
+
+// GET /v1/release-profiles (service/app/main.py RELEASE_PROFILES) — the
+// user-facing destination/use-case a release action picks from. Each
+// resolves to exactly one policy_id server-side; policy_id itself stays
+// the internal identifier, shown only in a "technical details"
+// disclosure, never as the primary choice (PR 40).
+export type ReleaseProfile = {
+  id: string;
+  label: string;
+  policy_id: string;
+  description: string;
+};
+
+export type ReleaseProfilesResponse = {
+  release_profiles: ReleaseProfile[];
+  recipient_types: string[];
+};
+
+// The Release row itself (service/app/models.py Release / _release_dict).
+// status mirrors Job.status's own vocabulary exactly — synced 1:1, never
+// a separate mapping.
+export type Release = {
+  id: string;
+  matter_id: string;
+  document_id: string;
+  batch_id: string | null;
+  job_id: string;
+  policy_id: string;
+  profile_id: string;
+  recipient_type: string;
+  recipient_name: string;
+  purpose: string;
+  intended_external: boolean;
+  requested_by: string;
+  status: JobStatus;
+  created_utc: string;
+  finished_utc: string | null;
+};
+
+// GET /v1/matters/{id}/releases/{id}/result — release_result.json's own
+// shape (service/app/main.py _build_release_result). Produced for EVERY
+// terminal release, done included: for a refused/failed one this is the
+// only structured artifact (no derivative, no zip).
+export type ReleaseResult = {
+  spec_version: string;
+  release_id: string;
+  job_id: string;
+  document_id: string;
+  matter_id: string;
+  status: JobStatus;
+  policy_id: string;
+  profile_id: string;
+  recipient_type: string;
+  recipient_name: string;
+  purpose: string;
+  intended_external: boolean;
+  reason: string;
+  original_sha256: string;
+  created_at: string;
+  finished_at: string | null;
+  audit_refs: { release_created_seq: number | null; release_terminal_seq: number | null };
+  limitations: string[];
+  certificate_html_sha256: string;
+  generated_at: string;
+  anchor: { type: string; digest: string | null; reference: string | null };
+};
+
+// POST /v1/matters/{id}/documents/{doc_id}/releases — the single-document
+// release response: everything the UI needs in one round trip (no
+// separate Release detail page in this pass).
+export type ReleaseCreateResponse = {
+  release: Release;
+  job: Job;
+  release_result: ReleaseResult;
+};
+
+// POST /v1/matters/{id}/releases — batch release: reuses BatchResponse's
+// own shape underneath (its `results` entries already carry
+// release_id/profile_id), plus the per-document Release rows created
+// alongside it.
+export type BatchReleaseResponse = {
+  batch: BatchResponse;
+  releases: Release[];
 };
 
 export const KNOWN_PERMS = [

@@ -305,6 +305,94 @@ def test_release_events_live_in_the_same_matter_audit_chain(env):
         assert release_created.payload["release_id"] == release_id
 
 
+# --- job/batch payloads discover their Release (PR 40) ---------------------------
+
+
+def test_job_payload_carries_release_id_when_wrapped(env):
+    """PR 40: the UI's only way to find the Release for a Job -- both the
+    single-job detail route and the matter's job list route (which is
+    what the matter page actually fetches) must carry it, not just the
+    create_release response itself."""
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    body = _create_release(c, mid, doc_id).json()
+    release, job = body["release"], body["job"]
+    assert job["release_id"] == release["id"]
+    assert job["profile_id"] == release["profile_id"]
+
+    detail = c.get(f"/v1/matters/{mid}/jobs/{job['id']}").json()
+    assert detail["release_id"] == release["id"]
+    assert detail["profile_id"] == release["profile_id"]
+
+    listing = c.get(f"/v1/matters/{mid}/jobs").json()
+    listed = next(j for j in listing["jobs"] if j["id"] == job["id"])
+    assert listed["release_id"] == release["id"]
+    assert listed["profile_id"] == release["profile_id"]
+
+
+def test_job_payload_release_id_is_null_for_legacy_and_inspect_jobs(env):
+    """A job from the raw /sanitize-jobs route, or any inspect job, never
+    has a Release wrapper -- both fields must be null, not omitted or
+    defaulted to something that looks like a real id."""
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+
+    r = c.post(f"/v1/matters/{mid}/documents/{doc_id}/sanitize-jobs", json={"policy_id": "external_sharing"})
+    legacy_job = r.json()
+    assert legacy_job["release_id"] is None
+    assert legacy_job["profile_id"] is None
+
+    r = c.post(f"/v1/matters/{mid}/documents/{doc_id}/inspect-jobs")
+    inspect_job = r.json()
+    assert inspect_job["release_id"] is None
+    assert inspect_job["profile_id"] is None
+
+    listing = c.get(f"/v1/matters/{mid}/jobs").json()
+    for j in listing["jobs"]:
+        if j["id"] in (legacy_job["id"], inspect_job["id"]):
+            assert j["release_id"] is None
+            assert j["profile_id"] is None
+
+
+def test_batch_detail_results_carry_release_id_per_document(env):
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    good_id = _upload(c, mid, "spa.docx")
+    bad_id = _upload(c, mid, "macro.docm")
+    r = c.post(
+        f"/v1/matters/{mid}/releases",
+        json={"document_ids": [good_id, bad_id], "profile_id": "counterparty_deal_room", "recipient_type": "client"},
+    )
+    batch_id = r.json()["batch"]["id"]
+    _wait_batch_done(c, mid, batch_id)
+
+    detail = c.get(f"/v1/matters/{mid}/batches/{batch_id}").json()
+    by_doc = {row["document_id"]: row for row in detail["results"]}
+    assert by_doc[good_id]["release_id"] is not None
+    assert by_doc[good_id]["profile_id"] == "counterparty_deal_room"
+    assert by_doc[bad_id]["release_id"] is not None
+    assert by_doc[bad_id]["profile_id"] == "counterparty_deal_room"
+
+
+def test_batch_detail_results_release_id_null_for_raw_batch(env):
+    """A batch created through the raw /batches route (not /releases)
+    never gets Release rows -- every result's release_id must be null."""
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    r = c.post(
+        f"/v1/matters/{mid}/batches",
+        json={"document_ids": [doc_id], "kind": "sanitize", "policy_id": "external_sharing"},
+    )
+    batch_id = r.json()["id"]
+    _wait_batch_done(c, mid, batch_id)
+    detail = c.get(f"/v1/matters/{mid}/batches/{batch_id}").json()
+    assert detail["results"][0]["release_id"] is None
+    assert detail["results"][0]["profile_id"] is None
+
+
 def test_batch_release_created_events_fire_per_release_not_once_per_batch(env):
     """Constraint: Batch is only the grouping/execution envelope; each
     Release gets its own release.created, distinct from the one shared

@@ -479,6 +479,29 @@ function JobView({
                 {formatTimestamp(job.created_utc)}
                 {job.finished_utc && ` · finished ${formatTimestamp(job.finished_utc)}`}
               </p>
+              {/* PR 40: the ONLY way this page finds the Release that
+                  wraps this job -- release_id travels on the job payload
+                  itself, no separate Release detail page or lookup route
+                  in this pass. release_result.json is produced for every
+                  terminal release regardless of outcome, so this link
+                  doesn't need to be gated on status the way the full
+                  release packet section below is (that one only exists
+                  for a done sanitize). Absent entirely for a job with no
+                  release_id -- an inspect job, or one created through the
+                  still-untouched legacy /sanitize-jobs route. */}
+              {job.release_id && (
+                <p className="mt-1 text-xs text-muted">
+                  Part of a release ·{" "}
+                  <a
+                    href={`/v1/matters/${matterId}/releases/${job.release_id}/result`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium text-accent hover:underline"
+                  >
+                    Download release result (JSON)
+                  </a>
+                </p>
+              )}
               {job.status === "failed" && job.error && (
                 <div className="mt-3 rounded-md border border-red-600/30 bg-red-600/5 px-4 py-3 text-sm text-red-700 dark:text-red-400">
                   {job.error}

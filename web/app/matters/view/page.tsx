@@ -11,7 +11,17 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { hasMatterPerm, permissionGate } from "@/lib/matterPermissions";
 import { BULK_MAX_DOCUMENTS, bulkCapOverflow, isOverBulkCap } from "@/lib/bulkCap";
 import { isCancelledResult } from "@/lib/batchCancel";
-import type { BatchResponse, Document, Job, Matter, Policy } from "@/lib/types";
+import type {
+  BatchReleaseResponse,
+  BatchResponse,
+  Document,
+  Job,
+  Matter,
+  Policy,
+  ReleaseCreateResponse,
+  ReleaseProfile,
+  ReleaseProfilesResponse,
+} from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
 
@@ -31,31 +41,60 @@ function subtypeLabel(subtype: string): string {
   return subtype.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-function SanitizePanel({
+// GET /v1/release-profiles' recipient_types are raw slugs (controlled
+// vocabulary the backend can safely aggregate on, PR 39/40) — this is the
+// one place they get a human-readable label. A slug missing from this map
+// (a profile added server-side without a frontend update yet) still
+// renders, just as its own raw slug, rather than disappearing.
+const RECIPIENT_TYPE_LABEL: Record<string, string> = {
+  opposing_counsel: "Opposing counsel",
+  court: "Court / tribunal",
+  client: "Client",
+  regulator: "Regulator",
+  internal_reviewer: "Internal reviewer",
+  other: "Other",
+};
+
+function recipientTypeLabel(recipientType: string): string {
+  return RECIPIENT_TYPE_LABEL[recipientType] ?? recipientType;
+}
+
+// The single-document release action (PR 40): what used to be
+// "Sanitize" is now "Prepare Release Packet" -- the user picks a release
+// profile (a destination/use-case, RELEASE_PROFILES in main.py), not a
+// raw policy_id. The resolved policy_id still drives the same
+// per-finding production-review logic below (bulk_safe/production
+// behavior didn't change, only how it's selected); it's shown only in
+// the "Technical details" disclosure, never as the primary choice.
+function ReleasePanel({
   matterId,
   docId,
   docJobs,
-  policies,
+  releaseProfiles,
+  recipientTypes,
   onClose,
   onDone,
 }: {
   matterId: string;
   docId: string;
   docJobs: Job[];
-  policies: Policy[];
+  releaseProfiles: ReleaseProfile[];
+  recipientTypes: string[];
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [policyId, setPolicyId] = useState(policies[0]?.id ?? "external_sharing");
-  const [reason, setReason] = useState("");
+  const [profileId, setProfileId] = useState(releaseProfiles[0]?.id ?? "");
+  const [recipientType, setRecipientType] = useState(recipientTypes[0] ?? "other");
+  const [recipientName, setRecipientName] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const [intendedExternal, setIntendedExternal] = useState(true);
   const [attest, setAttest] = useState(false);
   const [noDecisionAck, setNoDecisionAck] = useState(false);
   const [decisions, setDecisions] = useState<Record<string, "approve" | "keep">>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const selected = policies.find((p) => p.id === policyId);
-  const isProduction = policyId === "production";
-  const isEvidenceOnly = policyId === "evidence_preservation";
+  const selectedProfile = releaseProfiles.find((p) => p.id === profileId);
+  const isProduction = selectedProfile?.policy_id === "production";
 
   // production is the only policy with approve-default subtypes today. A
   // present approve-default finding is kept, not reviewed, unless it gets
@@ -85,16 +124,25 @@ function SanitizePanel({
         hasPerFindingReview && approveSubtypes.length > 0
           ? Object.fromEntries(approveSubtypes.map((st) => [st, decisions[st] ?? "keep"]))
           : undefined;
-      await api.post(`/v1/matters/${matterId}/documents/${docId}/sanitize-jobs`, {
-        policy_id: policyId,
-        reason,
+      await api.post<ReleaseCreateResponse>(`/v1/matters/${matterId}/documents/${docId}/releases`, {
+        profile_id: profileId,
+        recipient_type: recipientType,
+        recipient_name: recipientName,
+        // Deliberately one shared field in this UI for two backend
+        // fields (Job.reason, an existing audit-trail field, and
+        // Release.purpose, new in PR 39) -- keeping them as separate
+        // inputs here would be two near-duplicate text boxes for
+        // something the operator experiences as one question ("why").
+        reason: purpose,
+        purpose,
+        intended_external: intendedExternal,
         signature_break_attestation: attest,
         ...(finding_decisions ? { finding_decisions } : {}),
       });
       onDone();
       onClose();
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Sanitize failed to start");
+      setSubmitError(err instanceof Error ? err.message : "Release failed to start");
     } finally {
       setSubmitting(false);
     }
@@ -103,19 +151,44 @@ function SanitizePanel({
   return (
     <div className="mt-2 space-y-3 rounded-md border border-border bg-black/[0.02] p-3 dark:bg-white/[0.02]">
       <div>
-        <label className="mb-1 block text-xs font-medium">Policy</label>
+        <label className="mb-1 block text-xs font-medium">Release profile</label>
         <select
-          value={policyId}
-          onChange={(e) => setPolicyId(e.target.value)}
+          value={profileId}
+          onChange={(e) => setProfileId(e.target.value)}
           className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
         >
-          {policies.map((p) => (
+          {releaseProfiles.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label}
             </option>
           ))}
         </select>
-        {selected && <p className="mt-1 text-xs text-muted">{selected.description}</p>}
+        {selectedProfile && <p className="mt-1 text-xs text-muted">{selectedProfile.description}</p>}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="mb-1 block text-xs font-medium">Recipient</label>
+          <select
+            value={recipientType}
+            onChange={(e) => setRecipientType(e.target.value)}
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+          >
+            {recipientTypes.map((rt) => (
+              <option key={rt} value={rt}>
+                {recipientTypeLabel(rt)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium">Recipient name (optional)</label>
+          <input
+            value={recipientName}
+            onChange={(e) => setRecipientName(e.target.value)}
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+          />
+        </div>
       </div>
 
       {needsFallbackGate && (
@@ -189,33 +262,44 @@ function SanitizePanel({
           No approve-default findings present in the latest inspection — nothing to decide.
         </p>
       )}
-      {isEvidenceOnly && (
-        <div className="rounded-md border border-border bg-black/[0.02] px-3 py-2 text-xs text-muted dark:bg-white/[0.02]">
-          Evidence preservation only inspects and records — it never produces a sanitized
-          derivative.
-        </div>
-      )}
-
       <div>
-        <label className="mb-1 block text-xs font-medium">Reason (optional)</label>
+        <label className="mb-1 block text-xs font-medium">Purpose / reason (optional)</label>
         <input
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
+          value={purpose}
+          onChange={(e) => setPurpose(e.target.value)}
           className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
         />
       </div>
       <label className="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={intendedExternal}
+          onChange={(e) => setIntendedExternal(e.target.checked)}
+        />
+        This release is intended to leave the organization
+      </label>
+      <label className="flex items-center gap-2 text-xs">
         <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />
         I attest to breaking a digital signature if this job requires it
       </label>
+      {selectedProfile && (
+        <details className="text-xs text-muted">
+          <summary className="cursor-pointer select-none">Technical details</summary>
+          <p className="mt-1">
+            Resolves to policy <code className="font-mono">{selectedProfile.policy_id}</code>. This
+            release is not externally anchored — see the release packet or release result for what
+            that means.
+          </p>
+        </details>
+      )}
       {submitError && <p className="text-xs text-red-600">{submitError}</p>}
       <div className="flex gap-2">
         <button
           onClick={submit}
-          disabled={submitting || (needsFallbackGate && !noDecisionAck)}
+          disabled={submitting || !profileId || (needsFallbackGate && !noDecisionAck)}
           className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
-          {submitting ? "Starting…" : isEvidenceOnly ? "Run inspection" : "Run sanitize"}
+          {submitting ? "Starting…" : "Prepare release packet"}
         </button>
         <button onClick={onClose} className="px-3 py-1.5 text-xs text-muted hover:text-foreground">
           Cancel
@@ -245,21 +329,56 @@ const STATUS_TONE_LABEL: Record<StatusTone, string> = {
 
 // The single "where are we, what's next" line for a document — the point
 // isn't just showing the latest job's raw status (already visible in the
-// job list below), it's translating that into what a reviewer should
-// actually do next. "Sanitized with <policy>" is deliberately the
-// strongest claim made here: never "clean" or "safe", since a sanitize
-// job can still have kept findings without review (see NoDecisionWarning
-// on the job page) — this line just points at the job, it doesn't
-// re-assert an outcome the job page itself has to qualify.
-function documentNextStep(docJobs: Job[]): { tone: StatusTone; label: string; detail: string } {
+// job history disclosure below), it's translating that into what a
+// reviewer should actually do next.
+//
+// Two paths, deliberately kept separate (PR 40): a job carrying
+// release_id (created through POST .../releases) gets Release-aware
+// wording; a job with no release_id -- either created before this pass
+// shipped, or through the still-untouched legacy /sanitize-jobs route --
+// keeps the exact original wording below, unchanged. This is a real data
+// boundary, not a copy preference: a matter with pre-existing history has
+// no Release rows to describe, and pretending otherwise would render as
+// broken or misleading rather than just older.
+function documentNextStep(
+  docJobs: Job[],
+  releaseProfiles: ReleaseProfile[],
+): { tone: StatusTone; label: string; detail: string } {
   if (docJobs.length === 0) {
     return {
       tone: "muted",
       label: "Not yet reviewed",
-      detail: "Inspect to see what's inside, or sanitize directly.",
+      detail: "Inspect to see what's inside, or prepare a release directly.",
     };
   }
   const latest = docJobs[0];
+
+  if (latest.release_id) {
+    if (latest.status === "queued" || latest.status === "running") {
+      return { tone: "amber", label: "Release in progress", detail: "Checking again automatically." };
+    }
+    if (latest.status === "failed") {
+      return { tone: "red", label: "Release failed", detail: "See release result below." };
+    }
+    if (latest.status === "refused") {
+      return {
+        tone: "orange",
+        label: "Release refused",
+        detail: "No derivative was produced — see release result below.",
+      };
+    }
+    const profile = releaseProfiles.find((p) => p.id === latest.profile_id);
+    return {
+      tone: "emerald",
+      label: `Released under ${profile?.label ?? latest.profile_id ?? "unknown profile"}`,
+      // Deliberately the same restraint the pre-Release wording already
+      // had: never "clean" or "safe" -- a release can still have kept
+      // findings without review (see NoDecisionWarning on the job page).
+      detail: "Open the release for the packet, findings, and custody.",
+    };
+  }
+
+  // --- legacy path: exact original wording, unchanged ---------------------
   if (latest.status === "queued" || latest.status === "running") {
     return {
       tone: "amber",
@@ -284,8 +403,22 @@ function documentNextStep(docJobs: Job[]): { tone: StatusTone; label: string; de
       detail: "Open the job for findings, custody, and what was kept.",
     };
   }
-  const hasDoneSanitize = docJobs.some((j) => j.kind === "sanitize" && j.status === "done");
-  return hasDoneSanitize
+  // The badge above only looked at the single MOST RECENT job -- if that
+  // happens to be a later inspect run, a still-real completed Release
+  // earlier in the history must not silently read as legacy "sanitize"
+  // wording just because it's no longer the latest job. Release-aware
+  // only when that earlier done sanitize actually has one; otherwise
+  // exactly the original legacy wording, unchanged.
+  const lastDoneSanitize = docJobs.find((j) => j.kind === "sanitize" && j.status === "done");
+  if (lastDoneSanitize?.release_id) {
+    const profile = releaseProfiles.find((p) => p.id === lastDoneSanitize.profile_id);
+    return {
+      tone: "amber",
+      label: "Inspected again since last release",
+      detail: `The earlier release (${profile?.label ?? lastDoneSanitize.profile_id}) predates this inspection — review before relying on it.`,
+    };
+  }
+  return lastDoneSanitize
     ? {
         tone: "amber",
         label: "Inspected again since last sanitize",
@@ -302,7 +435,8 @@ function DocumentRow({
   matterId,
   doc,
   jobs,
-  policies,
+  releaseProfiles,
+  recipientTypes,
   onJobStarted,
   highlighted,
   selected,
@@ -312,23 +446,25 @@ function DocumentRow({
   matterId: string;
   doc: Document;
   jobs: Job[];
-  policies: Policy[];
+  releaseProfiles: ReleaseProfile[];
+  recipientTypes: string[];
   onJobStarted: () => void;
   highlighted: boolean;
   selected: boolean;
   onToggleSelected: (id: string, checked: boolean) => void;
   perms: string[] | undefined;
 }) {
-  const [sanitizing, setSanitizing] = useState(false);
+  const [releasing, setReleasing] = useState(false);
   const [inspecting, setInspecting] = useState(false);
   const [inspectError, setInspectError] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
   const rowRef = useRef<HTMLLIElement>(null);
   const inspectGate = permissionGate(perms, "inspect");
   const sanitizeGate = permissionGate(perms, "sanitize");
   const docJobs = jobs
     .filter((j) => j.document_id === doc.id)
     .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
-  const nextStep = documentNextStep(docJobs);
+  const nextStep = documentNextStep(docJobs, releaseProfiles);
 
   useEffect(() => {
     if (highlighted) rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -382,12 +518,12 @@ function DocumentRow({
                 {inspecting ? "Inspecting…" : "Inspect"}
               </button>
               <button
-                onClick={() => setSanitizing((v) => !v)}
+                onClick={() => setReleasing((v) => !v)}
                 disabled={!sanitizeGate.allowed}
                 title={sanitizeGate.title}
                 className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
               >
-                Sanitize
+                Prepare Release Packet
               </button>
             </div>
           </div>
@@ -396,32 +532,42 @@ function DocumentRow({
 
       {inspectError && <p className="mt-2 text-xs text-red-600">{inspectError}</p>}
 
-      {sanitizing && (
-        <SanitizePanel
+      {releasing && (
+        <ReleasePanel
           matterId={matterId}
           docId={doc.id}
           docJobs={docJobs}
-          policies={policies}
-          onClose={() => setSanitizing(false)}
+          releaseProfiles={releaseProfiles}
+          recipientTypes={recipientTypes}
+          onClose={() => setReleasing(false)}
           onDone={onJobStarted}
         />
       )}
 
+      {/* Job history is execution detail, not the primary signal -- the
+          release-aware badge above already says what matters. Collapsed
+          by default (PR 40); still findable by anyone who wants the raw
+          job-by-job record. */}
       {docJobs.length > 0 && (
-        <ul className="mt-2 space-y-1.5">
-          {docJobs.map((j) => (
-            <li key={j.id} className="flex items-center gap-2 text-xs">
-              <Link
-                href={`/matters/job?matter=${matterId}&job=${j.id}`}
-                className="font-medium capitalize hover:underline"
-              >
-                {j.kind}
-              </Link>
-              <StatusBadge status={j.status} />
-              {j.kind === "sanitize" && <span className="text-muted">{j.policy_id}</span>}
-            </li>
-          ))}
-        </ul>
+        <details className="mt-2" open={showHistory} onToggle={(e) => setShowHistory(e.currentTarget.open)}>
+          <summary className="cursor-pointer select-none text-xs text-muted hover:text-foreground">
+            {showHistory ? "Hide" : "Show"} job history ({docJobs.length})
+          </summary>
+          <ul className="mt-1.5 space-y-1.5">
+            {docJobs.map((j) => (
+              <li key={j.id} className="flex items-center gap-2 text-xs">
+                <Link
+                  href={`/matters/job?matter=${matterId}&job=${j.id}`}
+                  className="font-medium capitalize hover:underline"
+                >
+                  {j.kind}
+                </Link>
+                <StatusBadge status={j.status} />
+                {j.kind === "sanitize" && <span className="text-muted">{j.policy_id}</span>}
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </li>
   );
@@ -431,39 +577,53 @@ function BulkRunPanel({
   matterId,
   docIds,
   kind,
-  policies,
+  releaseProfiles,
+  recipientTypes,
   onClose,
   onDone,
 }: {
   matterId: string;
   docIds: string[];
   kind: "inspect" | "sanitize";
-  policies: Policy[];
+  releaseProfiles: ReleaseProfile[];
+  recipientTypes: string[];
   onClose: () => void;
   onDone: (batch: BatchResponse) => void;
 }) {
-  // Only policies the backend marks bulk-safe are offered: no approve-
-  // default subtype cells, so no per-finding decisions are required. The
-  // same filter the server enforces — the UI can't even offer production.
-  const bulkSafe = policies.filter((p) => p.bulk_safe);
-  const [policyId, setPolicyId] = useState(bulkSafe[0]?.id ?? "");
-  const [reason, setReason] = useState("");
+  // Only profiles whose resolved policy the backend marks bulk-safe are
+  // offered here -- the caller (the matter page) already filtered this
+  // list the same way create_batch_release enforces server-side, so the
+  // UI can't even offer ediscovery_production (-> production) in bulk.
+  const [profileId, setProfileId] = useState(releaseProfiles[0]?.id ?? "");
+  const [recipientType, setRecipientType] = useState(recipientTypes[0] ?? "other");
+  const [purpose, setPurpose] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const selectedPolicy = bulkSafe.find((p) => p.id === policyId);
+  const selectedProfile = releaseProfiles.find((p) => p.id === profileId);
 
   async function submit() {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const body =
+      // Async either way: both routes return as soon as the batch and
+      // its queued child jobs are recorded, not once every job has
+      // finished -- BulkResults below polls the returned batch to
+      // completion regardless of which route produced it.
+      const batch =
         kind === "sanitize"
-          ? { document_ids: docIds, kind, policy_id: policyId, reason }
-          : { document_ids: docIds, kind };
-      // Async: this returns as soon as the batch and its queued child jobs
-      // are recorded, not once every job has finished — BulkResults below
-      // takes the response and polls it to completion.
-      const batch = await api.post<BatchResponse>(`/v1/matters/${matterId}/batches`, body);
+          ? (
+              await api.post<BatchReleaseResponse>(`/v1/matters/${matterId}/releases`, {
+                document_ids: docIds,
+                profile_id: profileId,
+                recipient_type: recipientType,
+                purpose,
+                reason: purpose,
+              })
+            ).batch
+          : await api.post<BatchResponse>(`/v1/matters/${matterId}/batches`, {
+              document_ids: docIds,
+              kind,
+            });
       onDone(batch);
       onClose();
     } catch (err) {
@@ -478,7 +638,7 @@ function BulkRunPanel({
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-sm font-medium">
-            {kind === "sanitize" ? "Bulk sanitize" : "Bulk inspect"} — {docIds.length} document
+            {kind === "sanitize" ? "Bulk release" : "Bulk inspect"} — {docIds.length} document
             {docIds.length === 1 ? "" : "s"} selected
           </p>
           {kind === "inspect" ? (
@@ -488,7 +648,8 @@ function BulkRunPanel({
             </p>
           ) : (
             <p className="mt-1 text-xs text-muted">
-              Sanitization runs per document; every outcome is reported individually below.
+              Each document is released independently; every outcome — packet or refusal — is
+              reported individually below.
             </p>
           )}
         </div>
@@ -512,21 +673,35 @@ function BulkRunPanel({
       {kind === "sanitize" && (
         <>
           <div>
-            <label className="mb-1 block text-xs font-medium">Policy</label>
+            <label className="mb-1 block text-xs font-medium">Release profile</label>
             <select
-              value={policyId}
-              onChange={(e) => setPolicyId(e.target.value)}
+              value={profileId}
+              onChange={(e) => setProfileId(e.target.value)}
               className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
             >
-              {bulkSafe.map((p) => (
+              {releaseProfiles.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.label}
                 </option>
               ))}
             </select>
-            {selectedPolicy && (
-              <p className="mt-1 text-xs text-muted">{selectedPolicy.description}</p>
+            {selectedProfile && (
+              <p className="mt-1 text-xs text-muted">{selectedProfile.description}</p>
             )}
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium">Recipient</label>
+            <select
+              value={recipientType}
+              onChange={(e) => setRecipientType(e.target.value)}
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            >
+              {recipientTypes.map((rt) => (
+                <option key={rt} value={rt}>
+                  {recipientTypeLabel(rt)}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="rounded-md border border-amber-600/40 bg-amber-600/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
             <p className="font-medium">Known refusal classes</p>
@@ -539,11 +714,11 @@ function BulkRunPanel({
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium">
-              Reason (optional, shared across all selected documents)
+              Purpose / reason (optional, shared across all selected documents)
             </label>
             <input
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
+              value={purpose}
+              onChange={(e) => setPurpose(e.target.value)}
               className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
             />
           </div>
@@ -555,14 +730,14 @@ function BulkRunPanel({
         <button
           onClick={submit}
           disabled={
-            submitting || (kind === "sanitize" && !policyId) || isOverBulkCap(docIds.length)
+            submitting || (kind === "sanitize" && !profileId) || isOverBulkCap(docIds.length)
           }
           className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
           {submitting
             ? "Running…"
             : kind === "sanitize"
-              ? "Run bulk sanitize"
+              ? "Release selected documents"
               : "Run bulk inspect"}
         </button>
       </div>
@@ -821,6 +996,15 @@ function MatterView({
     `jobs:${matterId}`,
   );
   const policiesQ = useApiData(() => api.get<{ policies: Policy[] }>("/v1/policies"), "policies");
+  // Release profiles (PR 40): the user-facing destination/use-case list
+  // for both the single-document and bulk release actions. policyId
+  // stays internal (see ReleasePanel's "Technical details" disclosure) --
+  // this fetch is what replaces raw policy selection everywhere it was
+  // ever offered as a primary choice.
+  const releaseProfilesQ = useApiData(
+    () => api.get<ReleaseProfilesResponse>("/v1/release-profiles"),
+    "release-profiles",
+  );
   const fileInput = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -845,6 +1029,13 @@ function MatterView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batch]);
   const bulkSafePolicies = (policiesQ.data?.policies ?? []).filter((p) => p.bulk_safe);
+  // Derived from the same two already-fetched lists, not hardcoded --
+  // whichever release profiles resolve to a bulk-safe policy (matches
+  // create_batch_release's own server-side check exactly, service/app/main.py).
+  const bulkSafePolicyIds = new Set(bulkSafePolicies.map((p) => p.id));
+  const bulkSafeReleaseProfiles = (releaseProfilesQ.data?.release_profiles ?? []).filter((p) =>
+    bulkSafePolicyIds.has(p.policy_id),
+  );
   const allLoadedSelected =
     docsQ.items.length > 0 && docsQ.items.every((d) => selected.has(d.id));
 
@@ -878,7 +1069,7 @@ function MatterView({
       const docJobs = jobsQ.items
         .filter((j) => j.document_id === doc.id)
         .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
-      if (documentNextStep(docJobs).tone !== statusFilter) return false;
+      if (documentNextStep(docJobs, releaseProfilesQ.data?.release_profiles ?? []).tone !== statusFilter) return false;
     }
     return true;
   });
@@ -1018,7 +1209,8 @@ function MatterView({
                   matterId={matterId}
                   docIds={[...selected]}
                   kind={bulkAction}
-                  policies={policiesQ.data?.policies ?? []}
+                  releaseProfiles={bulkSafeReleaseProfiles}
+                  recipientTypes={releaseProfilesQ.data?.recipient_types ?? []}
                   onClose={() => setBulkAction(null)}
                   onDone={(newBatch) => {
                     setBatch(newBatch);
@@ -1054,13 +1246,13 @@ function MatterView({
                           Bulk inspect
                         </button>
                       )}
-                      {hasMatterPerm(perms, "sanitize") && bulkSafePolicies.length > 0 && (
+                      {hasMatterPerm(perms, "sanitize") && bulkSafeReleaseProfiles.length > 0 && (
                         <button
                           onClick={() => setBulkAction("sanitize")}
                           disabled={isOverBulkCap(selected.size)}
                           className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
                         >
-                          Bulk sanitize…
+                          Bulk release…
                         </button>
                       )}
                     </div>
@@ -1148,7 +1340,8 @@ function MatterView({
                     matterId={matterId}
                     doc={doc}
                     jobs={jobsQ.items}
-                    policies={policiesQ.data?.policies ?? []}
+                    releaseProfiles={releaseProfilesQ.data?.release_profiles ?? []}
+                    recipientTypes={releaseProfilesQ.data?.recipient_types ?? []}
                     onJobStarted={jobsQ.reload}
                     highlighted={doc.id === highlightDocId}
                     selected={selected.has(doc.id)}
