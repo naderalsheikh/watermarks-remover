@@ -15,7 +15,7 @@ plane boundary this deliberately stays outside of) and the approved
 proposal for this pass: an HTTP client of the existing API, not a
 second engine-invoking write path.
 
-Usage::
+Usage (single file)::
 
     COUNSELCLEAR_LOCAL_PASSWORD=evalpass123 python3 tools/counselclear_airlock.py \\
         --matter-id <existing matter id> \\
@@ -23,13 +23,37 @@ Usage::
         --policy external_sharing \\
         --output-dir ./airlock-out
 
+Usage (batch -- a folder, or an explicit file list; PR 38)::
+
+    COUNSELCLEAR_LOCAL_PASSWORD=evalpass123 python3 tools/counselclear_airlock.py \\
+        --matter-id <existing matter id> \\
+        --folder ./intake \\
+        --policy external_sharing \\
+        --output-dir ./airlock-out
+
+    # or: --files a.docx b.pdf c.txt   (explicit list instead of a folder)
+
+Batch mode processes every file in sequence through the exact same
+per-file workflow as single-file mode (upload, sanitize, poll, download/
+write the release packet) -- one file's outcome (including a hard error:
+a failed upload, a failed submit, a poll timeout) never aborts the rest
+of the batch. Each file gets its own numbered subdirectory
+(<output-dir>/001-<name>/, 002-<name>/, ...) containing the exact same
+files single-file mode would have written there; a top-level
+<output-dir>/BATCH_RESULT.json summarizes every file's status, job id,
+its packet's subdirectory, and any limitations/refusal/failure/error --
+release packets in a batch are not externally anchored, same as a
+single one. --folder is not recursive: only files directly inside it
+are processed.
+
 Policies: only external_sharing and privacy_only are offered in this
-first version -- both are decision-free (POLICIES[*].bulk_safe in
-service/app/main.py), so every finding resolves without a per-finding
-approve/keep decision this CLI has no interactive way to supply.
-production is refused at the argument-parser level, not silently
-degraded, so a caller finds out immediately rather than after a job
-that would have needed decisions this CLI can't provide.
+first version, in both single-file and batch mode -- both are
+decision-free (POLICIES[*].bulk_safe in service/app/main.py), so every
+finding resolves without a per-finding approve/keep decision this CLI
+has no interactive way to supply. production is refused at the
+argument-parser level, not silently degraded, so a caller finds out
+immediately rather than after a job (or a whole batch) that would have
+needed decisions this CLI can't provide.
 """
 
 from __future__ import annotations
@@ -325,12 +349,148 @@ def run_airlock(
     return result
 
 
+@dataclass
+class BatchItemResult:
+    input_file: str
+    output_dir: str
+    # "done" / "refused" / "failed" mirror the job's own terminal status
+    # (AirlockResult.status); "error" is batch-only -- it means run_airlock
+    # itself raised AirlockError (upload failed, submit failed, or the poll
+    # timed out) before a job status was ever reached for this file.
+    status: str
+    job_id: str = ""
+    document_id: str = ""
+    limitations: list[str] = field(default_factory=list)
+    error: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "input_file": self.input_file,
+            "output_dir": self.output_dir,
+            "status": self.status,
+            "job_id": self.job_id,
+            "document_id": self.document_id,
+            "limitations": self.limitations,
+            "error": self.error,
+        }
+
+
+@dataclass
+class BatchResult:
+    matter_id: str
+    policy_id: str
+    started_at: str
+    finished_at: str = ""
+    items: list[BatchItemResult] = field(default_factory=list)
+
+    @property
+    def counts(self) -> dict[str, int]:
+        counts = {"done": 0, "refused": 0, "failed": 0, "error": 0}
+        for item in self.items:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        return counts
+
+    def to_dict(self) -> dict:
+        return {
+            "matter_id": self.matter_id,
+            "policy_id": self.policy_id,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "total": len(self.items),
+            "counts": self.counts,
+            "anchor_note": "release packets in this batch are not externally anchored",
+            "items": [item.to_dict() for item in self.items],
+        }
+
+
+def run_airlock_batch(
+    client: Client,
+    *,
+    matter_id: str,
+    files: list[Path],
+    policy_id: str,
+    reason: str,
+    output_dir: Path,
+    timeout_s: float,
+) -> BatchResult:
+    """Sequential per-file processing over run_airlock. One file's outcome
+    -- including a hard AirlockError (a failed upload, a failed submit, or
+    a poll timeout) -- never aborts the rest of the batch; it's recorded as
+    that file's own status ("error") and the loop moves on. Policy is
+    validated once, up front, so a batch that can't even start doesn't
+    process any file partially. Each file gets its own numbered
+    subdirectory under output_dir so outputs never collide, and a
+    BATCH_RESULT.json summary is written at output_dir once every file has
+    been attempted."""
+    if policy_id not in SUPPORTED_POLICIES:
+        raise AirlockError(
+            f"--policy {policy_id!r} is not supported by this CLI in v1 "
+            f"(only {', '.join(SUPPORTED_POLICIES)} -- see the module docstring)"
+        )
+    if not files:
+        raise AirlockError("no input files given (empty --folder or --files list)")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    batch = BatchResult(
+        matter_id=matter_id,
+        policy_id=policy_id,
+        started_at=datetime.now(UTC).isoformat(timespec="seconds"),
+    )
+
+    for i, file_path in enumerate(files, start=1):
+        item_dir_name = f"{i:03d}-{file_path.stem}"
+        item_output_dir = output_dir / item_dir_name
+        try:
+            result = run_airlock(
+                client,
+                matter_id=matter_id,
+                file_path=file_path,
+                policy_id=policy_id,
+                reason=reason,
+                output_dir=item_output_dir,
+                timeout_s=timeout_s,
+            )
+            batch.items.append(
+                BatchItemResult(
+                    input_file=file_path.name,
+                    output_dir=item_dir_name,
+                    status=result.status,
+                    job_id=result.job_id,
+                    document_id=result.document_id,
+                    limitations=result.limitations,
+                    error=result.error,
+                )
+            )
+        except AirlockError as e:
+            batch.items.append(
+                BatchItemResult(
+                    input_file=file_path.name,
+                    output_dir=item_dir_name,
+                    status="error",
+                    error=str(e),
+                )
+            )
+
+    batch.finished_at = datetime.now(UTC).isoformat(timespec="seconds")
+    (output_dir / "BATCH_RESULT.json").write_text(json.dumps(batch.to_dict(), indent=2, sort_keys=True))
+    return batch
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default=os.environ.get("COUNSELCLEAR_API_URL", "http://127.0.0.1:8443"))
     ap.add_argument("--password", default=os.environ.get("COUNSELCLEAR_LOCAL_PASSWORD"))
     ap.add_argument("--matter-id", required=True, help="id of an existing matter to upload into")
-    ap.add_argument("--file", required=True, type=Path, help="local file to sanitize")
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--file", type=Path, help="local file to sanitize (single-file mode)")
+    mode.add_argument(
+        "--folder", type=Path,
+        help="local folder; every regular file directly inside it is processed (batch mode, not recursive)",
+    )
+    mode.add_argument(
+        "--files", nargs="+", type=Path, metavar="FILE",
+        help="explicit list of local files to sanitize (batch mode)",
+    )
     ap.add_argument("--policy", default="external_sharing", choices=SUPPORTED_POLICIES)
     ap.add_argument("--reason", default="airlock CLI")
     ap.add_argument("--output-dir", required=True, type=Path)
@@ -340,17 +500,60 @@ def main(argv: list[str] | None = None) -> int:
     if not args.password:
         print("error: --password or COUNSELCLEAR_LOCAL_PASSWORD is required", file=sys.stderr)
         return 1
-    if not args.file.is_file():
-        print(f"error: --file not found: {args.file}", file=sys.stderr)
-        return 1
+
+    if args.file is not None:
+        if not args.file.is_file():
+            print(f"error: --file not found: {args.file}", file=sys.stderr)
+            return 1
+
+        client = Client(args.base_url)
+        try:
+            client.login(args.password)
+            result = run_airlock(
+                client,
+                matter_id=args.matter_id,
+                file_path=args.file,
+                policy_id=args.policy,
+                reason=args.reason,
+                output_dir=args.output_dir,
+                timeout_s=args.timeout_s,
+            )
+        except AirlockError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+
+        print(f"job {result.job_id}: {result.status}")
+        for name in result.files_written:
+            print(f"  wrote {args.output_dir / name}")
+        if result.limitations:
+            print("limitations:")
+            for item in result.limitations:
+                print(f"  - {item}")
+        return 0 if result.status == "done" else 2
+
+    # Batch mode: --folder or --files.
+    if args.folder is not None:
+        if not args.folder.is_dir():
+            print(f"error: --folder not found: {args.folder}", file=sys.stderr)
+            return 1
+        files = sorted((p for p in args.folder.iterdir() if p.is_file()), key=lambda p: p.name)
+        if not files:
+            print(f"error: --folder has no regular files: {args.folder}", file=sys.stderr)
+            return 1
+    else:
+        missing = [str(p) for p in args.files if not p.is_file()]
+        if missing:
+            print(f"error: --files not found: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        files = args.files
 
     client = Client(args.base_url)
     try:
         client.login(args.password)
-        result = run_airlock(
+        batch = run_airlock_batch(
             client,
             matter_id=args.matter_id,
-            file_path=args.file,
+            files=files,
             policy_id=args.policy,
             reason=args.reason,
             output_dir=args.output_dir,
@@ -360,14 +563,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    print(f"job {result.job_id}: {result.status}")
-    for name in result.files_written:
-        print(f"  wrote {args.output_dir / name}")
-    if result.limitations:
-        print("limitations:")
-        for item in result.limitations:
-            print(f"  - {item}")
-    return 0 if result.status == "done" else 2
+    print(f"batch: {len(batch.items)} file(s) processed")
+    for item in batch.items:
+        line = f"  {item.input_file}: {item.status}"
+        if item.job_id:
+            line += f" (job {item.job_id})"
+        print(line)
+        print(f"    output: {args.output_dir / item.output_dir}")
+        if item.error:
+            print(f"    error: {item.error}")
+        for lim in item.limitations:
+            print(f"    - {lim}")
+    counts = batch.counts
+    print(
+        f"summary: done={counts['done']} refused={counts['refused']} "
+        f"failed={counts['failed']} error={counts['error']}"
+    )
+    print(f"wrote {args.output_dir / 'BATCH_RESULT.json'}")
+    print("Release packets are not externally anchored.")
+
+    if counts["error"]:
+        return 1
+    if counts["done"] == len(batch.items):
+        return 0
+    return 2
 
 
 if __name__ == "__main__":
