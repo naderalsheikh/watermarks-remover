@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
-"""CounselClear release-packet verifier (PR 37).
+"""CounselClear release-packet / release-result verifier (PR 37, PR 39).
 
 Offline, stdlib-only, no engine/app dependency: recomputes every content
-hash `release_packet.json` declares against the bytes actually present in
-a packet, checks the manifest's own required fields, cross-checks a few
-identifiers across `release_packet.json`, `manifest.json`, and
-`certificate.html` where practical, and reports plainly what it could and
-could not verify -- most importantly, whether the packet is externally
-anchored (it isn't, in this release; see the module docstring's "Anchor
-status" section below).
+hash a manifest declares against the bytes actually present, checks
+required fields, cross-checks a few identifiers between JSON documents
+where practical, and reports plainly what it could and could not verify
+-- most importantly, whether the release is externally anchored (it
+isn't, in this release; see the module docstring's "Anchor status"
+section below).
+
+Two artifact shapes, two entry points:
+
+- `verify_release_packet()` -- a full release packet (.zip or extracted
+  directory): derivative + manifest.json + report.json + certificate.html
+  + release_packet.json + README.txt. Only exists for a `done` release.
+- `verify_release_result()` -- `release_result.json` on its own (a bare
+  file, or a directory containing it and optionally a sibling
+  certificate.html): the lightweight artifact PR 39's Release object
+  produces for EVERY terminal release, including a refused or failed one
+  that never gets a full packet. `main()` below auto-detects which one
+  it was handed.
 
 This tool makes NO network calls, imports NOTHING from service/app or
 service/scripts, and never touches a database. It only ever reads bytes
@@ -23,9 +34,8 @@ Usage::
 
     python3 tools/counselclear_verify_release_packet.py <path>
 
-<path> is either a release-packet .zip (as downloaded from
-GET /v1/matters/{id}/jobs/{id}/bundle) or a directory it was already
-extracted into.
+<path> is a release-packet .zip, a directory it was extracted into, a
+bare release_result.json file, or a directory containing one.
 
 Exit code 0: every check that could run, passed (still prints the
 "NOT EXTERNALLY ANCHORED" notice -- that's not a failure, it's an honest
@@ -33,16 +43,34 @@ statement about what this release does not yet do). Exit code 1: at
 least one check failed (a missing file, a hash mismatch, a schema
 problem, or a cross-check disagreement).
 
-Anchor status: as of this release, every packet ships with
+Top-line wording: a packet or result carrying a `release_id` (PR 39's
+Release-aware artifacts -- which is every one this tool now produces)
+is reported as INTERNALLY CONSISTENT / INTERNALLY INCONSISTENT, never
+VALID/INVALID -- "valid" reads too easily as "verified authentic", which
+this tool never claims. A legacy packet with no release_id (produced by
+the unwrapped /sanitize-jobs route, pre-Release) keeps the older
+VALID/INVALID wording it always had, unchanged.
+
+Certificate verification: this tool hash-checks certificate.html's bytes
+against the declared certificate_html_sha256 and stops there -- it does
+NOT grep the certificate's rendered HTML for substrings that happen to
+match a manifest field (a prior version of this tool did; that was
+removed, since a hash match already proves the HTML is byte-identical to
+what was declared, and a substring match proves nothing a hash check
+doesn't already prove more strongly). release_packet.json /
+release_result.json are the authoritative source of facts; certificate.html
+is verified for integrity, not re-parsed for meaning.
+
+Anchor status: as of this release, every packet/result ships with
 `anchor.type: "none"` -- there is no external timestamp authority,
-transparency log, or customer-held WORM copy backing any packet's
+transparency log, or customer-held WORM copy backing any release's
 timestamp or content yet (docs/release-packet-verification-and-
 anchoring-proposal.md §5/§6 surveys the options; none are implemented).
 This tool will never print "verified", "unforgeable", "independently
 timestamped", "court-proof", or "unimpeachable" -- see that proposal's
 §7. The only claim it makes is the narrower one that's actually true:
 internal hash consistency, recomputed independently of the system that
-produced the packet, using only the bytes in the packet itself.
+produced it, using only the bytes handed to it.
 """
 
 from __future__ import annotations
@@ -69,9 +97,36 @@ REQUIRED_MANIFEST_FIELDS = (
     "generated_at",
     "generated_by",
     "anchor",
+    # PR 39: original_sha256 travels at the top level -- binding original
+    # to derivative never requires opening manifest.json's own nested
+    # copy first. release_id is declared but NOT required (absent for a
+    # legacy packet with no Release wrapper) -- see verify_release_packet.
+    "original_sha256",
 )
 
 REQUIRED_SIBLING_FILES = ("manifest.json", "report.json", "certificate.html", "README.txt")
+
+# PR 39: release_result.json's own required fields -- a much smaller,
+# derivative-free artifact than release_packet.json, produced for EVERY
+# terminal release (done, refused, or failed), not just a successful one.
+REQUIRED_RELEASE_RESULT_FIELDS = (
+    "spec_version",
+    "release_id",
+    "job_id",
+    "document_id",
+    "matter_id",
+    "status",
+    "policy_id",
+    "reason",
+    "original_sha256",
+    "created_at",
+    "finished_at",
+    "audit_refs",
+    "limitations",
+    "certificate_html_sha256",
+    "generated_at",
+    "anchor",
+)
 
 
 class PacketLoadError(Exception):
@@ -93,6 +148,22 @@ class CrossCheck:
     detail: str = ""
 
 
+def _anchor_note(anchor_type: str | None, *, artifact: str) -> str:
+    """Shared by both report types' to_text() -- the exact same honest
+    disclaimer either way, never duplicated with a subtle wording drift
+    between the packet verifier and the result verifier."""
+    if anchor_type in (None, "none"):
+        return (
+            f"  NOT EXTERNALLY ANCHORED. This {artifact}'s timestamp and content are\n"
+            "  self-attested by the system that produced it. No independent party\n"
+            "  has confirmed this content existed at the claimed time. The checks\n"
+            f"  above confirm internal hash consistency only -- that the bytes in\n"
+            f"  this {artifact} match what it itself declares -- not that its own\n"
+            "  claims are independently timestamped or unforgeable."
+        )
+    return f"  anchor reference: (type={anchor_type})"
+
+
 @dataclass
 class VerificationReport:
     valid: bool
@@ -100,11 +171,19 @@ class VerificationReport:
     file_checks: list[FileCheck] = field(default_factory=list)
     cross_checks: list[CrossCheck] = field(default_factory=list)
     anchor_type: str | None = None
+    release_id: str | None = None
     errors: list[str] = field(default_factory=list)
 
     def to_text(self) -> str:
         lines: list[str] = []
-        lines.append("VALID" if self.valid else "INVALID")
+        # PR 39: a Release-aware packet (release_id present) is never
+        # reported "VALID" -- see the module docstring's "Top-line
+        # wording" section. A legacy, pre-Release packet keeps the
+        # original wording unchanged.
+        if self.release_id:
+            lines.append("INTERNALLY CONSISTENT" if self.valid else "INTERNALLY INCONSISTENT")
+        else:
+            lines.append("VALID" if self.valid else "INVALID")
         lines.append("")
         lines.append("What was verified:")
         lines.append(f"  schema (required release_packet.json fields present): "
@@ -116,23 +195,53 @@ class VerificationReport:
             lines.append(f"  {fc.name}: {marker}" + (f" -- {fc.detail}" if fc.detail else ""))
         if self.cross_checks:
             lines.append("")
-            lines.append("Cross-checks (release_packet.json vs. manifest.json / certificate.html):")
+            lines.append("Cross-checks (release_packet.json vs. manifest.json):")
             for cc in self.cross_checks:
                 marker = {"match": "ok", "mismatch": "MISMATCH", "unavailable": "not checkable"}[cc.status]
                 lines.append(f"  {cc.name}: {marker}" + (f" -- {cc.detail}" if cc.detail else ""))
         lines.append("")
         lines.append(f"Externally anchored: {'no' if self.anchor_type in (None, 'none') else self.anchor_type}")
+        lines.append(_anchor_note(self.anchor_type, artifact="packet"))
+        if self.errors:
+            lines.append("")
+            lines.append("Errors:")
+            for e in self.errors:
+                lines.append(f"  - {e}")
+        return "\n".join(lines)
+
+
+@dataclass
+class ReleaseResultReport:
+    """verify_release_result()'s own report -- deliberately smaller than
+    VerificationReport: release_result.json has no derivative, no
+    manifest.json, no report.json to cross-check against, just itself
+    and an optional sibling certificate.html."""
+
+    valid: bool
+    schema_ok: bool
+    file_checks: list[FileCheck] = field(default_factory=list)
+    anchor_type: str | None = None
+    errors: list[str] = field(default_factory=list)
+
+    def to_text(self) -> str:
+        lines: list[str] = []
+        # Always the conservative wording -- release_result.json is a
+        # Release-aware artifact by definition, never legacy.
+        lines.append("INTERNALLY CONSISTENT" if self.valid else "INTERNALLY INCONSISTENT")
+        lines.append("")
+        lines.append("What was verified:")
         lines.append(
-            "  NOT EXTERNALLY ANCHORED. This packet's timestamp and content are\n"
-            "  self-attested by the system that produced it. No independent party\n"
-            "  has confirmed this content existed at the claimed time. The checks\n"
-            "  above confirm internal hash consistency only -- that the bytes in\n"
-            "  this packet match what release_packet.json itself declares -- not\n"
-            "  that release_packet.json's own claims are independently timestamped\n"
-            "  or unforgeable."
-            if self.anchor_type in (None, "none")
-            else f"  anchor reference: (type={self.anchor_type})"
+            f"  schema (required release_result.json fields present): "
+            f"{'ok' if self.schema_ok else 'FAILED'}"
         )
+        for fc in self.file_checks:
+            marker = {
+                "match": "ok", "mismatch": "MISMATCH", "missing": "MISSING", "ambiguous": "AMBIGUOUS",
+            }[fc.status]
+            lines.append(f"  {fc.name}: {marker}" + (f" -- {fc.detail}" if fc.detail else ""))
+        lines.append("")
+        lines.append(f"Externally anchored: {'no' if self.anchor_type in (None, 'none') else self.anchor_type}")
+        lines.append(_anchor_note(self.anchor_type, artifact="release result"))
         if self.errors:
             lines.append("")
             lines.append("Errors:")
@@ -277,20 +386,44 @@ def verify_release_packet(path: Path) -> VerificationReport:
                 CrossCheck("derivative sha256 (release_packet.json vs manifest.json)", status)
             )
 
-    if schema_ok and "certificate.html" in files:
-        cert_text = files["certificate.html"].decode("utf-8", errors="replace")
-        for field_name, label in (
-            ("job_id", "job_id"),
-            ("matter_id", "matter_id"),
-            ("document_id", "document_id"),
-            ("status", "status"),
-        ):
-            value = manifest.get(field_name)
-            if value:
-                status = "match" if str(value) in cert_text else "mismatch"
-                cross_checks.append(CrossCheck(f"{label} appears in certificate.html", status))
-            else:
-                cross_checks.append(CrossCheck(f"{label} appears in certificate.html", "unavailable"))
+    # Deliberately NOT a grep of certificate.html's rendered prose for
+    # matching substrings (removed, PR 39 -- see module docstring's
+    # "Certificate verification" section): the certificate_html_sha256
+    # file check above already proves the HTML is byte-identical to what
+    # was declared, which is strictly stronger than "this string appears
+    # somewhere in the page". release_packet.json is the authoritative
+    # source of facts; certificate.html is verified for integrity, not
+    # re-parsed for meaning.
+
+    # original_sha256 (PR 39) is a declared fact, always required at the
+    # schema level -- but only checkable as a FILE hash when the original
+    # was actually included (include_original=true pulled an original/
+    # member into the packet, which is optional by design). Its absence
+    # is normal, not a defect, so it's reported only as an informational
+    # cross-check, never a file-check "missing".
+    original_sha256 = manifest.get("original_sha256") if schema_ok else None
+    original_members = [n for n in files if n.startswith("original/")]
+    if original_sha256 and original_members:
+        if len(original_members) > 1:
+            cross_checks.append(
+                CrossCheck(
+                    "original_sha256 vs included original/ file",
+                    "mismatch",
+                    f"ambiguous: multiple original/ members present ({original_members})",
+                )
+            )
+        else:
+            actual = _sha256(files[original_members[0]])
+            status = "match" if actual == original_sha256 else "mismatch"
+            cross_checks.append(CrossCheck("original_sha256 vs included original/ file", status))
+    elif original_sha256:
+        cross_checks.append(
+            CrossCheck(
+                "original_sha256 vs included original/ file",
+                "unavailable",
+                "original was not included in this packet (pass include_original=true to include it)",
+            )
+        )
 
     valid = (
         schema_ok
@@ -304,16 +437,90 @@ def verify_release_packet(path: Path) -> VerificationReport:
         file_checks=file_checks,
         cross_checks=cross_checks,
         anchor_type=(manifest.get("anchor") or {}).get("type") if schema_ok else None,
+        release_id=manifest.get("release_id") if schema_ok else None,
+        errors=errors,
+    )
+
+
+def verify_release_result(path: Path) -> ReleaseResultReport:
+    """release_result.json on its own -- the artifact PR 39's Release
+    object produces for EVERY terminal release, refused/failed included,
+    so "packet or refusal" always resolves to something machine-checkable
+    even when there's no derivative and no zip. *path* is either the
+    release_result.json file itself, or a directory containing one
+    (optionally alongside a sibling certificate.html, if a caller also
+    saved the standalone certificate next to it)."""
+    if path.is_dir():
+        result_path = path / "release_result.json"
+        cert_path = path / "certificate.html"
+    else:
+        result_path = path
+        cert_path = path.parent / "certificate.html"
+
+    if not result_path.is_file():
+        return ReleaseResultReport(valid=False, schema_ok=False, errors=[f"{result_path} does not exist"])
+    try:
+        result = json.loads(result_path.read_bytes())
+    except json.JSONDecodeError as e:
+        return ReleaseResultReport(valid=False, schema_ok=False, errors=[f"{result_path} is not valid JSON: {e}"])
+
+    errors: list[str] = []
+    schema_ok = True
+    for field_name in REQUIRED_RELEASE_RESULT_FIELDS:
+        if field_name not in result:
+            schema_ok = False
+            errors.append(f"release_result.json missing required field: {field_name!r}")
+
+    file_checks: list[FileCheck] = []
+    expected_cert_sha = result.get("certificate_html_sha256") if schema_ok else None
+    if expected_cert_sha:
+        if cert_path.is_file():
+            actual = _sha256(cert_path.read_bytes())
+            status = "match" if actual == expected_cert_sha else "mismatch"
+            file_checks.append(FileCheck("certificate.html", status))
+        else:
+            # Not a defect -- the certificate is fetched separately (GET
+            # .../jobs/{job_id}/certificate) and saving it alongside
+            # release_result.json is optional, unlike a full release
+            # packet where certificate.html always travels in the zip.
+            file_checks.append(
+                FileCheck(
+                    "certificate.html", "missing",
+                    "certificate.html not found alongside release_result.json (optional -- "
+                    "fetch it separately and save it next to this file to check it)",
+                )
+            )
+
+    # Unlike verify_release_packet's file_checks (every one required),
+    # the certificate.html check here is informational when "missing" --
+    # the certificate is optional to include alongside release_result.json
+    # (see the FileCheck above). Only "mismatch"/"ambiguous" invalidate.
+    valid = schema_ok and not errors and all(fc.status not in ("mismatch", "ambiguous") for fc in file_checks)
+    return ReleaseResultReport(
+        valid=valid,
+        schema_ok=schema_ok,
+        file_checks=file_checks,
+        anchor_type=(result.get("anchor") or {}).get("type") if schema_ok else None,
         errors=errors,
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("path", type=Path, help="release packet .zip, or a directory it was extracted into")
+    ap.add_argument(
+        "path", type=Path,
+        help="release packet .zip/directory, or a release_result.json file/directory",
+    )
     args = ap.parse_args(argv)
 
-    report = verify_release_packet(args.path)
+    # Auto-detect: a bare release_result.json, or a directory that has one
+    # but no release_packet.json (a refused/failed release's output has
+    # no packet at all), goes through the smaller result verifier.
+    path = args.path
+    is_result = path.name == "release_result.json" or (
+        path.is_dir() and (path / "release_result.json").is_file() and not (path / "release_packet.json").is_file()
+    )
+    report = verify_release_result(path) if is_result else verify_release_packet(path)
     print(report.to_text())
     return 0 if report.valid else 1
 

@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from .audit import append_event
 from .config import Config
-from .models import Batch, Job, _now
+from .models import Batch, Job, Release, _now
 from .runner import run_job, sync_job
 
 log = logging.getLogger("counselclear")
@@ -162,9 +162,32 @@ class BatchDispatcher:
             finished = s2.get(Job, job_id)
             batch = s2.get(Batch, batch_id)
             self._append_child_audit(s2, finished, batch)
+            self._sync_release(s2, finished)
             self.check_batch_completion(s2, batch_id)
         finally:
             s2.close()
+
+    def _sync_release(self, s: Session, job: Job) -> None:
+        """A Job's sibling Release (if any -- most batch children have
+        none, since not every /batches submission goes through the
+        Release-wrapping /releases route) completes the moment ITS OWN
+        Job finishes, independent of the rest of the batch. Deliberately
+        never folded into check_batch_completion below: "batch
+        completed" and "this one release completed" are different
+        events on purpose -- see Release's own docstring in models.py.
+        """
+        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
+        if release is None:
+            return
+        release.status = job.status
+        release.finished_utc = job.finished_utc
+        append_event(
+            s,
+            matter_id=job.matter_id,
+            actor_id=release.requested_by,
+            action="release.terminal",
+            payload={"release_id": release.id, "job_id": job.id, "status": job.status},
+        )
 
     def _append_child_audit(self, s: Session, job: Job, batch: Batch | None) -> None:
         if batch is None:  # defensive -- batch_id is a real FK, should never be missing

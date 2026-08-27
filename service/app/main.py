@@ -39,7 +39,18 @@ from .db import make_engine, make_session_factory
 from .dispatcher import BatchDispatcher
 from .malware import get_scanner
 from .migrate import upgrade_head
-from .models import AttestationUse, AuditEvent, Batch, Document, Job, Matter, MatterAcl, _now, _uuid
+from .models import (
+    AttestationUse,
+    AuditEvent,
+    Batch,
+    Document,
+    Job,
+    Matter,
+    MatterAcl,
+    Release,
+    _now,
+    _uuid,
+)
 from .oidc import OidcError
 from .runner import run_job, sync_job
 from .security import (
@@ -529,6 +540,51 @@ POLICIES = [
 ]
 
 
+# Display-facing selection for the Release routes (POST .../releases):
+# the operator picks a use-case profile, not a low-level sanitizer
+# policy_id -- policy_id stays the stable internal identifier every
+# existing route (POLICIES above) already keys on, untouched by this.
+# Each profile resolves to exactly one policy_id; nothing here changes
+# what that policy actually does.
+RELEASE_PROFILES = [
+    {
+        "id": "counterparty_deal_room",
+        "label": "Counterparty / Deal Room Release",
+        "policy_id": "external_sharing",
+        "description": "Sending to the other side of a deal or matter: strips comments, "
+        "external links, embedded objects, and custom XML.",
+    },
+    {
+        "id": "public_filing_anonymized",
+        "label": "Public Filing / Anonymized Release",
+        "policy_id": "privacy_only",
+        "description": "Minimal, no-visible-change strip of PII authoring fields and "
+        "GPS location, for content that's otherwise going out as-is.",
+    },
+    {
+        "id": "ediscovery_production",
+        "label": "E-Discovery / Production Release",
+        "policy_id": "production",
+        "description": "Litigation production: most findings require an explicit "
+        "per-finding decision instead of an automatic strip. Not available in "
+        "batch mode -- see POLICIES[*].bulk_safe.",
+    },
+]
+
+# Controlled vocabulary for Release.recipient_type -- deliberately narrow
+# and structured (unlike recipient_name/purpose, both free text) so this
+# is the one field a future learning-layer pass can safely aggregate on
+# without touching anything that might carry privileged/sensitive detail.
+RECIPIENT_TYPES = (
+    "opposing_counsel",
+    "court",
+    "client",
+    "regulator",
+    "internal_reviewer",
+    "other",
+)
+
+
 class LoginBody(BaseModel):
     password: str
 
@@ -565,6 +621,41 @@ class BulkJobsBody(BaseModel):
     document_ids: list[str]
     kind: str
     policy_id: str = "external_sharing"
+    reason: str = ""
+
+
+class ReleaseBody(BaseModel):
+    """POST .../documents/{doc_id}/releases -- single-document.
+
+    profile_id, not policy_id: the Release routes are profile-first (see
+    RELEASE_PROFILES) precisely so a caller chooses a destination/use-case,
+    not a low-level sanitizer policy. The raw policy_id-based
+    /sanitize-jobs route is untouched and still exists for advanced/
+    internal use.
+    """
+
+    profile_id: str
+    recipient_type: str = "other"
+    recipient_name: str = ""
+    purpose: str = ""
+    intended_external: bool = True
+    reason: str = ""
+    signature_break_attestation: bool = False
+    finding_decisions: dict[str, str] = {}
+    layer_b: LayerBBody | None = None
+
+
+class BatchReleaseBody(BaseModel):
+    """POST .../matters/{id}/releases -- batch. Reuses the existing async
+    Batch resource unchanged underneath (see create_batch); one Release
+    row per document_id, each riding alongside its own child Job."""
+
+    document_ids: list[str]
+    profile_id: str
+    recipient_type: str = "other"
+    recipient_name: str = ""
+    purpose: str = ""
+    intended_external: bool = True
     reason: str = ""
 
 
@@ -1131,6 +1222,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     def list_policies():
         return {"policies": POLICIES}
 
+    @app.get("/v1/release-profiles", dependencies=[Depends(principal)])
+    def list_release_profiles():
+        return {"release_profiles": RELEASE_PROFILES, "recipient_types": list(RECIPIENT_TYPES)}
+
     # --- matters ------------------------------------------------------------
 
     @app.get("/v1/matters")
@@ -1429,6 +1524,284 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         return _job_dict(finished)
 
+    def _resolve_release_profile(profile_id: str) -> dict:
+        profile = next((p for p in RELEASE_PROFILES if p["id"] == profile_id), None)
+        if profile is None:
+            raise HTTPException(400, f"unknown release profile: {profile_id!r}")
+        return profile
+
+    def _release_dict(r: Release) -> dict:
+        return {
+            "id": r.id,
+            "matter_id": r.matter_id,
+            "document_id": r.document_id,
+            "batch_id": r.batch_id,
+            "job_id": r.job_id,
+            "policy_id": r.policy_id,
+            "profile_id": r.profile_id,
+            "recipient_type": r.recipient_type,
+            "recipient_name": r.recipient_name,
+            "purpose": r.purpose,
+            "intended_external": r.intended_external,
+            "requested_by": r.requested_by,
+            "status": r.status,
+            "created_utc": r.created_utc,
+            "finished_utc": r.finished_utc,
+        }
+
+    def _build_release_result(
+        s: Session, *, matter: Matter, release: Release, job: Job, doc: Document, audit_refs: dict
+    ) -> dict:
+        """release_result.json: the one artifact every terminal release
+        produces, regardless of outcome. For a refused/failed release
+        this is the ONLY structured record -- no derivative, no zip, so
+        "packet or refusal" doesn't collapse into "packet, or nothing
+        machine-checkable". For a done release it's a lightweight,
+        always-available companion to the full release_packet.json
+        (job_bundle, below), which additionally carries the derivative
+        itself. Computing the certificate here (via _build_certificate_html,
+        which is side-effect-free -- it does not itself append
+        certificate.issued) lets this cite a real, hash-bindable
+        certificate without forcing an extra issuance event on every
+        release creation; a caller who wants the actual HTML bytes still
+        fetches GET .../jobs/{job_id}/certificate, which logs its own
+        pull exactly as it always has.
+
+        Never claims more than "prepared for release" -- see
+        Release.intended_external's own docstring in models.py. status
+        here is release.status (Job's own vocabulary, synced 1:1), never
+        a claim about what happened to the packet after this system
+        produced it.
+        """
+        cert_html, _policy_id, limitations = _build_certificate_html(
+            s, matter=matter, job=job, doc=doc, generated_by=release.requested_by
+        )
+        reason = ""
+        if job.status in ("refused", "failed"):
+            reason = job.error or "no further detail recorded"
+        return {
+            "spec_version": "1.0",
+            "release_id": release.id,
+            "job_id": job.id,
+            "document_id": doc.id,
+            "matter_id": matter.id,
+            "status": release.status,
+            "policy_id": release.policy_id,
+            "profile_id": release.profile_id,
+            "recipient_type": release.recipient_type,
+            "recipient_name": release.recipient_name,
+            "purpose": release.purpose,
+            "intended_external": release.intended_external,
+            "reason": reason,
+            "original_sha256": doc.sha256,
+            "created_at": release.created_utc,
+            "finished_at": release.finished_utc,
+            "audit_refs": audit_refs,
+            "limitations": limitations,
+            "certificate_html_sha256": hashlib.sha256(cert_html.encode("utf-8")).hexdigest(),
+            "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            # Same honest "none" as release_packet.json's own anchor field
+            # (job_bundle, below) -- not yet implemented, not omitted.
+            "anchor": {"type": "none", "digest": None, "reference": None},
+        }
+
+    @app.post("/v1/matters/{matter_id}/documents/{doc_id}/releases")
+    def create_release(
+        matter_id: str,
+        doc_id: str,
+        body: ReleaseBody,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """The Release-first entry point for a single document (PR 39):
+        wraps the exact same job-creation/execution path sanitize_job
+        (above) uses, plus a Release row carrying the recipient/purpose/
+        profile context a Job was never meant to. /sanitize-jobs itself
+        is untouched -- this is additive, not a replacement, kept so
+        nothing that already calls it (the frontend, the Airlock CLI)
+        breaks. inspect never gets a Release wrapper: it produces no
+        derivative, so it can never resolve to "packet or refusal".
+        """
+        _require(matter_id, "sanitize", s, user)
+        matter = _matter(matter_id, s)
+        doc = _document(matter_id, doc_id, s)
+        profile = _resolve_release_profile(body.profile_id)
+        if body.recipient_type not in RECIPIENT_TYPES:
+            raise HTTPException(400, f"unknown recipient_type: {body.recipient_type!r}")
+        policy_id = profile["policy_id"]
+
+        layer_b: dict | None = None
+        attest_claims: dict | None = None
+        jti: str | None = None
+        if body.layer_b is not None:
+            if not cfg.watermark_tools_enabled:
+                raise HTTPException(403, "watermark tools are disabled")
+            claims = verify_attestation(cfg, body.layer_b.token, matter_id=matter_id, doc_sha256=doc.sha256)
+            if claims is None:
+                raise HTTPException(403, "invalid or expired attestation token")
+            if claims.get("sub") != user:
+                raise HTTPException(403, "attestation token was issued to another principal")
+            jti = claims["jti"]
+            layer_b = {
+                "strength": claims["strength"],
+                "label": claims["label"],
+                "subject": claims["sub"],
+                "jti": jti,
+            }
+            attest_claims = claims
+
+        job = Job(
+            matter_id=matter_id,
+            document_id=doc.id,
+            kind="sanitize",
+            policy_id=policy_id,
+            reason=body.reason[:500],
+            attestation=bool(body.signature_break_attestation),
+            finding_decisions=dict(body.finding_decisions),
+            layer_b=layer_b,
+        )
+        s.add(job)
+        s.flush()  # assigns job.id
+        if jti is not None:
+            s.add(AttestationUse(jti=jti, job_id=job.id, matter_id=matter_id))
+            try:
+                s.flush()
+            except IntegrityError as e:
+                s.rollback()
+                raise HTTPException(403, "attestation token already used") from e
+        if layer_b is not None and attest_claims is not None:
+            consume_attestation(attest_claims)
+            append_event(
+                s,
+                matter_id=matter_id,
+                actor_id=user,
+                action="attest.used",
+                payload={"jti": jti, "job_id": job.id, "strength": layer_b["strength"]},
+            )
+
+        release = Release(
+            matter_id=matter_id,
+            document_id=doc.id,
+            job_id=job.id,
+            policy_id=policy_id,
+            profile_id=body.profile_id,
+            recipient_type=body.recipient_type,
+            recipient_name=body.recipient_name[:200],
+            purpose=body.purpose[:500],
+            intended_external=body.intended_external,
+            requested_by=user,
+            status="queued",
+        )
+        s.add(release)
+        s.flush()  # assigns release.id
+        created_event = append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="release.created",
+            payload={
+                "release_id": release.id,
+                "document_id": doc.id,
+                "job_id": job.id,
+                "policy_id": policy_id,
+                "profile_id": body.profile_id,
+                "recipient_type": body.recipient_type,
+                "requested_by": user,
+            },
+        )
+        s.commit()
+
+        _execute_job(job.id, kind="sanitize")
+        s.expire_all()
+        finished = _job(matter_id, job.id, s)
+        result = finished.result_json or {}
+        actions = (result.get("manifest") or {}).get("actions") or []
+        no_decision_count = sum(1 for a in actions if NO_DECISION_MARKER in a)
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="job.sanitize",
+            payload={
+                "job_id": job.id,
+                "document_id": doc.id,
+                "policy_id": policy_id,
+                "status": finished.status,
+                "verification_pass": result.get("verification_pass"),
+                "no_decision_count": no_decision_count,
+            },
+        )
+
+        release.status = finished.status
+        release.finished_utc = finished.finished_utc
+        terminal_event = append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="release.terminal",
+            payload={"release_id": release.id, "job_id": job.id, "status": finished.status},
+        )
+        s.commit()
+
+        audit_refs = {"release_created_seq": created_event.seq, "release_terminal_seq": terminal_event.seq}
+        release_result = _build_release_result(
+            s, matter=matter, release=release, job=finished, doc=doc, audit_refs=audit_refs
+        )
+        return {"release": _release_dict(release), "job": _job_dict(finished), "release_result": release_result}
+
+    @app.get("/v1/matters/{matter_id}/releases/{release_id}")
+    def get_release(
+        matter_id: str,
+        release_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        _require(matter_id, "read", s, user)
+        release = _release(matter_id, release_id, s)
+        return _release_dict(release)
+
+    @app.get("/v1/matters/{matter_id}/releases/{release_id}/result")
+    def get_release_result(
+        matter_id: str,
+        release_id: str,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Raw release_result.json bytes -- the artifact a caller (the
+        Airlock CLI, a future verifier) would save to disk as
+        `release_result.json` and hash-check. Deliberately read-only and
+        side-effect-free: a re-fetch of already-committed facts (Release +
+        Job + Document rows), not a new issuance -- unlike
+        job_certificate's own per-pull audit logging (a distinct, explicit
+        product decision for that route), this is a deterministic
+        projection with nothing new to attest to on repeat reads. Audit
+        refs cite the release.created/release.terminal events recorded at
+        creation time, which don't change on re-fetch either.
+        """
+        _require(matter_id, "read", s, user)
+        matter = _matter(matter_id, s)
+        release = _release(matter_id, release_id, s)
+        job = _job(matter_id, release.job_id, s)
+        doc = _document(matter_id, release.document_id, s)
+        created_seq = _release_event_seq(s, matter_id, release.id, "release.created")
+        terminal_seq = _release_event_seq(s, matter_id, release.id, "release.terminal")
+        audit_refs = {"release_created_seq": created_seq, "release_terminal_seq": terminal_seq}
+        release_result = _build_release_result(
+            s, matter=matter, release=release, job=job, doc=doc, audit_refs=audit_refs
+        )
+        body = json.dumps(release_result, indent=2, sort_keys=True)
+        return Response(content=body, media_type="application/json")
+
+    def _release_event_seq(s: Session, matter_id: str, release_id: str, action: str) -> int | None:
+        ev = (
+            s.query(AuditEvent)
+            .filter(AuditEvent.matter_id == matter_id, AuditEvent.action == action)
+            .order_by(AuditEvent.seq)
+            .all()
+        )
+        match = next((e for e in ev if (e.payload or {}).get("release_id") == release_id), None)
+        return match.seq if match else None
+
     def _batch_dict(b: Batch, s: Session) -> dict:
         jobs = s.query(Job).filter(Job.batch_id == b.id).order_by(Job.created_utc).all()
         doc_names = {
@@ -1531,6 +1904,119 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s.commit()
         dispatcher.wake()
         return _batch_dict(batch, s)
+
+    @app.post("/v1/matters/{matter_id}/releases")
+    def create_batch_release(
+        matter_id: str,
+        body: BatchReleaseBody,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """Batch release (PR 39): reuses the existing async Batch resource
+        (create_batch, above) completely unchanged underneath -- one
+        Release row per document_id, each riding alongside its own child
+        Job, each completing independently the moment ITS OWN Job
+        finishes (BatchDispatcher._sync_release). Batch stays only the
+        grouping/execution envelope; "batch completed" and "this one
+        release completed" are never the same event -- see Release's own
+        docstring in models.py. Not available for a non-bulk_safe profile
+        (production/ediscovery_production), same restriction create_batch
+        already enforces on the raw policy -- release those individually.
+        """
+        if not body.document_ids:
+            raise HTTPException(400, "document_ids must not be empty")
+        if len(body.document_ids) > 100:
+            raise HTTPException(400, "at most 100 documents per bulk request")
+        if len(set(body.document_ids)) != len(body.document_ids):
+            raise HTTPException(400, "document_ids must not contain duplicates")
+        _require(matter_id, "sanitize", s, user)
+        profile = _resolve_release_profile(body.profile_id)
+        policy_id = profile["policy_id"]
+        policy = next((p for p in POLICIES if p["id"] == policy_id), None)
+        if policy is None or not policy["bulk_safe"]:
+            raise HTTPException(
+                400,
+                f"release profile {body.profile_id!r} (policy {policy_id!r}) cannot be "
+                "batch-released: it requires per-finding decisions (or produces no "
+                "derivative) — release those documents individually",
+            )
+        if body.recipient_type not in RECIPIENT_TYPES:
+            raise HTTPException(400, f"unknown recipient_type: {body.recipient_type!r}")
+        found = {
+            d.id
+            for d in s.query(Document)
+            .filter(Document.matter_id == matter_id, Document.id.in_(body.document_ids))
+            .all()
+        }
+        missing = [i for i in body.document_ids if i not in found]
+        if missing:
+            raise HTTPException(400, f"not documents of this matter: {', '.join(missing)}")
+
+        batch = Batch(
+            matter_id=matter_id,
+            kind="sanitize",
+            policy_id=policy_id,
+            reason=body.reason[:500],
+            requested_by=user,
+            total=len(body.document_ids),
+        )
+        s.add(batch)
+        s.flush()  # assigns batch.id
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="batch.created",
+            payload={"batch_id": batch.id, "kind": "sanitize", "total": batch.total},
+        )
+        releases: list[Release] = []
+        for doc_id in body.document_ids:
+            job = Job(
+                matter_id=matter_id,
+                document_id=doc_id,
+                kind="sanitize",
+                batch_id=batch.id,
+                policy_id=policy_id,
+                reason=body.reason[:500],
+            )
+            s.add(job)
+            s.flush()  # assigns job.id
+            release = Release(
+                matter_id=matter_id,
+                document_id=doc_id,
+                batch_id=batch.id,
+                job_id=job.id,
+                policy_id=policy_id,
+                profile_id=body.profile_id,
+                recipient_type=body.recipient_type,
+                recipient_name=body.recipient_name[:200],
+                purpose=body.purpose[:500],
+                intended_external=body.intended_external,
+                requested_by=user,
+                status="queued",
+            )
+            s.add(release)
+            s.flush()  # assigns release.id
+            append_event(
+                s,
+                matter_id=matter_id,
+                actor_id=user,
+                action="release.created",
+                payload={
+                    "release_id": release.id,
+                    "document_id": doc_id,
+                    "job_id": job.id,
+                    "batch_id": batch.id,
+                    "policy_id": policy_id,
+                    "profile_id": body.profile_id,
+                    "recipient_type": body.recipient_type,
+                    "requested_by": user,
+                },
+            )
+            releases.append(release)
+        s.commit()
+        dispatcher.wake()
+        return {"batch": _batch_dict(batch, s), "releases": [_release_dict(r) for r in releases]}
 
     @app.get("/v1/matters/{matter_id}/batches/{batch_id}")
     def get_batch(
@@ -1956,12 +2442,23 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             return hashlib.sha256(data).hexdigest()
 
         policy_version = (job.result_json or {}).get("manifest", {}).get("policy", {}).get("version", 1)
+        # Nullable: absent for a bundle pulled from a Job created via the
+        # legacy, unwrapped /sanitize-jobs route (no Release exists for
+        # it). release_id is additive, not a replacement for packet_id --
+        # existing consumers keyed on packet_id (== job.id) are untouched.
+        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
         release_packet = {
             "spec_version": "1.0",
             "packet_id": job.id,
+            "release_id": release.id if release else None,
             "matter_id": matter.id,
             "document_id": doc.id,
             "job_id": job.id,
+            # Top-level, always the same doc.sha256 already visible via
+            # GET .../documents -- so binding "this derivative came from
+            # this original" never requires opening manifest.json's own
+            # nested copy first.
+            "original_sha256": doc.sha256,
             "kind": job.kind,
             "status": job.status,
             "policy": {
@@ -2495,6 +2992,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if not j or j.matter_id != matter_id:
             raise HTTPException(404, "job not found")
         return j
+
+    def _release(matter_id: str, release_id: str, s: Session) -> Release:
+        r = s.get(Release, release_id)
+        if not r or r.matter_id != matter_id:
+            raise HTTPException(404, "release not found")
+        return r
 
     def _matter_dict(m: Matter, perms: list[str] | None = None) -> dict:
         d: dict = {"id": m.id, "name": m.name, "created_utc": m.created_utc}

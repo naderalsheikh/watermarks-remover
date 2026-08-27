@@ -155,6 +155,70 @@ class Job(Base):
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
+class Release(Base):
+    """The business/custody event: a document was prepared for release to
+    someone, for some purpose, under some policy, and it ended in exactly
+    one of two ways -- a release packet, or a refused/failed record with
+    reasons. `Job` remains the execution mechanism underneath (1:1,
+    `job_id` always set); Release adds the facts a Job was never meant to
+    carry -- who this was for, why, and whether it was intended to leave
+    the organization at all. `status` mirrors `Job.status`'s own
+    vocabulary deliberately (queued|done|refused|failed): no separate
+    vocabulary to keep in sync, no drift-prone mapping table.
+
+    Always 1:1 with a document, even inside a server-side batch (see
+    `batch_id`) -- a Release is never a multi-document aggregate. This is
+    what keeps "batch completed" and "each release completed" from
+    blurring into each other: the Batch is only the grouping/execution
+    envelope (unchanged, PR 31); each of its child Jobs may have its own
+    sibling Release, completing independently as that one Job finishes,
+    not when the batch as a whole does.
+    """
+
+    __tablename__ = "releases"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True, default=_uuid)
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
+    # Set only when created via the batch-release path -- same nullable-FK
+    # pattern Job.batch_id already uses. NULL means "not part of a
+    # server-side Batch", which covers both a true single-document release
+    # and a client-driven sequence of independent releases (e.g. the
+    # Airlock CLI's own folder loop, which never touches Batch at all).
+    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"), nullable=True, index=True)
+    # 1:1 with its Job, always -- created in the same transaction as the
+    # Job it wraps, never pointed at an existing/shared Job.
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), unique=True, index=True)
+    # Display-facing selection (RELEASE_PROFILES in main.py) resolves to
+    # this at creation time; policy_id itself stays the stable, internal
+    # sanitizer identifier -- never renamed or reinterpreted by profile
+    # framing. Copied here (not joined through Job) so a Release is
+    # self-describing on its own, matching how AuditEvent.payload already
+    # duplicates fields for evidentiary independence.
+    policy_id: Mapped[str] = mapped_column(String(40))
+    profile_id: Mapped[str] = mapped_column(String(40), default="")
+    # Controlled vocabulary (e.g. opposing_counsel|court|client|regulator|
+    # internal_reviewer|other) -- the field the learning layer can safely
+    # aggregate on. Deliberately separate from recipient_name (below),
+    # which is free text and must never be conflated with this one.
+    recipient_type: Mapped[str] = mapped_column(String(40), default="")
+    recipient_name: Mapped[str] = mapped_column(String(200), default="")
+    purpose: Mapped[str] = mapped_column(String(500), default="")
+    # Operator's stated INTENT that this release leaves the organization --
+    # never proof that it did. CounselClear has no way to confirm actual
+    # transmission; "Release" means "prepared for release", not "sent". No
+    # certificate/packet/UI copy may claim otherwise (see docs).
+    intended_external: Mapped[bool] = mapped_column(default=True)
+    requested_by: Mapped[str] = mapped_column(String(64))
+    # queued | done | refused | failed -- exactly Job.status's own
+    # vocabulary, synced from the wrapped Job at the same moment the Job
+    # itself transitions (see dispatcher.py's per-job completion hook and
+    # main.py's inline single-document path) -- never a separate poll.
+    status: Mapped[str] = mapped_column(String(12), default="queued", index=True)
+    created_utc: Mapped[str] = mapped_column(String(32), default=_now)
+    finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
 class AttestationUse(Base):
     """Durable, race-free single-use record for a Layer B attestation jti.
 

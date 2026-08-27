@@ -36,6 +36,8 @@ def _packet_files(
     derivative_bytes: bytes = b"fake derivative bytes",
     derivative_filename: str = "out.docx",
     anchor_type: str = "none",
+    release_id: str | None = None,
+    original_sha256: str = "0" * 64,
 ) -> dict[str, bytes]:
     """A self-consistent set of packet files, hashes computed for real --
     the same shape job_bundle produces, built independently here so the
@@ -59,9 +61,11 @@ def _packet_files(
     release_packet = {
         "spec_version": "1.0",
         "packet_id": job_id,
+        "release_id": release_id,
         "matter_id": matter_id,
         "document_id": document_id,
         "job_id": job_id,
+        "original_sha256": original_sha256,
         "kind": "sanitize",
         "status": status,
         "policy": {"id": policy_id, "version": 1, "digest": None},
@@ -114,7 +118,12 @@ def test_valid_packet_verifies_from_zip(tmp_path):
     assert report.valid, report.to_text()
     assert report.schema_ok
     assert all(fc.status == "match" for fc in report.file_checks)
-    assert all(cc.status == "match" for cc in report.cross_checks)
+    # original_sha256 is declared but no original/ member is included in
+    # this fixture (include_original wasn't used) -- "unavailable" is the
+    # correct, non-failing status for that, not "match".
+    assert all(cc.status in ("match", "unavailable") for cc in report.cross_checks)
+    original_check = next(cc for cc in report.cross_checks if cc.name.startswith("original_sha256"))
+    assert original_check.status == "unavailable"
 
 
 def test_valid_packet_verifies_from_extracted_directory(tmp_path):
@@ -261,10 +270,19 @@ def test_mismatched_policy_id_between_release_packet_and_manifest_fails(tmp_path
     assert policy_check.status == "mismatch"
 
 
-def test_certificate_not_mentioning_job_id_fails_cross_check(tmp_path):
+def test_certificate_content_no_longer_semantically_cross_checked(tmp_path):
+    """PR 39: certificate.html is verified for integrity (its bytes match
+    the declared hash) only -- never re-parsed for meaning. A certificate
+    whose *content* is unrelated to this job (as if swapped in from a
+    different one) but whose declared hash was updated to match that
+    content -- i.e. it's internally self-consistent, just wrong -- still
+    passes the certificate.html FILE check, since that check only proves
+    "these bytes are what was declared", nothing about what the bytes
+    say. This is the deliberate, documented tradeoff (see the module
+    docstring's "Certificate verification" section): release_packet.json
+    is the authoritative source of facts, not a grep over rendered HTML.
+    """
     files = _packet_files(job_id="JOB1")
-    # A certificate that doesn't actually mention this job's id -- as if
-    # it were swapped in from a different job's packet.
     files["certificate.html"] = b"<!doctype html><html><body>unrelated content</body></html>"
     outer = json.loads(files["release_packet.json"])
     outer["hashes"]["certificate_html_sha256"] = _sha256(files["certificate.html"])
@@ -272,9 +290,78 @@ def test_certificate_not_mentioning_job_id_fails_cross_check(tmp_path):
 
     dir_path = _write_dir(tmp_path, files)
     report = verifier.verify_release_packet(dir_path)
+    cert_check = next(fc for fc in report.file_checks if fc.name == "certificate.html")
+    assert cert_check.status == "match"
+    assert not any(cc.name.startswith("job_id") for cc in report.cross_checks)
+    assert not any(cc.name.startswith("matter_id") for cc in report.cross_checks)
+
+
+def test_missing_original_sha256_field_fails_schema(tmp_path):
+    files = _packet_files()
+    outer = json.loads(files["release_packet.json"])
+    del outer["original_sha256"]
+    files["release_packet.json"] = json.dumps(outer, indent=2, sort_keys=True).encode()
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
     assert not report.valid
-    job_id_check = next(cc for cc in report.cross_checks if cc.name.startswith("job_id"))
-    assert job_id_check.status == "mismatch"
+    assert not report.schema_ok
+    assert any("original_sha256" in e for e in report.errors)
+
+
+def test_original_sha256_checked_against_included_original_file(tmp_path):
+    original_bytes = b"the untouched original document bytes"
+    files = _packet_files(original_sha256=_sha256(original_bytes))
+    files["original/input.docx"] = original_bytes
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert report.valid, report.to_text()
+    original_check = next(cc for cc in report.cross_checks if cc.name.startswith("original_sha256"))
+    assert original_check.status == "match"
+
+
+def test_tampered_included_original_file_fails(tmp_path):
+    original_bytes = b"the untouched original document bytes"
+    files = _packet_files(original_sha256=_sha256(original_bytes))
+    files["original/input.docx"] = original_bytes + b"tampered"
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid
+    original_check = next(cc for cc in report.cross_checks if cc.name.startswith("original_sha256"))
+    assert original_check.status == "mismatch"
+
+
+# --- top-line wording: legacy VALID/INVALID vs. Release-aware ------------------
+
+
+def test_legacy_packet_with_no_release_id_keeps_valid_invalid_wording(tmp_path):
+    dir_path = _write_dir(tmp_path, _packet_files(release_id=None))
+    report = verifier.verify_release_packet(dir_path)
+    assert report.release_id is None
+    text = report.to_text()
+    assert text.splitlines()[0] == "VALID"
+    assert "INTERNALLY CONSISTENT" not in text
+
+
+def test_release_aware_packet_uses_internally_consistent_wording_not_valid(tmp_path):
+    """PR 39: a packet carrying release_id must never say VALID -- that
+    reads too easily as "verified authentic", which this tool never
+    claims. INTERNALLY CONSISTENT is the honest, narrower claim."""
+    dir_path = _write_dir(tmp_path, _packet_files(release_id="REL1"))
+    report = verifier.verify_release_packet(dir_path)
+    assert report.release_id == "REL1"
+    assert report.valid
+    text = report.to_text()
+    assert text.splitlines()[0] == "INTERNALLY CONSISTENT"
+    assert "VALID" not in text.split("\n\n")[0]  # the top line itself, not e.g. "INVALID" as a substring
+
+
+def test_release_aware_packet_reports_internally_inconsistent_when_invalid(tmp_path):
+    files = _packet_files(release_id="REL1")
+    files["certificate.html"] += b"tampered"
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid
+    assert report.to_text().splitlines()[0] == "INTERNALLY INCONSISTENT"
 
 
 # --- unanchored notice ---------------------------------------------------------
@@ -320,6 +407,117 @@ def test_forbidden_claim_words_never_appear_as_affirmative_claims(tmp_path):
         # was *checked*, not an assertion of trust) is fine and expected.
         assert "this packet is verified" not in text
         assert "packet is verified" not in text
+
+
+# --- verify_release_result(): the refused/failed-release artifact (PR 39) ------
+
+
+def _release_result(
+    *,
+    release_id: str = "REL1",
+    job_id: str = "JOB1",
+    document_id: str = "DOC1",
+    matter_id: str = "MAT1",
+    status: str = "refused",
+    policy_id: str = "external_sharing",
+    reason: str = "plan refused: macro-enabled file",
+    original_sha256: str = "0" * 64,
+    cert_html: bytes = b"<!doctype html><html><body>certificate</body></html>",
+    anchor_type: str = "none",
+) -> dict:
+    return {
+        "spec_version": "1.0",
+        "release_id": release_id,
+        "job_id": job_id,
+        "document_id": document_id,
+        "matter_id": matter_id,
+        "status": status,
+        "policy_id": policy_id,
+        "reason": reason,
+        "original_sha256": original_sha256,
+        "created_at": "2026-08-27T00:00:00+00:00",
+        "finished_at": "2026-08-27T00:00:05+00:00",
+        "audit_refs": {"release_created_seq": 1, "release_terminal_seq": 2},
+        "limitations": [f"job {status}: {reason}"],
+        "certificate_html_sha256": _sha256(cert_html),
+        "generated_at": "2026-08-27T00:00:05+00:00",
+        "anchor": {"type": anchor_type, "digest": None, "reference": None},
+    }
+
+
+def test_release_result_verifies_standalone_with_no_certificate(tmp_path):
+    """The minimum case: just release_result.json on its own, no sibling
+    certificate.html saved next to it -- still verifies, since the
+    certificate is optional to include (fetched separately)."""
+    result_path = tmp_path / "release_result.json"
+    result_path.write_text(json.dumps(_release_result(), indent=2, sort_keys=True))
+    report = verifier.verify_release_result(result_path)
+    assert report.valid, report.to_text()
+    assert report.to_text().splitlines()[0] == "INTERNALLY CONSISTENT"
+    cert_check = next((fc for fc in report.file_checks if fc.name == "certificate.html"), None)
+    assert cert_check.status == "missing"  # informational, not a validity failure
+    assert report.valid
+
+
+def test_release_result_verifies_with_sibling_certificate(tmp_path):
+    cert_html = b"<!doctype html><html><body>refusal certificate</body></html>"
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "release_result.json").write_text(
+        json.dumps(_release_result(cert_html=cert_html), indent=2, sort_keys=True)
+    )
+    (out / "certificate.html").write_bytes(cert_html)
+    report = verifier.verify_release_result(out)
+    assert report.valid, report.to_text()
+    cert_check = next(fc for fc in report.file_checks if fc.name == "certificate.html")
+    assert cert_check.status == "match"
+
+
+def test_release_result_tampered_sibling_certificate_fails(tmp_path):
+    cert_html = b"<!doctype html><html><body>refusal certificate</body></html>"
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "release_result.json").write_text(
+        json.dumps(_release_result(cert_html=cert_html), indent=2, sort_keys=True)
+    )
+    (out / "certificate.html").write_bytes(cert_html + b"tampered")
+    report = verifier.verify_release_result(out)
+    assert not report.valid
+    cert_check = next(fc for fc in report.file_checks if fc.name == "certificate.html")
+    assert cert_check.status == "mismatch"
+
+
+def test_release_result_missing_required_field_fails_schema(tmp_path):
+    result = _release_result()
+    del result["reason"]
+    result_path = tmp_path / "release_result.json"
+    result_path.write_text(json.dumps(result, indent=2, sort_keys=True))
+    report = verifier.verify_release_result(result_path)
+    assert not report.valid
+    assert not report.schema_ok
+    assert any("reason" in e for e in report.errors)
+
+
+def test_release_result_always_reports_not_externally_anchored():
+    text = verifier.ReleaseResultReport(
+        valid=True, schema_ok=True, anchor_type="none",
+    ).to_text()
+    assert "NOT EXTERNALLY ANCHORED" in text
+    assert text.splitlines()[0] == "INTERNALLY CONSISTENT"
+
+
+def test_main_auto_detects_release_result_vs_release_packet(tmp_path, capsys):
+    result_dir = tmp_path / "refused"
+    result_dir.mkdir()
+    (result_dir / "release_result.json").write_text(json.dumps(_release_result(), indent=2, sort_keys=True))
+    rc = verifier.main([str(result_dir)])
+    assert rc == 0
+    assert "INTERNALLY CONSISTENT" in capsys.readouterr().out
+
+    packet_dir = _write_dir(tmp_path / "done", _packet_files(release_id="REL2"))
+    rc = verifier.main([str(packet_dir)])
+    assert rc == 0
+    assert "INTERNALLY CONSISTENT" in capsys.readouterr().out
 
 
 # --- doctrine guard: no engine/app dependency -----------------------------------
