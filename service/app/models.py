@@ -32,6 +32,16 @@ class Matter(Base):
     id: Mapped[str] = mapped_column(String(16), primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(200))
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
+    # PR 45: a matter created by POST /v1/matters/demo-seed for the
+    # evaluation-flow walkthrough. An explicit column, not a name-prefix
+    # convention (name is free text an operator could rename or collide
+    # with) -- the one place this is used today is GET /v1/dashboard,
+    # which excludes is_demo matters from its cross-matter aggregation so
+    # a demo doesn't pollute an operator's real attention/audit totals.
+    # Everywhere else (list_matters, matter view, audit) treats a demo
+    # matter exactly like any other -- it's real data in the same tables,
+    # just clearly labeled, never hidden from the person who created it.
+    is_demo: Mapped[bool] = mapped_column(default=False)
 
 
 class Document(Base):

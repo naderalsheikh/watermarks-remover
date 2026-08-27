@@ -631,6 +631,201 @@ RECIPIENT_TYPE_LABEL = {
     "other": "Other",
 }
 
+# --- PR 45: evaluation-flow demo fixtures --------------------------------
+#
+# Baked in here rather than read from tests/fixtures/legal/, the same way
+# tools/seed_eval_matter.py already deliberately builds its own fixture
+# inline: production images don't ship the tests/ tree (service/Dockerfile
+# .counselclear only COPYs scripts/ and app/), so a runtime route can't
+# depend on it existing on disk. The byte structure mirrors
+# tests/fixtures/legal/generate.py's spa.docx/macro.docm/hidden.xlsx
+# exactly (same clauses, same tracked-change/comment/header shape, same
+# hidden-sheet/external-link/comment shape) -- those are the real,
+# already-regression-tested fixtures this mirrors, not a fresh invention.
+_DEMO_W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+_DEMO_SPA_CLAUSES = [
+    "1. The Seller shall deliver the Shares on Closing.",
+    "2. The Buyer shall pay the Consideration under Section 8.3.",
+    "3. This Agreement is governed by the laws of Delaware.",
+]
+_DEMO_SPA_DELETED = "4. DELETED CLAUSE about the side payment."
+_DEMO_SPA_INSERTED = "4. The Parties shall keep these terms confidential."
+
+
+def _demo_docx_bytes(parts: dict[str, str]) -> bytes:
+    def decl(root: str, inner: str) -> str:
+        return f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><{root} {_DEMO_W_NS}>{inner}</{root}>'
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        ct = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/>"
+            "<Override PartName='/word/comments.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml'/>"
+            "<Override PartName='/docProps/core.xml' ContentType='application/vnd.openxmlformats-package.core-properties+xml'/>"
+            "<Override PartName='/docProps/app.xml' ContentType='application/vnd.openxmlformats-officedocument.extended-properties+xml'/>"
+            "</Types>"
+        )
+        zf.writestr("[Content_Types].xml", ct)
+        zf.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
+            "</Relationships>",
+        )
+        zf.writestr(
+            "docProps/core.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            "<dc:title>Sample Stock Purchase Agreement</dc:title>"
+            "<dc:subject>Evaluation Sample</dc:subject>"
+            "<dc:creator>Sample Associate</dc:creator>"
+            "<cp:lastModifiedBy>Sample Associate</cp:lastModifiedBy>"
+            "<cp:keywords>sample, evaluation</cp:keywords>"
+            "</cp:coreProperties>",
+        )
+        zf.writestr(
+            "docProps/app.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+            'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            "<Application>Microsoft Office Word</Application>"
+            "<Company>Sample Firm LLP</Company>"
+            "<Manager>Sample Manager</Manager>"
+            "</Properties>",
+        )
+        zf.writestr(
+            "word/_rels/document.xml.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>'
+            "</Relationships>",
+        )
+        for name, xml in parts.items():
+            if name == "word/document.xml":
+                zf.writestr(name, decl("w:document", f"<w:body>{xml}</w:body>"))
+            else:
+                zf.writestr(name, decl(name.split("/")[-1].split(".")[0].capitalize(), xml))
+    return buf.getvalue()
+
+
+def _demo_xlsx_bytes(parts: dict[str, str], sheets_xml: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        ct = (
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            "</Types>"
+        )
+        zf.writestr("[Content_Types].xml", ct)
+        rels = (
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rIdX" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>'
+            "</Relationships>"
+        )
+        zf.writestr("xl/_rels/workbook.xml.rels", rels)
+        zf.writestr(
+            "xl/workbook.xml",
+            '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f"<sheets>{sheets_xml}</sheets>"
+            '<externalReferences><externalReference r:id="rIdX"/></externalReferences></workbook>',
+        )
+        for name, xml in parts.items():
+            zf.writestr(name, xml)
+    return buf.getvalue()
+
+
+def _demo_fixture_spa_docx() -> bytes:
+    """Tracked-change insertion/deletion, a comment, and a hidden (w:vanish)
+    "ATTORNEY WORK PRODUCT" paragraph -- under counterparty_deal_room/
+    external_sharing the comment strips and tracked changes get
+    Accept-All'd, but hidden_text is flag-only (policies.py) so the vanish
+    text survives, listed under "What was found" but never "Actions
+    taken". One document, both behaviors. (A bare word/header1.xml part
+    was tried first and dropped: this engine's own docx inspector doesn't
+    generate a finding for header/footer part presence by itself --
+    confirmed against tests/fixtures/legal/golden/spa.docx.json, which has
+    no headers_footers finding either -- so it demonstrated nothing.)"""
+    body_parts = [f"<w:p><w:r><w:t>{clause}</w:t></w:r></w:p>" for clause in _DEMO_SPA_CLAUSES]
+    body_parts.append(
+        f"<w:p><w:ins><w:r><w:t>{_DEMO_SPA_INSERTED}</w:t></w:r></w:ins>"
+        f"<w:del><w:r><w:delText>{_DEMO_SPA_DELETED}</w:delText></w:r></w:del></w:p>"
+    )
+    body_parts.append(
+        "<w:p><w:r><w:t>Consideration</w:t></w:r>"
+        "<w:commentRangeStart/><w:r><w:t>amounts</w:t></w:r><w:commentRangeEnd/>"
+        "<w:r><w:commentReference/></w:r><w:r><w:t> are final.</w:t></w:r></w:p>"
+    )
+    body_parts.append(
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr>"
+        "<w:t>ATTORNEY WORK PRODUCT — PRIVILEGED AND CONFIDENTIAL</w:t></w:r></w:p>"
+    )
+    return _demo_docx_bytes(
+        {
+            "word/document.xml": "".join(body_parts),
+            "word/comments.xml": "<w:comment/>",
+        }
+    )
+
+
+def _demo_fixture_macro_docm() -> bytes:
+    """A .docm carrying a VBA project -- macros_vba is refused
+    unconditionally by every mutating policy (policies.py), so this hits a
+    deterministic release refusal with no attestation ambiguity."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        )
+        zf.writestr(
+            "word/document.xml",
+            f'<?xml version="1.0"?><w:document {_DEMO_W_NS}><w:body><w:p/></w:body></w:document>',
+        )
+        zf.writestr("word/vbaProject.bin", b"\xd0\xcf\x11\xe0VBA-STUB")
+    return buf.getvalue()
+
+
+def _demo_fixture_hidden_xlsx() -> bytes:
+    """A hidden sheet alongside a visible one, plus a comment and an
+    external link. Under counterparty_deal_room/external_sharing the
+    comment and external link strip, but hidden_structure is flag-only
+    (Key Decision 5) -- the release still succeeds, with a real, visible
+    limitation recorded rather than silently stripped or ignored."""
+    return _demo_xlsx_bytes(
+        {
+            "xl/worksheets/sheet1.xml": (
+                '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
+            ),
+            "xl/comments1.xml": '<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><comment ref="A1"/></comments>',
+            "xl/persons/person1.xml": '<persons xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person/></persons>',
+            "xl/externalLinks/externalLink1.xml": '<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>',
+        },
+        sheets_xml=(
+            '<sheet name="Deal" sheetId="1" r:id="rId1"/>'
+            '<sheet name="SideTerms" sheetId="2" state="hidden" r:id="rId2"/>'
+        ),
+    )
+
+
+# filename -> (fixture builder, release profile) for POST .../demo-seed.
+# One profile (counterparty_deal_room) for all three so the walkthrough is
+# "one profile, three real outcomes" rather than requiring the evaluator
+# to also reason about profile choice.
+_DEMO_SEED_DOCUMENTS = (
+    ("Sample - Stock Purchase Agreement.docx", _demo_fixture_spa_docx),
+    ("Sample - Macro-Enabled Draft.docm", _demo_fixture_macro_docm),
+    ("Sample - Deal Terms Workbook.xlsx", _demo_fixture_hidden_xlsx),
+)
+_DEMO_MATTER_NAME = "Sample Matter — Release Gate Walkthrough"
+
 
 class LoginBody(BaseModel):
     password: str
@@ -1137,8 +1332,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         """Public, unauthenticated: tells the login page which flow to
         render. The static-export web UI has no server at request time to
         read an env var from, so this is the one thing it fetches before
-        a session exists. No secrets — just the OIDC on/off bit."""
-        return {"oidc_enabled": cfg.oidc_enabled}
+        a session exists. No secrets — just the OIDC on/off bit.
+
+        PR 45: demo_seed_enabled rides along the same way -- the matters
+        page needs to know, before showing the "Load sample matter"
+        button, whether POST .../demo-seed will actually work. It's the
+        same bit as oidc_enabled's negation (see that route's own gate),
+        not a second secret; exposing it costs nothing an unauthenticated
+        caller couldn't already infer from oidc_enabled itself.
+        """
+        return {"oidc_enabled": cfg.oidc_enabled, "demo_seed_enabled": not cfg.oidc_enabled}
 
     @app.get("/v1/auth/me")
     def auth_me(user: str = Depends(principal)):
@@ -1393,17 +1596,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     # --- documents ----------------------------------------------------------
 
-    @app.post("/v1/matters/{matter_id}/documents")
-    async def upload_document(
-        matter_id: str,
-        file: UploadFile = File(...),
-        user: str = Depends(principal),
-        s: Session = Depends(db_session),
-    ):
-        _require(matter_id, "upload", s, user)
-        _matter(matter_id, s)
-        data = await _read_capped(file)
-        name = Path(file.filename or "upload").name
+    def _upload_document_bytes(matter_id: str, filename: str, data: bytes, user: str, s: Session) -> Document:
+        """Shared body of upload_document, taking already-read bytes rather
+        than an UploadFile -- lets a non-HTTP caller (POST .../demo-seed,
+        PR 45) create a real Document through the exact same scan/storage/
+        audit path a browser upload uses, instead of a second, divergent
+        implementation."""
+        name = Path(filename or "upload").name
         verdict = get_scanner().scan(data, name)
         if not verdict.clean:
             raise HTTPException(422, f"malware scanner flagged upload ({verdict.scanner})")
@@ -1434,6 +1633,19 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
         )
         s.commit()
+        return doc
+
+    @app.post("/v1/matters/{matter_id}/documents")
+    async def upload_document(
+        matter_id: str,
+        file: UploadFile = File(...),
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        _require(matter_id, "upload", s, user)
+        _matter(matter_id, s)
+        data = await _read_capped(file)
+        doc = _upload_document_bytes(matter_id, file.filename or "upload", data, user, s)
         return _doc_dict(doc)
 
     @app.get("/v1/matters/{matter_id}/documents")
@@ -1852,6 +2064,64 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         job_out = _job_dict(finished, release_id=release.id, profile_id=release.profile_id)
         return {"release": _release_dict(release), "job": job_out, "release_result": release_result}
 
+    @app.post("/v1/matters/demo-seed")
+    def demo_seed_matter(user: str = Depends(principal), s: Session = Depends(db_session)):
+        """Evaluation-flow walkthrough (PR 45): creates or reuses one demo
+        matter carrying three real fixtures, and runs a real release on
+        each one whenever it hasn't already -- through the exact same
+        _upload_document_bytes/create_release path a human clicking
+        through the UI uses, not a mock or a special-cased demo pipeline.
+        Idempotent by filename/document the same way tools/seed_eval_
+        matter.py already is: a repeat click reuses the matter and skips
+        whatever's already there rather than piling up duplicates.
+
+        Local-password mode only. A multi-tenant OIDC deployment has no
+        single "the operator" to hand a shared sample matter to, and this
+        route deliberately bypasses the ordinary upload-form friction --
+        not a posture to expose on a production multi-tenant instance.
+        See auth_config's demo_seed_enabled, the same bit the frontend
+        checks before ever showing the button.
+        """
+        if cfg.oidc_enabled:
+            raise HTTPException(403, "sample-matter seeding is only available in local-password mode")
+
+        matter = s.query(Matter).filter_by(name=_DEMO_MATTER_NAME, is_demo=True).first()
+        if matter is None:
+            matter = Matter(name=_DEMO_MATTER_NAME, is_demo=True)
+            s.add(matter)
+            s.flush()
+            bootstrap_operator(s, matter.id, user_id=user)
+            append_event(
+                s,
+                matter_id=matter.id,
+                actor_id=user,
+                action="matter.create",
+                payload={"name": _DEMO_MATTER_NAME, "is_demo": True},
+            )
+            s.commit()
+
+        existing_docs = {d.filename: d for d in s.query(Document).filter_by(matter_id=matter.id).all()}
+        released_doc_ids = {
+            r[0] for r in s.query(Release.document_id).filter_by(matter_id=matter.id).all()
+        }
+
+        for filename, build_fixture in _DEMO_SEED_DOCUMENTS:
+            doc = existing_docs.get(filename)
+            if doc is None:
+                doc = _upload_document_bytes(matter.id, filename, build_fixture(), user, s)
+            if doc.id not in released_doc_ids:
+                release_body = ReleaseBody(
+                    profile_id="counterparty_deal_room",
+                    recipient_type="opposing_counsel",
+                    recipient_name="Sample Counterparty",
+                    purpose="Release Gate evaluation walkthrough",
+                    intended_external=True,
+                    reason="demo seed",
+                )
+                create_release(matter.id, doc.id, release_body, user=user, s=s)
+
+        return _matter_dict(matter, perms_of(s, matter.id, user))
+
     @app.get("/v1/matters/{matter_id}/releases/{release_id}")
     def get_release(
         matter_id: str,
@@ -1893,7 +2163,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             s, matter=matter, release=release, job=job, doc=doc, audit_refs=audit_refs
         )
         body = json.dumps(release_result, indent=2, sort_keys=True)
-        return Response(content=body, media_type="application/json")
+        # PR 45: named explicitly so a browser "Save As" (or the `target=
+        # "_blank"` link's own save) lands on disk as exactly
+        # release_result.json -- the literal filename
+        # tools/counselclear_verify_release_packet.py's own auto-detection
+        # requires (main()'s is_result check). Without this header the
+        # saved name was whatever the browser inferred from the URL's last
+        # path segment ("result"), which the verifier doesn't recognize --
+        # the documented "download it and run the verifier on it" flow
+        # didn't actually work before this.
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="release_result.json"'},
+        )
 
     def _release_event_seq(s: Session, matter_id: str, release_id: str, action: str) -> int | None:
         ev = (
@@ -2963,6 +3246,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             r[0]
             for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
         ]
+        if matter_ids:
+            # PR 45: a demo-seeded matter is real, fully functional data --
+            # visible everywhere else (list_matters, matter view, audit) --
+            # but it shouldn't inflate an operator's cross-matter attention/
+            # activity totals here. Filtering matter_ids once, at the top,
+            # means every query below (totals, attention, recent) that
+            # already keys off this list is excluded for free, with no
+            # second exclusion to keep in sync.
+            demo_ids = {
+                r[0]
+                for r in s.query(Matter.id).filter(Matter.id.in_(matter_ids), Matter.is_demo.is_(True))
+            }
+            if demo_ids:
+                matter_ids = [m for m in matter_ids if m not in demo_ids]
         empty = {
             "totals": {
                 "matters": 0,
@@ -3212,7 +3509,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         return r
 
     def _matter_dict(m: Matter, perms: list[str] | None = None) -> dict:
-        d: dict = {"id": m.id, "name": m.name, "created_utc": m.created_utc}
+        d: dict = {"id": m.id, "name": m.name, "created_utc": m.created_utc, "is_demo": m.is_demo}
         # perms is the calling principal's OWN grants on this matter --
         # only computed by routes that already know who's asking (get_matter,
         # create_matter), not list_matters (would be an N+1 query per row

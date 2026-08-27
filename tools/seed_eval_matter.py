@@ -1,33 +1,47 @@
 #!/usr/bin/env python3
-"""Seed a CounselClear instance with a demo matter for evaluation.
+"""Seed a CounselClear instance with a demo matter for evaluation (Release-native).
 
-Creates (or reuses) a matter, uploads a synthetic PDF fixture carrying
-embedded-image EXIF metadata inside a JPEG XObject, and optionally triggers
-inspect + sanitize jobs so a reviewer lands on populated results instead of
-an empty matter. The sanitize job's manifest shows the "embedded-image
-metadata removed" notice, proving the byte-preserving strip ran for real
-against a live pipeline, not a mock.
+Creates (or reuses) a matter and, for each of three synthetic legal-document
+fixtures, uploads it and prepares a release under the counterparty_deal_room
+profile -- through POST .../documents/{doc_id}/releases, the same
+Release-first route the web UI's "Prepare Release Packet" button and the
+Airlock CLI's Client.release() both use. This deliberately does NOT use the
+legacy POST .../sanitize-jobs route: seeding through it would demo a product
+the UI no longer leads with.
 
-This deliberately does NOT try to also demo the indirect-/Length "not
-cleared" notice: an indirect `/Length N G R` image XObject is the one shape
-strip_pdf_image_metadata skips rather than guesses at, but in this
-deployment (qpdf + exiftool both present) that state is not reachable
-through a real sanitize job. qpdf's own structural rewrite -- which runs
-before the deep-image strip in clean_pdf's exiftool branch, and which
-external_sharing/production hard-require to succeed -- normalizes indirect
-/Length references to direct integers as a side effect, so there is never
-an indirect reference left by the time the strip step runs. That nuance is
-verified and documented in docs/pdf-deep-image-metadata.md ("A precise,
-verified nuance on the indirect-`/Length` skip's reachability") and covered
-by a direct unit test (test_clean_pdf_reports_indirect_length_images_honestly
-in tests/test_pdf_deep_images.py) that calls clean_pdf directly rather than
-through the HTTP API. Seeding a fixture here that claimed to reproduce it
-through this script would misrepresent what the product actually does.
+The three fixtures are chosen to show three real outcomes under one profile,
+not three different policies to also explain:
+
+  - spa.docx    -- a done release. Tracked changes get Accept-All'd and a
+                   comment strips; a hidden (w:vanish) "ATTORNEY WORK
+                   PRODUCT" paragraph survives flagged (not stripped) --
+                   one document, both behaviors.
+  - macro.docm  -- a refused release. macros_vba is refused unconditionally
+                   by this policy (service/scripts/policies.py) -- no
+                   attestation ambiguity, no flaky outcome.
+  - hidden.xlsx -- a done release with a visible kept/limited finding. A
+                   comment and an external link strip; a hidden sheet is
+                   flag-only under this policy and survives, listed under
+                   "What was found" but not "Actions taken" on the job page.
+
+No Layer B / watermark-rewrite sample is included here on purpose: that
+capability is gated, off by default, and never the product this walkthrough
+is meant to demonstrate (docs/COUNSELCLEAR_DESIGN.md, docs/COUNSELCLEAR_
+ASSET_MAP.md §4).
+
+Fixture bytes are baked in here, not read from tests/fixtures/legal/: this
+script has no test-suite dependency (production images don't ship tests/
+either -- service/Dockerfile.counselclear only COPYs scripts/ and app/), the
+same reasoning the prior version of this script already followed for its own
+inline fixture. The byte structure mirrors tests/fixtures/legal/generate.py's
+spa.docx/macro.docm/hidden.xlsx exactly -- those are the real, already
+regression-tested fixtures this reproduces, not a fresh invention.
 
 Talks to a running instance over its real HTTP API (cookie session login,
 multipart upload) -- no direct DB/filesystem access, so this exercises the
-same path a reviewer's browser does. Idempotent: reruns reuse the matter and
-skip documents that are already uploaded by filename.
+same path a reviewer's browser does. Idempotent: reruns reuse the matter,
+skip documents already uploaded by filename, and skip releasing a document
+that already has one.
 
 Usage:
     COUNSELCLEAR_LOCAL_PASSWORD=evalpass123 \\
@@ -37,96 +51,181 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import base64
 import http.cookiejar
+import io
 import json
 import mimetypes
 import os
-import struct
-import time
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 
-# A real, valid, tiny (4x4 RGB) JPEG -- same fixture used in
-# tests/test_pdf_deep_images.py, baked in here so this script has no test
-# suite or image-library dependency.
-_REAL_JPEG = base64.b64decode(
-    "/9j/4AAQSkZJRgABAQEASABIAAD/4gogSUNDX1BST0ZJTEUAAQEAAAoQAAAAAAIQAABt"
-    "bnRyUkdCIFhZWiAAAAAAAAAAAAAAAABhY3NwQVBQTAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAApkZXNjAAAA/AAAAHxjcHJ0"
-    "AAABeAAAACh3dHB0AAABoAAAABRia3B0AAABtAAAABRyWFlaAAAByAAAABRnWFlaAAAB"
-    "3AAAABRiWFlaAAAB8AAAABRyVFJDAAACBAAACAxnVFJDAAACBAAACAxiVFJDAAACBAAA"
-    "CAxkZXNjAAAAAAAAACJBcnRpZmV4IFNvZnR3YXJlIHNSR0IgSUNDIFByb2ZpbGUAAAAA"
-    "AAAAAAAAACJBcnRpZmV4IFNvZnR3YXJlIHNSR0IgSUNDIFByb2ZpbGUAAAAAAAAAAAAA"
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdGV4dAAAAABDb3B5cmlnaHQgQXJ0aWZl"
-    "eCBTb2Z0d2FyZSAyMDExAFhZWiAAAAAAAADzUQABAAAAARbMWFlaIAAAAAAAAAAAAAAA"
-    "AAAAAABYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAA"
-    "AAAAACSgAAAPhAAAts9jdXJ2AAAAAAAABAAAAAAFAAoADwAUABkAHgAjACgALQAyADcA"
-    "OwBAAEUASgBPAFQAWQBeAGMAaABtAHIAdwB8AIEAhgCLAJAAlQCaAJ8ApACpAK4AsgC3"
-    "ALwAwQDGAMsA0ADVANsA4ADlAOsA8AD2APsBAQEHAQ0BEwEZAR8BJQErATIBOAE+AUUB"
-    "TAFSAVkBYAFnAW4BdQF8AYMBiwGSAZoBoQGpAbEBuQHBAckB0QHZAeEB6QHyAfoCAwIM"
-    "AhQCHQImAi8COAJBAksCVAJdAmcCcQJ6AoQCjgKYAqICrAK2AsECywLVAuAC6wL1AwAD"
-    "CwMWAyEDLQM4A0MDTwNaA2YDcgN+A4oDlgOiA64DugPHA9MD4APsA/kEBgQTBCAELQQ7"
-    "BEgEVQRjBHEEfgSMBJoEqAS2BMQE0wThBPAE/gUNBRwFKwU6BUkFWAVnBXcFhgWWBaYF"
-    "tQXFBdUF5QX2BgYGFgYnBjcGSAZZBmoGewaMBp0GrwbABtEG4wb1BwcHGQcrBz0HTwdh"
-    "B3QHhgeZB6wHvwfSB+UH+AgLCB8IMghGCFoIbgiCCJYIqgi+CNII5wj7CRAJJQk6CU8J"
-    "ZAl5CY8JpAm6Cc8J5Qn7ChEKJwo9ClQKagqBCpgKrgrFCtwK8wsLCyILOQtRC2kLgAuY"
-    "C7ALyAvhC/kMEgwqDEMMXAx1DI4MpwzADNkM8w0NDSYNQA1aDXQNjg2pDcMN3g34DhMO"
-    "Lg5JDmQOfw6bDrYO0g7uDwkPJQ9BD14Peg+WD7MPzw/sEAkQJhBDEGEQfhCbELkQ1xD1"
-    "ERMRMRFPEW0RjBGqEckR6BIHEiYSRRJkEoQSoxLDEuMTAxMjE0MTYxODE6QTxRPlFAYU"
-    "JxRJFGoUixStFM4U8BUSFTQVVhV4FZsVvRXgFgMWJhZJFmwWjxayFtYW+hcdF0EXZReJ"
-    "F64X0hf3GBsYQBhlGIoYrxjVGPoZIBlFGWsZkRm3Gd0aBBoqGlEadxqeGsUa7BsUGzsb"
-    "Yxsg"
-)
+W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+SPA_CLAUSES = [
+    "1. The Seller shall deliver the Shares on Closing.",
+    "2. The Buyer shall pay the Consideration under Section 8.3.",
+    "3. This Agreement is governed by the laws of Delaware.",
+]
+SPA_DELETED = "4. DELETED CLAUSE about the side payment."
+SPA_INSERTED = "4. The Parties shall keep these terms confidential."
 
 
-def _jpeg_appn(marker: int, payload: bytes) -> bytes:
-    return bytes([0xFF, marker]) + struct.pack(">H", len(payload) + 2) + payload
+def _docx_bytes(parts: dict[str, str]) -> bytes:
+    def decl(root: str, inner: str) -> str:
+        return f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><{root} {W_NS}>{inner}</{root}>'
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        ct = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/>"
+            "<Override PartName='/word/comments.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml'/>"
+            "<Override PartName='/docProps/core.xml' ContentType='application/vnd.openxmlformats-package.core-properties+xml'/>"
+            "<Override PartName='/docProps/app.xml' ContentType='application/vnd.openxmlformats-officedocument.extended-properties+xml'/>"
+            "</Types>"
+        )
+        zf.writestr("[Content_Types].xml", ct)
+        zf.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
+            "</Relationships>",
+        )
+        zf.writestr(
+            "docProps/core.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            "<dc:title>Sample Stock Purchase Agreement</dc:title>"
+            "<dc:subject>Evaluation Sample</dc:subject>"
+            "<dc:creator>Sample Associate</dc:creator>"
+            "<cp:lastModifiedBy>Sample Associate</cp:lastModifiedBy>"
+            "<cp:keywords>sample, evaluation</cp:keywords>"
+            "</cp:coreProperties>",
+        )
+        zf.writestr(
+            "docProps/app.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+            'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            "<Application>Microsoft Office Word</Application>"
+            "<Company>Sample Firm LLP</Company>"
+            "<Manager>Sample Manager</Manager>"
+            "</Properties>",
+        )
+        zf.writestr(
+            "word/_rels/document.xml.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>'
+            "</Relationships>",
+        )
+        for name, xml in parts.items():
+            if name == "word/document.xml":
+                zf.writestr(name, decl("w:document", f"<w:body>{xml}</w:body>"))
+            else:
+                zf.writestr(name, decl(name.split("/")[-1].split(".")[0].capitalize(), xml))
+    return buf.getvalue()
 
 
-def _with_exif(jpeg: bytes) -> bytes:
-    """Insert a fake EXIF APP1 segment (camera + GPS-shaped strings) right
-    after SOI, before the real JPEG's own JFIF/ICC segments."""
-    payload = b"Exif\x00\x00" + b"FakeCam Model X, GPS 37.7749N 122.4194W"
-    return jpeg[:2] + _jpeg_appn(0xE1, payload) + jpeg[2:]
+def _xlsx_bytes(parts: dict[str, str], sheets_xml: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        ct = (
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            "</Types>"
+        )
+        zf.writestr("[Content_Types].xml", ct)
+        rels = (
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rIdX" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>'
+            "</Relationships>"
+        )
+        zf.writestr("xl/_rels/workbook.xml.rels", rels)
+        zf.writestr(
+            "xl/workbook.xml",
+            '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f"<sheets>{sheets_xml}</sheets>"
+            '<externalReferences><externalReference r:id="rIdX"/></externalReferences></workbook>',
+        )
+        for name, xml in parts.items():
+            zf.writestr(name, xml)
+    return buf.getvalue()
 
 
-def _pdf_with_image_xobject(jpeg: bytes) -> bytes:
-    """One-page PDF whose page resources hold a single JPEG (DCTDecode)
-    image XObject with a direct /Length, mirroring the fixture builder in
-    tests/test_pdf_deep_images.py."""
-    w = h = 4
-    content = b"q 200 0 0 200 0 0 cm /Im0 Do Q"
-    objs = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
-        b"/Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
-        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
-        b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
-        b"/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode "
-        b"/Length %d >>\nstream\n" % (w, h, len(jpeg)) + jpeg + b"\nendstream",
-    ]
-    out = bytearray(b"%PDF-1.4\n")
-    offsets = []
-    for i, body in enumerate(objs, start=1):
-        offsets.append(len(out))
-        out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
-    xref = len(out)
-    out += b"xref\n0 %d\n" % (len(objs) + 1)
-    out += b"0000000000 65535 f \n"
-    for off in offsets:
-        out += b"%010d 00000 n \n" % off
-    out += b"trailer\n<< /Size %d /Root 1 0 R >>\n" % (len(objs) + 1)
-    out += b"startxref\n%d\n%%%%EOF\n" % xref
-    return bytes(out)
+def _fixture_spa_docx() -> bytes:
+    """Comment strips, tracked changes get Accept-All'd, and a hidden
+    (w:vanish) paragraph survives flagged -- hidden_text is flag-only
+    under this policy (service/scripts/policies.py). One document, both
+    behaviors."""
+    body_parts = [f"<w:p><w:r><w:t>{clause}</w:t></w:r></w:p>" for clause in SPA_CLAUSES]
+    body_parts.append(
+        f"<w:p><w:ins><w:r><w:t>{SPA_INSERTED}</w:t></w:r></w:ins>"
+        f"<w:del><w:r><w:delText>{SPA_DELETED}</w:delText></w:r></w:del></w:p>"
+    )
+    body_parts.append(
+        "<w:p><w:r><w:t>Consideration</w:t></w:r>"
+        "<w:commentRangeStart/><w:r><w:t>amounts</w:t></w:r><w:commentRangeEnd/>"
+        "<w:r><w:commentReference/></w:r><w:r><w:t> are final.</w:t></w:r></w:p>"
+    )
+    body_parts.append(
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr>"
+        "<w:t>ATTORNEY WORK PRODUCT — PRIVILEGED AND CONFIDENTIAL</w:t></w:r></w:p>"
+    )
+    return _docx_bytes(
+        {
+            "word/document.xml": "".join(body_parts),
+            "word/comments.xml": "<w:comment/>",
+        }
+    )
+
+
+def _fixture_macro_docm() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        )
+        zf.writestr(
+            "word/document.xml",
+            f'<?xml version="1.0"?><w:document {W_NS}><w:body><w:p/></w:body></w:document>',
+        )
+        zf.writestr("word/vbaProject.bin", b"\xd0\xcf\x11\xe0VBA-STUB")
+    return buf.getvalue()
+
+
+def _fixture_hidden_xlsx() -> bytes:
+    return _xlsx_bytes(
+        {
+            "xl/worksheets/sheet1.xml": (
+                '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
+            ),
+            "xl/comments1.xml": '<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><comment ref="A1"/></comments>',
+            "xl/persons/person1.xml": '<persons xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person/></persons>',
+            "xl/externalLinks/externalLink1.xml": '<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>',
+        },
+        sheets_xml=(
+            '<sheet name="Deal" sheetId="1" r:id="rId1"/>'
+            '<sheet name="SideTerms" sheetId="2" state="hidden" r:id="rId2"/>'
+        ),
+    )
 
 
 def _demo_fixtures() -> dict[str, bytes]:
-    exif_jpeg = _with_exif(_REAL_JPEG)
     return {
-        "demo_photo_exif.pdf": _pdf_with_image_xobject(exif_jpeg),
+        "Sample - Stock Purchase Agreement.docx": _fixture_spa_docx(),
+        "Sample - Macro-Enabled Draft.docm": _fixture_macro_docm(),
+        "Sample - Deal Terms Workbook.xlsx": _fixture_hidden_xlsx(),
     }
 
 
@@ -195,24 +294,15 @@ class Client:
             raise SystemExit(f"upload {filename} failed ({status}): {body}")
         return body
 
-    def wait_for_job(self, matter_id: str, job_id: str, *, timeout_s: float = 30.0):
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            job = self.get_json(f"/v1/matters/{matter_id}/jobs/{job_id}")
-            if job["status"] in ("done", "failed"):
-                return job
-            time.sleep(0.5)
-        raise SystemExit(f"job {job_id} did not finish within {timeout_s}s")
-
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default=os.environ.get("COUNSELCLEAR_API_URL", "http://127.0.0.1:8443"))
     ap.add_argument("--web-url", default=os.environ.get("COUNSELCLEAR_WEB_URL", "http://localhost:3000"))
     ap.add_argument("--password", default=os.environ.get("COUNSELCLEAR_LOCAL_PASSWORD"))
-    ap.add_argument("--matter-name", default="PDF Embedded-Image Metadata Demo")
-    ap.add_argument("--policy", default="external_sharing")
-    ap.add_argument("--no-jobs", action="store_true", help="upload documents only, skip inspect/sanitize")
+    ap.add_argument("--matter-name", default="Sample Matter — Release Gate Walkthrough (CLI)")
+    ap.add_argument("--profile", default="counterparty_deal_room")
+    ap.add_argument("--no-releases", action="store_true", help="upload documents only, skip preparing releases")
     args = ap.parse_args()
 
     if not args.password:
@@ -243,20 +333,33 @@ def main() -> None:
         doc_ids.append(doc["id"])
         print(f"  uploaded {filename} ({doc['bytes']} bytes, sha256:{doc['sha256'][:16]}…)")
 
-    if not args.no_jobs:
+    if not args.no_releases:
+        existing_releases = {
+            j["document_id"]
+            for j in client.get_json(f"/v1/matters/{matter_id}/jobs")["jobs"]
+            if j.get("release_id")
+        }
         for doc_id in doc_ids:
-            inspect_job = client.post_json(f"/v1/matters/{matter_id}/documents/{doc_id}/inspect-jobs", {})
-            client.wait_for_job(matter_id, inspect_job["id"])
-            print(f"  inspect job {inspect_job['id']} done for {doc_id}")
-
-            sanitize_job = client.post_json(
-                f"/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs",
-                {"policy_id": args.policy, "reason": "eval seed", "signature_break_attestation": True},
+            if doc_id in existing_releases:
+                print(f"  release already prepared for document {doc_id}")
+                continue
+            result = client.post_json(
+                f"/v1/matters/{matter_id}/documents/{doc_id}/releases",
+                {
+                    "profile_id": args.profile,
+                    "recipient_type": "opposing_counsel",
+                    "recipient_name": "Sample Counterparty",
+                    "purpose": "Release Gate evaluation walkthrough",
+                    "intended_external": True,
+                    "reason": "eval seed",
+                },
             )
-            client.wait_for_job(matter_id, sanitize_job["id"])
-            print(f"  sanitize job {sanitize_job['id']} done for {doc_id}")
+            release = result["release"]
+            print(f"  release {release['id']} for document {doc_id}: {release['status']}")
 
     print(f"\nOpen: {args.web_url}/matters/view?id={matter_id}")
+    print("Then: download a release result/packet from the job page and verify it offline with")
+    print("  python3 tools/counselclear_verify_release_packet.py <downloaded-file-or-folder>")
 
 
 if __name__ == "__main__":

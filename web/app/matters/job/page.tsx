@@ -265,6 +265,14 @@ function SanitizeManifestView({ manifest }: { manifest: Manifest }) {
       {manifest.findings_before.length > 0 && (
         <div>
           <h3 className="mb-2 text-sm font-medium">What was found</h3>
+          {/* PR 45: the policy that governs a finding it doesn't strip
+              (flag/keep/approve) is a real, deliberate product distinction
+              -- not a gap. Made explicit here rather than left for a
+              reader to infer by diffing this list against Actions taken. */}
+          <p className="mb-2 text-xs text-muted">
+            Everything the policy checked for. An item listed here that doesn&apos;t reappear
+            under Actions taken below was flagged for review or kept as-is, not silently missed.
+          </p>
           <ul className="list-inside list-disc space-y-1 text-sm text-muted">
             {manifest.findings_before.map((f, i) => (
               <li key={i}>{f}</li>
@@ -570,6 +578,20 @@ function JobView({
                       Download release result (JSON)
                     </a>
                   </p>
+                  {/* PR 45: this block renders for every terminal outcome
+                      (done, refused, failed) -- release_result.json alone
+                      is enough for the offline verifier to check, so this
+                      is the one place that covers all three, rather than
+                      only the done-packet section below. A command, not
+                      just a name -- "the tool exists" wasn't discoverable
+                      before this pass. */}
+                  <p className="mt-2 text-xs text-muted">
+                    Verify this file offline, independent of this system&apos;s own UI:
+                    <br />
+                    <code className="mt-1 block rounded bg-black/[0.04] px-2 py-1 font-mono dark:bg-white/[0.06]">
+                      python3 tools/counselclear_verify_release_packet.py &lt;downloaded-file-or-folder&gt;
+                    </code>
+                  </p>
                 </div>
               )}
               {job.status === "failed" && job.error && (
@@ -579,10 +601,13 @@ function JobView({
               )}
               {job.status === "refused" && (
                 <div className="mt-3 rounded-md border border-orange-600/30 bg-orange-600/5 px-4 py-3 text-sm text-orange-800 dark:text-orange-300">
-                  <p className="font-medium">Refused — no derivative was produced.</p>
+                  {/* PR 45: same underlying fact, framed so a first-time
+                      reader recognizes this as the gate doing its job --
+                      not an application error to troubleshoot. */}
+                  <p className="font-medium">Refused by policy — this is expected, not an error.</p>
                   <p className="mt-1">
-                    The policy declined to sanitize this document rather than ship an
-                    incomplete or unsafe result.
+                    The selected policy declined to produce a derivative for this document
+                    rather than ship an incomplete or unsafe result.
                     {job.error ? ` ${job.error}` : ""}
                   </p>
                 </div>

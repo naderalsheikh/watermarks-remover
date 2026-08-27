@@ -2,17 +2,40 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { useApiData } from "@/lib/useApi";
 import { usePaginatedList } from "@/lib/usePaginatedList";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
-import type { Matter } from "@/lib/types";
+import type { AuthConfig, Matter } from "@/lib/types";
 import { Header } from "@/components/Header";
 
 const PAGE_SIZE = 50;
 
 export default function MattersPage() {
+  const router = useRouter();
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebouncedValue(search.trim(), 300);
+  // PR 45: gates the "Load sample matter" button on the same bit the
+  // backend route itself enforces (local-password mode only) -- fetched
+  // fresh here rather than assumed, so the button simply doesn't render
+  // on an OIDC deployment instead of rendering and then 403ing.
+  const authConfigQ = useApiData(() => api.get<AuthConfig>("/v1/auth/config"), "auth-config");
+  const [seeding, setSeeding] = useState(false);
+  const [seedError, setSeedError] = useState<string | null>(null);
+
+  async function loadSampleMatter() {
+    setSeeding(true);
+    setSeedError(null);
+    try {
+      const matter = await api.post<Matter>("/v1/matters/demo-seed");
+      router.push(`/matters/view?id=${matter.id}`);
+    } catch (err) {
+      setSeedError(err instanceof Error ? err.message : "Couldn't load the sample matter");
+      setSeeding(false);
+    }
+  }
+
   const {
     items: matters,
     total,
@@ -91,6 +114,34 @@ export default function MattersPage() {
           </p>
         )}
 
+        {/* PR 45: a secondary, visually subordinate alternative to typing a
+            name and finding your own test file -- local-password/dev mode
+            only (auth_config's demo_seed_enabled), since a multi-tenant
+            OIDC deployment has no single "the operator" to seed a shared
+            sample matter for, and the backend route itself refuses there. */}
+        {authConfigQ.data?.demo_seed_enabled && (
+          <div className="mb-6 flex items-center gap-2 text-sm">
+            <span className="text-muted">New here?</span>
+            <button
+              type="button"
+              onClick={loadSampleMatter}
+              disabled={seeding}
+              className="rounded-md border border-border px-3 py-1.5 font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+            >
+              {seeding ? "Loading sample matter…" : "Load sample matter"}
+            </button>
+            <span className="text-xs text-muted">
+              Seeds a clearly-labeled demo matter with three sample documents already released —
+              a released packet, a refused release, and a release with a kept finding.
+            </span>
+          </div>
+        )}
+        {seedError && (
+          <p className="mb-6 rounded-md border border-red-600/30 bg-red-600/5 px-3 py-2 text-sm text-red-600">
+            {seedError}
+          </p>
+        )}
+
         {loading && (
           <div className="animate-pulse space-y-2">
             <div className="h-12 rounded-md bg-black/[0.04] dark:bg-white/[0.04]" />
@@ -136,7 +187,14 @@ export default function MattersPage() {
                     href={`/matters/view?id=${m.id}`}
                     className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
                   >
-                    <span className="font-medium">{m.name}</span>
+                    <span className="flex items-center gap-2">
+                      <span className="font-medium">{m.name}</span>
+                      {m.is_demo && (
+                        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">
+                          Demo
+                        </span>
+                      )}
+                    </span>
                     <span className="text-xs text-muted">
                       {new Date(m.created_utc).toLocaleDateString()}
                     </span>

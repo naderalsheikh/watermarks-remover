@@ -150,6 +150,17 @@ function ReleasePanel({
 
   return (
     <div className="mt-2 space-y-3 rounded-md border border-border bg-black/[0.02] p-3 dark:bg-white/[0.02]">
+      {/* PR 45: a first-time evaluator sees this dropdown with zero
+          framing otherwise -- one honest sentence about what the packet
+          records, not a claim about what it proves. No "safe"/"clean"/
+          "court-proof" language; see docs/release-packet-verification-and
+          -anchoring-proposal.md §7 for the forbidden-claims list this
+          stays inside of. */}
+      <p className="text-xs text-muted">
+        A release packet is this system&apos;s record of what was checked, what changed, what
+        was kept or refused, and what limitations remain — not a legal opinion or a &quot;safe to
+        share&quot; guarantee.
+      </p>
       <div>
         <label className="mb-1 block text-xs font-medium">Release profile</label>
         <select
@@ -1117,9 +1128,19 @@ function MatterView({
           )}
         </div>
       </div>
-      <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">
+      <h1 className="mb-1 mt-2 flex items-center gap-2 text-2xl font-semibold tracking-tight">
         {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
+        {matterQ.data?.is_demo && (
+          <span className="rounded border border-border px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-muted">
+            Demo matter
+          </span>
+        )}
       </h1>
+      {matterQ.data?.is_demo && (
+        <p className="mb-2 text-xs text-muted">
+          Sample data for evaluating the Release Gate — not a real client matter.
+        </p>
+      )}
       {matterQ.error && <p className="mb-4 text-sm text-red-600">{matterQ.error}</p>}
 
       {matterQ.data && <ReportsAndExports matterId={matterId} perms={perms} />}

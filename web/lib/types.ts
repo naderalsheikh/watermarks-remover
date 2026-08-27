@@ -1,10 +1,14 @@
-export type AuthConfig = { oidc_enabled: boolean };
+// demo_seed_enabled (PR 45): whether POST /v1/matters/demo-seed will
+// actually work -- local-password mode only, mirrors oidc_enabled's own
+// negation. The matters page checks this before showing "Load sample
+// matter" at all, rather than showing it and letting it 403.
+export type AuthConfig = { oidc_enabled: boolean; demo_seed_enabled?: boolean };
 
 // `perms` is present on POST /v1/matters and GET /v1/matters/{id} (the
 // caller's own grants on this matter, service/app/main.py's _matter_dict)
 // -- not on list_matters items, which don't compute it per-row. Frontend
 // uses it to hide/disable controls that would otherwise 403.
-export type Matter = { id: string; name: string; created_utc: string; perms?: string[] };
+export type Matter = { id: string; name: string; created_utc: string; is_demo?: boolean; perms?: string[] };
 export type Perm = "read" | "upload" | "inspect" | "sanitize" | "download_original" | "admin";
 
 export type Document = {

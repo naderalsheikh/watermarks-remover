@@ -137,7 +137,9 @@ def test_matter_get_reports_only_the_calling_principals_own_perms(tmp_path, monk
 def test_auth_config_is_unauthenticated_and_reports_oidc_off(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
     c = TestClient(create_app(tmp_path / "d"))
-    assert c.get("/v1/auth/config").json() == {"oidc_enabled": False}
+    # demo_seed_enabled (PR 45) mirrors oidc_enabled's own negation -- see
+    # tests/test_demo_seed.py for dedicated coverage of both bits together.
+    assert c.get("/v1/auth/config").json() == {"oidc_enabled": False, "demo_seed_enabled": True}
 
 
 def test_cookie_secure_flag_follows_config(tmp_path, monkeypatch):
