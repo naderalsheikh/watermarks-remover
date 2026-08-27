@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """CounselClear Airlock CLI (PR 34, release-packet terminology since
-PR 36) — the "invisible airlock" proof of concept: one command, one file
-in, a release packet out (the derivative and its custody proof, together
-by default -- see docs/COUNSELCLEAR_DESIGN.md PR 36), no browser required.
+PR 36, Release-native since PR 43) — the "invisible airlock" proof of
+concept: one command, one file in, a release packet out (the derivative
+and its custody proof, together by default -- see
+docs/COUNSELCLEAR_DESIGN.md PR 36), no browser required.
 
 Talks to an already-running CounselClear API over plain HTTP (cookie
 session login, multipart upload, JSON, and two binary downloads) --
@@ -20,7 +21,8 @@ Usage (single file)::
     COUNSELCLEAR_LOCAL_PASSWORD=evalpass123 python3 tools/counselclear_airlock.py \\
         --matter-id <existing matter id> \\
         --file /path/to/document.docx \\
-        --policy external_sharing \\
+        --profile counterparty_deal_room \\
+        --recipient-type opposing_counsel \\
         --output-dir ./airlock-out
 
 Usage (batch -- a folder, or an explicit file list; PR 38)::
@@ -28,13 +30,14 @@ Usage (batch -- a folder, or an explicit file list; PR 38)::
     COUNSELCLEAR_LOCAL_PASSWORD=evalpass123 python3 tools/counselclear_airlock.py \\
         --matter-id <existing matter id> \\
         --folder ./intake \\
-        --policy external_sharing \\
+        --profile counterparty_deal_room \\
+        --recipient-type opposing_counsel \\
         --output-dir ./airlock-out
 
     # or: --files a.docx b.pdf c.txt   (explicit list instead of a folder)
 
 Batch mode processes every file in sequence through the exact same
-per-file workflow as single-file mode (upload, sanitize, poll, download/
+per-file workflow as single-file mode (upload, release, poll, download/
 write the release packet) -- one file's outcome (including a hard error:
 a failed upload, a failed submit, a poll timeout) never aborts the rest
 of the batch. Each file gets its own numbered subdirectory
@@ -44,35 +47,28 @@ files single-file mode would have written there; a top-level
 its packet's subdirectory, and any limitations/refusal/failure/error --
 release packets in a batch are not externally anchored, same as a
 single one. --folder is not recursive: only files directly inside it
-are processed.
+are processed. Every file in a batch shares the same --profile/
+--recipient-type/etc. -- no per-file overrides.
 
-Policies: only external_sharing and privacy_only are offered in this
-first version, in both single-file and batch mode -- both are
-decision-free (POLICIES[*].bulk_safe in service/app/main.py), so every
-finding resolves without a per-finding approve/keep decision this CLI
-has no interactive way to supply. production is refused at the
+Release profiles: only counterparty_deal_room and public_filing_anonymized
+are offered in this first version, in both single-file and batch mode --
+both are decision-free (RELEASE_PROFILES[*].policy_id resolves to a
+POLICIES[*].bulk_safe policy in service/app/main.py), so every finding
+resolves without a per-finding approve/keep decision this CLI has no
+interactive way to supply. ediscovery_production is refused at the
 argument-parser level, not silently degraded, so a caller finds out
 immediately rather than after a job (or a whole batch) that would have
 needed decisions this CLI can't provide.
 
-TODO (PR 40 design note, not yet implemented): this CLI still calls
-POST .../sanitize-jobs directly (Client.sanitize()) rather than the
-Release-aware POST .../releases route the web UI now uses (PR 40's
-matter-view "Prepare Release Packet" / "Bulk release" actions). Airlock
-is arguably the MORE important adoption surface than the dashboard --
-it's the one place "every outbound document gets a release packet" can
-actually become a habit, unattended by a human clicking through a
-browser each time -- so this migration should not be deferred
-indefinitely. When it happens: Client.release() replacing
-Client.sanitize(), a --profile flag (RELEASE_PROFILES ids) replacing
---policy, SUPPORTED_POLICIES becoming a SUPPORTED_PROFILES equivalent,
-and AIRLOCK_RESULT.json/BATCH_RESULT.json gaining release_id/
-recipient_type/purpose. Deliberately not done in the same pass as the
-web UI migration: the web UI exercises more of the single-document
-Release route's surface (layer_b, finding_decisions) in real usage,
-so it went first to surface any rough edges against a smaller,
-easier-to-fix CLI change still pending. Own scoped proposal when it's
-this CLI's turn -- see docs/COUNSELCLEAR_DESIGN.md's PR 40 entry.
+Release-native since PR 43: this CLI calls POST .../releases (via
+Client.release()), not the legacy POST .../sanitize-jobs -- a
+--recipient-type is required on every release this tool prepares, and
+every output directory gets a release_result.json (the lightweight,
+always-present outcome record, written for every terminal release
+including a successful one) alongside the full release packet when
+done. --policy is no longer a recognized argument; Client.sanitize()
+itself is untouched and still callable by other code, in case anything
+else still needs the raw, unwrapped route.
 """
 
 from __future__ import annotations
@@ -93,12 +89,20 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-# Only two of the four v1 policies are decision-free (POLICIES[*].bulk_safe
-# in service/app/main.py) -- production and evidence_preservation both
-# require workflows (per-finding decisions, inspect-only) this CLI has no
-# way to drive. Literal here, not fetched from GET /v1/policies at runtime,
-# so an unsupported --policy value is rejected before any network call.
-SUPPORTED_POLICIES = ("external_sharing", "privacy_only")
+# Only two of the three v1 release profiles are decision-free
+# (RELEASE_PROFILES[*].policy_id resolves to a POLICIES[*].bulk_safe
+# policy in service/app/main.py) -- ediscovery_production (-> production)
+# requires a per-finding decision workflow this CLI has no way to drive.
+# Literal here, not fetched from GET /v1/release-profiles at runtime, so
+# an unsupported --profile value is rejected before any network call.
+SUPPORTED_PROFILES = ("counterparty_deal_room", "public_filing_anonymized")
+
+# Mirrors service/app/main.py's RECIPIENT_TYPES -- same literal-not-
+# imported reason as SUPPORTED_PROFILES above: this CLI has no control-
+# plane dependency at all. --recipient-type is required (stricter than
+# the backend's own "other" default) so every release this tool prepares
+# forces a conscious recipient choice.
+RECIPIENT_TYPES = ("opposing_counsel", "court", "client", "regulator", "internal_reviewer", "other")
 
 DEFAULT_TIMEOUT_S = 120.0
 POLL_INTERVAL_S = 1.0
@@ -174,10 +178,43 @@ class Client:
         return parsed
 
     def sanitize(self, matter_id: str, doc_id: str, *, policy_id: str, reason: str) -> dict:
+        """The legacy, unwrapped route -- untouched, still here in case
+        anything else needs it. run_airlock() itself calls release()
+        below, not this, as of PR 43."""
         return self._json(
             "POST",
             f"/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs",
             payload={"policy_id": policy_id, "reason": reason},
+        )
+
+    def release(
+        self,
+        matter_id: str,
+        doc_id: str,
+        *,
+        profile_id: str,
+        recipient_type: str,
+        recipient_name: str,
+        purpose: str,
+        intended_external: bool,
+        reason: str,
+    ) -> dict:
+        """POST .../releases (PR 39/43): returns {release, job,
+        release_result} in one round trip -- release_result is the
+        server's own precomputed release_result.json content (limitations
+        included), so callers never need to hand-derive that from a raw
+        manifest the way this CLI once did."""
+        return self._json(
+            "POST",
+            f"/v1/matters/{matter_id}/documents/{doc_id}/releases",
+            payload={
+                "profile_id": profile_id,
+                "recipient_type": recipient_type,
+                "recipient_name": recipient_name,
+                "purpose": purpose,
+                "intended_external": intended_external,
+                "reason": reason,
+            },
         )
 
     def get_job(self, matter_id: str, job_id: str) -> dict:
@@ -223,28 +260,14 @@ class Client:
         return body
 
 
-# Mirrors service/app/main.py's NO_DECISION_MARKER / OPERATOR_KEPT_MARKER /
-# APPROVED_BUT_NO_OP_MARKER (themselves literal-not-imported from
-# scripts/policies.py, PR 17 isolation) -- a third literal copy, not an
-# import of app.main, because this CLI has no control-plane dependency at
-# all: pulling in service.app for three string constants would mean
-# importing FastAPI/SQLAlchemy/the whole control plane into a script whose
-# entire point is being a thin, independent HTTP client. Used only to build
-# a human-readable summary; certificate.html (always fetched) remains the
-# authoritative disclosure, not this list.
-_LIMITATION_MARKERS = (
-    "no operator decision was supplied",
-    "reviewed and kept by operator",
-    "approved, but this subtype has no strip action under this policy",
-)
-
-
 @dataclass
 class AirlockResult:
     matter_id: str
     document_id: str
     job_id: str
-    policy_id: str
+    release_id: str
+    profile_id: str
+    recipient_type: str
     status: str
     error: str
     files_written: list[str] = field(default_factory=list)
@@ -256,7 +279,9 @@ class AirlockResult:
             "matter_id": self.matter_id,
             "document_id": self.document_id,
             "job_id": self.job_id,
-            "policy_id": self.policy_id,
+            "release_id": self.release_id,
+            "profile_id": self.profile_id,
+            "recipient_type": self.recipient_type,
             "status": self.status,
             "error": self.error,
             "files_written": self.files_written,
@@ -270,17 +295,21 @@ def run_airlock(
     *,
     matter_id: str,
     file_path: Path,
-    policy_id: str,
+    profile_id: str,
+    recipient_type: str,
+    recipient_name: str,
+    purpose: str,
+    intended_external: bool,
     reason: str,
     output_dir: Path,
     timeout_s: float,
 ) -> AirlockResult:
     """The whole workflow, factored out of main() so tests can drive it
     against a fake or real Client without going through argv/exit codes."""
-    if policy_id not in SUPPORTED_POLICIES:
+    if profile_id not in SUPPORTED_PROFILES:
         raise AirlockError(
-            f"--policy {policy_id!r} is not supported by this CLI in v1 "
-            f"(only {', '.join(SUPPORTED_POLICIES)} -- see the module docstring)"
+            f"--profile {profile_id!r} is not supported by this CLI in v1 "
+            f"(only {', '.join(SUPPORTED_PROFILES)} -- see the module docstring)"
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -288,25 +317,54 @@ def run_airlock(
     doc = client.upload_document(matter_id, file_path)
     document_id = doc["id"]
 
-    job = client.sanitize(matter_id, document_id, policy_id=policy_id, reason=reason)
-    job = client.wait_for_terminal(matter_id, job["id"], timeout_s=timeout_s)
+    response = client.release(
+        matter_id,
+        document_id,
+        profile_id=profile_id,
+        recipient_type=recipient_type,
+        recipient_name=recipient_name,
+        purpose=purpose,
+        intended_external=intended_external,
+        reason=reason,
+    )
+    release_id = response["release"]["id"]
+    release_result = response["release_result"]
+    job = client.wait_for_terminal(matter_id, response["job"]["id"], timeout_s=timeout_s)
     job_id = job["id"]
 
     result = AirlockResult(
         matter_id=matter_id,
         document_id=document_id,
         job_id=job_id,
-        policy_id=policy_id,
+        release_id=release_id,
+        profile_id=profile_id,
+        recipient_type=recipient_type,
         status=job["status"],
         error=job.get("error", ""),
+        # The server's own precomputed limitations (_build_release_result,
+        # service/app/main.py) -- this CLI no longer hand-derives them
+        # from a raw manifest's actions[], which is what the now-deleted
+        # _LIMITATION_MARKERS scan used to do.
+        limitations=release_result.get("limitations", []),
         generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
     )
 
+    # release_result.json: written verbatim for EVERY terminal release,
+    # done included -- the lightweight, always-present outcome record
+    # (PR 39's own framing). Sourced from the same POST response that
+    # created the release, not a second round trip.
+    (output_dir / "release_result.json").write_text(
+        json.dumps(release_result, indent=2, sort_keys=True)
+    )
+    result.files_written.append("release_result.json")
+
     if job["status"] == "done":
-        # One call gets everything: derivative, manifest.json, report.json,
-        # and certificate.html all travel together in the release packet
-        # (the same one the web UI's "Download release packet" button
-        # fetches) -- not three separate requests for the same content.
+        # One call gets everything else: derivative, manifest.json,
+        # report.json, and certificate.html all travel together in the
+        # full release packet (the same one the web UI's "Download
+        # release packet" button fetches) -- not three separate requests
+        # for the same content. release_result.json above is the
+        # lightweight companion; this is the full artifact.
         packet_zip = client.get_release_packet_zip(matter_id, job_id)
         if packet_zip is not None:
             with zipfile.ZipFile(io.BytesIO(packet_zip)) as zf:
@@ -317,18 +375,13 @@ def run_airlock(
                         (output_dir / deriv_name).write_bytes(zf.read(name))
                         result.files_written.append(deriv_name)
                 if "manifest.json" in names:
-                    manifest_bytes = zf.read("manifest.json")
                     # Written verbatim, same reasoning as release_packet.json
                     # below: release_packet.json's own manifest_json_sha256
                     # was computed over these exact bytes server-side, so a
                     # Python-reformatted re-encoding (even of equivalent
-                    # JSON) would break that hash. Still parsed separately,
-                    # in memory only, to derive the limitations list.
-                    (output_dir / "manifest.json").write_bytes(manifest_bytes)
+                    # JSON) would break that hash.
+                    (output_dir / "manifest.json").write_bytes(zf.read("manifest.json"))
                     result.files_written.append("manifest.json")
-                    manifest = json.loads(manifest_bytes)
-                    actions = manifest.get("actions") or []
-                    result.limitations = [a for a in actions if any(m in a for m in _LIMITATION_MARKERS)]
                 if "report.json" in names:
                     (output_dir / "report.json").write_bytes(zf.read("report.json"))
                     result.files_written.append("report.json")
@@ -354,10 +407,12 @@ def run_airlock(
                     result.files_written.append("README.txt")
     else:
         # refused/failed: no derivative, so no release packet either (the
-        # server 409s -- see get_release_packet_zip). The standalone
-        # certificate route still renders correctly for both outcomes, so
-        # that's this CLI's only source for certificate.html here.
-        result.limitations = [f"job {job['status']}: {result.error or 'no further detail recorded'}"]
+        # server 409s -- see get_release_packet_zip). release_result.json
+        # above is already this outcome's structured record; the
+        # standalone certificate route is fetched too so
+        # release_result.json's own certificate_html_sha256 has a real
+        # sibling file to hash-check against, same as the web UI's own
+        # "Download release result" link implies.
         cert_html = client.get_certificate_html(matter_id, job_id)
         (output_dir / "certificate.html").write_bytes(cert_html)
         result.files_written.append("certificate.html")
@@ -379,6 +434,9 @@ class BatchItemResult:
     status: str
     job_id: str = ""
     document_id: str = ""
+    release_id: str = ""
+    profile_id: str = ""
+    recipient_type: str = ""
     limitations: list[str] = field(default_factory=list)
     error: str = ""
 
@@ -389,6 +447,9 @@ class BatchItemResult:
             "status": self.status,
             "job_id": self.job_id,
             "document_id": self.document_id,
+            "release_id": self.release_id,
+            "profile_id": self.profile_id,
+            "recipient_type": self.recipient_type,
             "limitations": self.limitations,
             "error": self.error,
         }
@@ -397,7 +458,8 @@ class BatchItemResult:
 @dataclass
 class BatchResult:
     matter_id: str
-    policy_id: str
+    profile_id: str
+    recipient_type: str
     started_at: str
     finished_at: str = ""
     items: list[BatchItemResult] = field(default_factory=list)
@@ -412,7 +474,8 @@ class BatchResult:
     def to_dict(self) -> dict:
         return {
             "matter_id": self.matter_id,
-            "policy_id": self.policy_id,
+            "profile_id": self.profile_id,
+            "recipient_type": self.recipient_type,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "total": len(self.items),
@@ -427,7 +490,11 @@ def run_airlock_batch(
     *,
     matter_id: str,
     files: list[Path],
-    policy_id: str,
+    profile_id: str,
+    recipient_type: str,
+    recipient_name: str,
+    purpose: str,
+    intended_external: bool,
     reason: str,
     output_dir: Path,
     timeout_s: float,
@@ -435,16 +502,17 @@ def run_airlock_batch(
     """Sequential per-file processing over run_airlock. One file's outcome
     -- including a hard AirlockError (a failed upload, a failed submit, or
     a poll timeout) -- never aborts the rest of the batch; it's recorded as
-    that file's own status ("error") and the loop moves on. Policy is
+    that file's own status ("error") and the loop moves on. Profile is
     validated once, up front, so a batch that can't even start doesn't
-    process any file partially. Each file gets its own numbered
-    subdirectory under output_dir so outputs never collide, and a
-    BATCH_RESULT.json summary is written at output_dir once every file has
-    been attempted."""
-    if policy_id not in SUPPORTED_POLICIES:
+    process any file partially. Every file in the batch shares the same
+    profile/recipient/purpose/intent -- no per-file overrides. Each file
+    gets its own numbered subdirectory under output_dir so outputs never
+    collide, and a BATCH_RESULT.json summary is written at output_dir
+    once every file has been attempted."""
+    if profile_id not in SUPPORTED_PROFILES:
         raise AirlockError(
-            f"--policy {policy_id!r} is not supported by this CLI in v1 "
-            f"(only {', '.join(SUPPORTED_POLICIES)} -- see the module docstring)"
+            f"--profile {profile_id!r} is not supported by this CLI in v1 "
+            f"(only {', '.join(SUPPORTED_PROFILES)} -- see the module docstring)"
         )
     if not files:
         raise AirlockError("no input files given (empty --folder or --files list)")
@@ -452,7 +520,8 @@ def run_airlock_batch(
     output_dir.mkdir(parents=True, exist_ok=True)
     batch = BatchResult(
         matter_id=matter_id,
-        policy_id=policy_id,
+        profile_id=profile_id,
+        recipient_type=recipient_type,
         started_at=datetime.now(UTC).isoformat(timespec="seconds"),
     )
 
@@ -464,7 +533,11 @@ def run_airlock_batch(
                 client,
                 matter_id=matter_id,
                 file_path=file_path,
-                policy_id=policy_id,
+                profile_id=profile_id,
+                recipient_type=recipient_type,
+                recipient_name=recipient_name,
+                purpose=purpose,
+                intended_external=intended_external,
                 reason=reason,
                 output_dir=item_output_dir,
                 timeout_s=timeout_s,
@@ -476,6 +549,9 @@ def run_airlock_batch(
                     status=result.status,
                     job_id=result.job_id,
                     document_id=result.document_id,
+                    release_id=result.release_id,
+                    profile_id=result.profile_id,
+                    recipient_type=result.recipient_type,
                     limitations=result.limitations,
                     error=result.error,
                 )
@@ -510,7 +586,18 @@ def main(argv: list[str] | None = None) -> int:
         "--files", nargs="+", type=Path, metavar="FILE",
         help="explicit list of local files to sanitize (batch mode)",
     )
-    ap.add_argument("--policy", default="external_sharing", choices=SUPPORTED_POLICIES)
+    ap.add_argument("--profile", default="counterparty_deal_room", choices=SUPPORTED_PROFILES)
+    ap.add_argument("--recipient-type", required=True, choices=RECIPIENT_TYPES)
+    ap.add_argument("--recipient-name", default="")
+    ap.add_argument("--purpose", default="")
+    ap.add_argument(
+        "--intended-external", dest="intended_external", action="store_true", default=True,
+        help="this release is intended to leave the organization (default)",
+    )
+    ap.add_argument(
+        "--internal-only", dest="intended_external", action="store_false",
+        help="this release is not intended to leave the organization",
+    )
     ap.add_argument("--reason", default="airlock CLI")
     ap.add_argument("--output-dir", required=True, type=Path)
     ap.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S)
@@ -532,7 +619,11 @@ def main(argv: list[str] | None = None) -> int:
                 client,
                 matter_id=args.matter_id,
                 file_path=args.file,
-                policy_id=args.policy,
+                profile_id=args.profile,
+                recipient_type=args.recipient_type,
+                recipient_name=args.recipient_name,
+                purpose=args.purpose,
+                intended_external=args.intended_external,
                 reason=args.reason,
                 output_dir=args.output_dir,
                 timeout_s=args.timeout_s,
@@ -573,7 +664,11 @@ def main(argv: list[str] | None = None) -> int:
             client,
             matter_id=args.matter_id,
             files=files,
-            policy_id=args.policy,
+            profile_id=args.profile,
+            recipient_type=args.recipient_type,
+            recipient_name=args.recipient_name,
+            purpose=args.purpose,
+            intended_external=args.intended_external,
             reason=args.reason,
             output_dir=args.output_dir,
             timeout_s=args.timeout_s,

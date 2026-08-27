@@ -1,8 +1,9 @@
-"""tools/counselclear_airlock.py — the local Airlock CLI (PR 34): a thin
-HTTP client of the existing API, no second engine/control-plane write
-path. Unit tests drive run_airlock() against a FakeClient (no network);
-the one integration test drives the real Client class against a real
-uvicorn-served app (no live server the operator has to manage by hand).
+"""tools/counselclear_airlock.py — the local Airlock CLI (PR 34, Release-
+native since PR 43): a thin HTTP client of the existing API, no second
+engine/control-plane write path. Unit tests drive run_airlock() against a
+FakeClient (no network); the live-server tests drive the real Client
+class against a real uvicorn-served app (no live server the operator has
+to manage by hand).
 """
 
 from __future__ import annotations
@@ -29,6 +30,64 @@ import counselclear_airlock as airlock
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "legal"
 
 
+def _fake_limitations(status: str, error: str) -> list[str]:
+    """Mirrors what the real server's _build_release_result actually
+    computes (service/app/main.py) closely enough for a fake -- the CLI
+    itself no longer derives this from a raw manifest, so the fakes are
+    the one place it still needs modeling."""
+    if status == "done":
+        return [
+            "comments_and_notes:keep: kept: no operator decision was supplied for this "
+            "approve-default finding"
+        ]
+    return [f"job {status}: {error or 'no further detail recorded'}"]
+
+
+def _fake_release_result(
+    *,
+    release_id: str,
+    job_id: str,
+    document_id: str,
+    matter_id: str,
+    status: str,
+    policy_id: str,
+    profile_id: str,
+    recipient_type: str,
+    recipient_name: str,
+    purpose: str,
+    intended_external: bool,
+    reason: str,
+) -> dict:
+    """The shape of a real POST .../releases response's "release_result"
+    key (service/app/main.py's _build_release_result) -- built from
+    whatever the fake Client actually received, not hardcoded, so a test
+    can verify a value (e.g. intended_external=False) really flows
+    end to end from argv through to the written release_result.json."""
+    return {
+        "spec_version": "1.0",
+        "release_id": release_id,
+        "job_id": job_id,
+        "document_id": document_id,
+        "matter_id": matter_id,
+        "status": status,
+        "policy_id": policy_id,
+        "profile_id": profile_id,
+        "recipient_type": recipient_type,
+        "recipient_name": recipient_name,
+        "purpose": purpose,
+        "intended_external": intended_external,
+        "reason": reason,
+        "original_sha256": "0" * 64,
+        "created_at": "2026-08-27T00:00:00+00:00",
+        "finished_at": "2026-08-27T00:00:05+00:00",
+        "audit_refs": {"release_created_seq": 1, "release_terminal_seq": 2},
+        "limitations": _fake_limitations(status, reason),
+        "certificate_html_sha256": "c" * 64,
+        "generated_at": "2026-08-27T00:00:05+00:00",
+        "anchor": {"type": "none", "digest": None, "reference": None},
+    }
+
+
 # --- FakeClient: duck-types the Client surface run_airlock() actually calls -----
 
 
@@ -42,9 +101,42 @@ class FakeClient:
         self.calls.append("upload_document")
         return {"id": "doc1", "filename": path.name, "sha256": "0" * 64, "bytes": path.stat().st_size}
 
-    def sanitize(self, matter_id: str, doc_id: str, *, policy_id: str, reason: str) -> dict:
-        self.calls.append("sanitize")
-        return {"id": "job1", "status": "queued"}
+    def release(
+        self,
+        matter_id: str,
+        doc_id: str,
+        *,
+        profile_id: str,
+        recipient_type: str,
+        recipient_name: str,
+        purpose: str,
+        intended_external: bool,
+        reason: str,
+    ) -> dict:
+        self.calls.append("release")
+        # A real POST .../releases is synchronous -- this fake models a
+        # never-terminal response ("queued") only for the __timeout__
+        # case, so wait_for_terminal's own poll-loop-timeout logic is
+        # what's actually exercised, same as the old sanitize()-based
+        # fake did.
+        if self.job_status == "__timeout__":
+            job = {"id": "job1", "status": "queued", "error": ""}
+        else:
+            job = {"id": "job1", "status": self.job_status, "error": self.job_error}
+        release_result = _fake_release_result(
+            release_id="rel1", job_id="job1", document_id=doc_id, matter_id=matter_id,
+            status=job["status"], policy_id="external_sharing", profile_id=profile_id,
+            recipient_type=recipient_type, recipient_name=recipient_name, purpose=purpose,
+            intended_external=intended_external, reason=self.job_error or reason,
+        )
+        return {
+            "release": {
+                "id": "rel1", "profile_id": profile_id, "recipient_type": recipient_type,
+                "intended_external": intended_external,
+            },
+            "job": job,
+            "release_result": release_result,
+        }
 
     def wait_for_terminal(self, matter_id: str, job_id: str, *, timeout_s: float) -> dict:
         self.calls.append("wait_for_terminal")
@@ -125,12 +217,43 @@ class FakeBatchClient:
         self._doc_to_filename[doc_id] = path.name
         return {"id": doc_id, "filename": path.name, "sha256": "0" * 64, "bytes": path.stat().st_size}
 
-    def sanitize(self, matter_id: str, doc_id: str, *, policy_id: str, reason: str) -> dict:
-        self.calls.append("sanitize")
+    def release(
+        self,
+        matter_id: str,
+        doc_id: str,
+        *,
+        profile_id: str,
+        recipient_type: str,
+        recipient_name: str,
+        purpose: str,
+        intended_external: bool,
+        reason: str,
+    ) -> dict:
+        self.calls.append("release")
         self._job_counter += 1
         job_id = f"job-{self._job_counter}"
-        self._job_to_filename[job_id] = self._doc_to_filename[doc_id]
-        return {"id": job_id, "status": "queued"}
+        filename = self._doc_to_filename[doc_id]
+        self._job_to_filename[job_id] = filename
+        status = self.statuses_by_filename[filename]
+        error = self.errors_by_filename.get(filename, "")
+        if status == "__timeout__":
+            job = {"id": job_id, "status": "queued", "error": ""}
+        else:
+            job = {"id": job_id, "status": status, "error": error}
+        release_result = _fake_release_result(
+            release_id=f"rel-{self._job_counter}", job_id=job_id, document_id=doc_id, matter_id=matter_id,
+            status=job["status"], policy_id="external_sharing", profile_id=profile_id,
+            recipient_type=recipient_type, recipient_name=recipient_name, purpose=purpose,
+            intended_external=intended_external, reason=error or reason,
+        )
+        return {
+            "release": {
+                "id": f"rel-{self._job_counter}", "profile_id": profile_id,
+                "recipient_type": recipient_type, "intended_external": intended_external,
+            },
+            "job": job,
+            "release_result": release_result,
+        }
 
     def wait_for_terminal(self, matter_id: str, job_id: str, *, timeout_s: float) -> dict:
         self.calls.append("wait_for_terminal")
@@ -169,7 +292,7 @@ class FakeBatchClient:
         return b"<!doctype html><html><body>certificate</body></html>"
 
 
-# --- unit tests: success / refused / failed / timeout / bad policy --------------
+# --- unit tests: success / refused / failed / timeout / bad profile -------------
 
 
 def test_run_airlock_success_writes_derivative_manifest_certificate_and_summary(tmp_path):
@@ -179,34 +302,51 @@ def test_run_airlock_success_writes_derivative_manifest_certificate_and_summary(
         client,
         matter_id="m1",
         file_path=_real_file(tmp_path),
-        policy_id="external_sharing",
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="Jane Doe",
+        purpose="test",
+        intended_external=True,
         reason="test",
         output_dir=out,
         timeout_s=5,
     )
     assert result.status == "done"
+    assert result.release_id == "rel1"
+    assert result.profile_id == "counterparty_deal_room"
+    assert result.recipient_type == "opposing_counsel"
     assert (out / "doc.sanitized.docx").read_bytes() == b"fake derivative bytes"
     assert json.loads((out / "manifest.json").read_text())["derivative"]["sha256"] == "d" * 64
     assert (out / "report.json").exists()
     assert (out / "certificate.html").read_bytes().startswith(b"<!doctype html>")
     assert json.loads((out / "release_packet.json").read_text())["job_id"] == "job1"
+    # release_result.json is written for a done release too -- the
+    # lightweight, always-present companion, not just for refused/failed.
+    release_result = json.loads((out / "release_result.json").read_text())
+    assert release_result["release_id"] == "rel1"
+    assert release_result["status"] == "done"
     summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
     assert summary["status"] == "done"
     assert summary["job_id"] == "job1"
     assert summary["document_id"] == "doc1"
+    assert summary["release_id"] == "rel1"
+    assert summary["profile_id"] == "counterparty_deal_room"
+    assert summary["recipient_type"] == "opposing_counsel"
     assert set(summary["files_written"]) == {
-        "doc.sanitized.docx", "manifest.json", "report.json", "certificate.html",
-        "release_packet.json", "README.txt", "AIRLOCK_RESULT.json",
+        "release_result.json", "doc.sanitized.docx", "manifest.json", "report.json",
+        "certificate.html", "release_packet.json", "README.txt", "AIRLOCK_RESULT.json",
     }
-    # The no-decision action from the fake manifest must surface as a
-    # limitation, not get silently absorbed into "success".
+    # The no-decision limitation (now sourced from release_result, not a
+    # hand-parsed manifest) must surface, not get silently absorbed into
+    # "success".
     assert len(result.limitations) == 1
     assert "no operator decision was supplied" in result.limitations[0]
-    # One release-packet call gets derivative + manifest + report +
+    # One release call gets the job outcome + release_result together;
+    # one release-packet call gets derivative + manifest + report +
     # certificate together -- not three separate requests for the same
     # content (get_certificate_html is refused/failed-only, see below).
     assert client.calls == [
-        "upload_document", "sanitize", "wait_for_terminal", "get_release_packet_zip",
+        "upload_document", "release", "wait_for_terminal", "get_release_packet_zip",
     ]
 
 
@@ -217,7 +357,11 @@ def test_run_airlock_refused_job_writes_certificate_and_summary_without_derivati
         client,
         matter_id="m1",
         file_path=_real_file(tmp_path),
-        policy_id="external_sharing",
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="",
+        purpose="",
+        intended_external=True,
         reason="test",
         output_dir=out,
         timeout_s=5,
@@ -226,6 +370,11 @@ def test_run_airlock_refused_job_writes_certificate_and_summary_without_derivati
     assert not (out / "manifest.json").exists()
     assert not any(out.glob("*.docx"))
     assert (out / "certificate.html").exists()  # certificate always attempted
+    # release_result.json is the ONLY structured artifact for a refused
+    # release -- no derivative, no zip -- but it must still exist.
+    release_result = json.loads((out / "release_result.json").read_text())
+    assert release_result["status"] == "refused"
+    assert release_result["reason"] == "plan refused: macro-enabled file"
     summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
     assert summary["status"] == "refused"
     assert summary["error"] == "plan refused: macro-enabled file"
@@ -242,16 +391,43 @@ def test_run_airlock_failed_job_writes_certificate_and_summary_without_derivativ
         client,
         matter_id="m1",
         file_path=_real_file(tmp_path),
-        policy_id="privacy_only",
+        profile_id="public_filing_anonymized",
+        recipient_type="regulator",
+        recipient_name="",
+        purpose="",
+        intended_external=True,
         reason="test",
         output_dir=out,
         timeout_s=5,
     )
     assert result.status == "failed"
     assert not (out / "manifest.json").exists()
+    release_result = json.loads((out / "release_result.json").read_text())
+    assert release_result["status"] == "failed"
     summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
     assert "worker exited rc=1: boom" in summary["limitations"][0]
     assert (out / "certificate.html").exists()
+
+
+def test_run_airlock_intended_external_flag_flows_through_to_release_result(tmp_path):
+    client = FakeClient(job_status="done")
+    out = tmp_path / "out"
+    airlock.run_airlock(
+        client,
+        matter_id="m1",
+        file_path=_real_file(tmp_path),
+        profile_id="counterparty_deal_room",
+        recipient_type="internal_reviewer",
+        recipient_name="",
+        purpose="",
+        intended_external=False,
+        reason="test",
+        output_dir=out,
+        timeout_s=5,
+    )
+    release_result = json.loads((out / "release_result.json").read_text())
+    assert release_result["intended_external"] is False
+    assert release_result["recipient_type"] == "internal_reviewer"
 
 
 def test_run_airlock_timeout_raises_and_writes_nothing(tmp_path):
@@ -262,7 +438,11 @@ def test_run_airlock_timeout_raises_and_writes_nothing(tmp_path):
             client,
             matter_id="m1",
             file_path=_real_file(tmp_path),
-            policy_id="external_sharing",
+            profile_id="counterparty_deal_room",
+            recipient_type="opposing_counsel",
+            recipient_name="",
+            purpose="",
+            intended_external=True,
             reason="test",
             output_dir=out,
             timeout_s=5,
@@ -272,14 +452,18 @@ def test_run_airlock_timeout_raises_and_writes_nothing(tmp_path):
     assert not (out / "AIRLOCK_RESULT.json").exists()
 
 
-def test_run_airlock_rejects_unsupported_policy_before_any_network_call(tmp_path):
+def test_run_airlock_rejects_unsupported_profile_before_any_network_call(tmp_path):
     client = FakeClient(job_status="done")
     with pytest.raises(airlock.AirlockError, match="not supported"):
         airlock.run_airlock(
             client,
             matter_id="m1",
             file_path=_real_file(tmp_path),
-            policy_id="production",
+            profile_id="ediscovery_production",
+            recipient_type="court",
+            recipient_name="",
+            purpose="",
+            intended_external=True,
             reason="test",
             output_dir=tmp_path / "out",
             timeout_s=5,
@@ -298,23 +482,31 @@ def test_run_airlock_batch_mixed_success_and_refused(tmp_path):
     )
     out = tmp_path / "out"
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, policy_id="external_sharing",
+        client, matter_id="m1", files=files, profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
         reason="test", output_dir=out, timeout_s=5,
     )
     assert [item.status for item in batch.items] == ["done", "refused"]
     assert batch.items[0].output_dir == "001-good"
     assert batch.items[1].output_dir == "002-bad"
+    assert batch.items[0].release_id == "rel-1"
+    assert batch.items[1].release_id == "rel-2"
     assert (out / "001-good" / "doc.sanitized.docx").exists()
+    assert (out / "001-good" / "release_result.json").exists()
     assert not (out / "002-bad" / "doc.sanitized.docx").exists()
     assert (out / "002-bad" / "certificate.html").exists()
+    assert (out / "002-bad" / "release_result.json").exists()
     assert "plan refused" in batch.items[1].limitations[0]
     assert batch.counts == {"done": 1, "refused": 1, "failed": 0, "error": 0}
 
     summary = json.loads((out / "BATCH_RESULT.json").read_text())
     assert summary["total"] == 2
+    assert summary["profile_id"] == "counterparty_deal_room"
+    assert summary["recipient_type"] == "opposing_counsel"
     assert summary["counts"] == {"done": 1, "refused": 1, "failed": 0, "error": 0}
     assert summary["anchor_note"] == "release packets in this batch are not externally anchored"
     assert summary["items"][0]["input_file"] == "good.docx"
+    assert summary["items"][0]["release_id"] == "rel-1"
     assert summary["items"][0]["error"] == ""
     assert summary["items"][1]["error"] == "plan refused: macro-enabled file"
 
@@ -326,7 +518,8 @@ def test_run_airlock_batch_failed_job_is_recorded_not_raised(tmp_path):
         errors_by_filename={"crash.docx": "worker exited rc=1: boom"},
     )
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, policy_id="privacy_only",
+        client, matter_id="m1", files=files, profile_id="public_filing_anonymized",
+        recipient_type="client", recipient_name="", purpose="", intended_external=True,
         reason="test", output_dir=tmp_path / "out", timeout_s=5,
     )
     assert batch.items[0].status == "failed"
@@ -337,7 +530,8 @@ def test_run_airlock_batch_timeout_recorded_as_error_not_aborted(tmp_path):
     files = [_named_file(tmp_path, "slow.docx"), _named_file(tmp_path, "good.docx")]
     client = FakeBatchClient(statuses_by_filename={"slow.docx": "__timeout__", "good.docx": "done"})
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, policy_id="external_sharing",
+        client, matter_id="m1", files=files, profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
         reason="test", output_dir=tmp_path / "out", timeout_s=5,
     )
     # The timeout on file 1 must not abort processing of file 2.
@@ -353,7 +547,8 @@ def test_run_airlock_batch_hard_upload_failure_recorded_as_error(tmp_path):
         upload_failures={"broken.docx"},
     )
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, policy_id="external_sharing",
+        client, matter_id="m1", files=files, profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
         reason="test", output_dir=tmp_path / "out", timeout_s=5,
     )
     assert batch.items[0].status == "error"
@@ -383,7 +578,8 @@ def test_run_airlock_batch_full_partial_mixed_outcome(tmp_path):
     )
     out = tmp_path / "out"
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, policy_id="external_sharing",
+        client, matter_id="m1", files=files, profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
         reason="test", output_dir=out, timeout_s=5,
     )
     assert [item.status for item in batch.items] == ["done", "refused", "failed", "error", "error"]
@@ -395,12 +591,13 @@ def test_run_airlock_batch_full_partial_mixed_outcome(tmp_path):
     ]
 
 
-def test_run_airlock_batch_rejects_unsupported_policy_before_any_file(tmp_path):
+def test_run_airlock_batch_rejects_unsupported_profile_before_any_file(tmp_path):
     files = [_named_file(tmp_path, "x.docx")]
     client = FakeBatchClient(statuses_by_filename={"x.docx": "done"})
     with pytest.raises(airlock.AirlockError, match="not supported"):
         airlock.run_airlock_batch(
-            client, matter_id="m1", files=files, policy_id="production",
+            client, matter_id="m1", files=files, profile_id="ediscovery_production",
+            recipient_type="court", recipient_name="", purpose="", intended_external=True,
             reason="test", output_dir=tmp_path / "out", timeout_s=5,
         )
     assert client.calls == []
@@ -410,25 +607,58 @@ def test_run_airlock_batch_rejects_empty_file_list(tmp_path):
     client = FakeBatchClient(statuses_by_filename={})
     with pytest.raises(airlock.AirlockError, match="no input files"):
         airlock.run_airlock_batch(
-            client, matter_id="m1", files=[], policy_id="external_sharing",
+            client, matter_id="m1", files=[], profile_id="counterparty_deal_room",
+            recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
             reason="test", output_dir=tmp_path / "out", timeout_s=5,
         )
 
 
-# --- CLI (main()) argument handling for batch mode ------------------------------
+# --- CLI (main()) argument handling ----------------------------------------------
 
 
 def test_main_rejects_file_and_folder_together(tmp_path, capsys):
     with pytest.raises(SystemExit):
         airlock.main([
             "--matter-id", "m1", "--file", str(tmp_path), "--folder", str(tmp_path),
+            "--recipient-type", "opposing_counsel",
             "--output-dir", str(tmp_path / "out"), "--password", "x",
         ])
+
+
+def test_main_requires_recipient_type(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        airlock.main([
+            "--matter-id", "m1", "--file", str(_named_file(tmp_path, "x.docx")),
+            "--output-dir", str(tmp_path / "out"), "--password", "x",
+        ])
+    assert "recipient-type" in capsys.readouterr().err
+
+
+def test_main_rejects_unknown_recipient_type(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        airlock.main([
+            "--matter-id", "m1", "--file", str(_named_file(tmp_path, "x.docx")),
+            "--recipient-type", "not_a_real_type",
+            "--output-dir", str(tmp_path / "out"), "--password", "x",
+        ])
+
+
+def test_main_no_longer_accepts_policy(tmp_path, capsys):
+    """Clean cutover, not a deprecated alias (approved scope): --policy is
+    simply not a recognized argument anymore."""
+    with pytest.raises(SystemExit):
+        airlock.main([
+            "--matter-id", "m1", "--file", str(_named_file(tmp_path, "x.docx")),
+            "--recipient-type", "opposing_counsel", "--policy", "external_sharing",
+            "--output-dir", str(tmp_path / "out"), "--password", "x",
+        ])
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_main_folder_mode_errors_cleanly_when_folder_missing(tmp_path, capsys):
     rc = airlock.main([
         "--matter-id", "m1", "--folder", str(tmp_path / "nope"),
+        "--recipient-type", "opposing_counsel",
         "--output-dir", str(tmp_path / "out"), "--password", "x",
     ])
     assert rc == 1
@@ -440,6 +670,7 @@ def test_main_folder_mode_errors_cleanly_when_folder_empty(tmp_path, capsys):
     empty.mkdir()
     rc = airlock.main([
         "--matter-id", "m1", "--folder", str(empty),
+        "--recipient-type", "opposing_counsel",
         "--output-dir", str(tmp_path / "out"), "--password", "x",
     ])
     assert rc == 1
@@ -450,6 +681,7 @@ def test_main_files_mode_errors_cleanly_when_a_file_is_missing(tmp_path, capsys)
     present = _named_file(tmp_path, "present.docx")
     rc = airlock.main([
         "--matter-id", "m1", "--files", str(present), str(tmp_path / "absent.docx"),
+        "--recipient-type", "opposing_counsel",
         "--output-dir", str(tmp_path / "out"), "--password", "x",
     ])
     assert rc == 1
@@ -532,23 +764,34 @@ def test_airlock_cli_end_to_end_against_a_real_server(tmp_path, live_server):
         client,
         matter_id=matter["id"],
         file_path=_real_file(tmp_path),
-        policy_id="external_sharing",
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="Jane Doe, Esq.",
+        purpose="integration test",
+        intended_external=True,
         reason="integration test",
         output_dir=out,
         timeout_s=30,
     )
 
     assert result.status == "done"
+    assert result.release_id
     assert (out / "manifest.json").exists()
     assert (out / "report.json").exists()
     assert (out / "certificate.html").read_bytes().startswith(b"<!doctype html>")
     assert (out / "release_packet.json").exists()
+    assert (out / "release_result.json").exists()
     assert any(out.glob("*.docx"))
     summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
     assert summary["matter_id"] == matter["id"]
     assert summary["status"] == "done"
+    assert summary["release_id"] == result.release_id
 
-    # PR 37: the CLI's own extracted output directory, written verbatim
+    release_result = json.loads((out / "release_result.json").read_text())
+    assert release_result["release_id"] == result.release_id
+    assert release_result["status"] == "done"
+
+    # PR 37/43: the CLI's own extracted output directory, written verbatim
     # from a real server's real release packet, passes the real verifier
     # -- not a synthetic fixture.
     import counselclear_verify_release_packet as verifier
@@ -559,10 +802,12 @@ def test_airlock_cli_end_to_end_against_a_real_server(tmp_path, live_server):
 
 
 def test_airlock_cli_batch_end_to_end_against_a_real_server_mixed_folder(tmp_path, live_server):
-    """PR 38: a real folder with one file that sanitizes cleanly and one
-    that gets refused (macro-enabled), driven through the actual batch
-    CLI entry point (main(), not run_airlock_batch() directly) against a
-    real server."""
+    """PR 38/43: a real folder with one file that sanitizes cleanly and
+    one that gets refused (macro-enabled), driven through the actual
+    batch CLI entry point (main(), not run_airlock_batch() directly)
+    against a real server. Verifies both outcomes' artifacts with the
+    real offline verifier -- the done item's full packet, and the
+    refused item's standalone release_result.json."""
     client = airlock.Client(live_server)
     client.login("airlockpw123")
     matter = client._json("POST", "/v1/matters", payload={"name": "Airlock Batch Integration"})
@@ -578,7 +823,8 @@ def test_airlock_cli_batch_end_to_end_against_a_real_server_mixed_folder(tmp_pat
         "--password", "airlockpw123",
         "--matter-id", matter["id"],
         "--folder", str(folder),
-        "--policy", "external_sharing",
+        "--profile", "counterparty_deal_room",
+        "--recipient-type", "opposing_counsel",
         "--reason", "batch integration test",
         "--output-dir", str(out),
         "--timeout-s", "30",
@@ -590,6 +836,8 @@ def test_airlock_cli_batch_end_to_end_against_a_real_server_mixed_folder(tmp_pat
 
     summary = json.loads((out / "BATCH_RESULT.json").read_text())
     assert summary["total"] == 2
+    assert summary["profile_id"] == "counterparty_deal_room"
+    assert summary["recipient_type"] == "opposing_counsel"
     assert summary["counts"]["done"] == 1
     assert summary["counts"]["error"] == 0
     statuses = {item["input_file"]: item["status"] for item in summary["items"]}
@@ -599,14 +847,19 @@ def test_airlock_cli_batch_end_to_end_against_a_real_server_mixed_folder(tmp_pat
     done_item = next(item for item in summary["items"] if item["status"] == "done")
     done_dir = out / done_item["output_dir"]
     assert (done_dir / "release_packet.json").exists()
+    assert (done_dir / "release_result.json").exists()
     assert any(done_dir.glob("*.docx"))
 
     refused_item = next(item for item in summary["items"] if item["status"] == "refused")
     refused_dir = out / refused_item["output_dir"]
     assert (refused_dir / "certificate.html").exists()
+    assert (refused_dir / "release_result.json").exists()
     assert not any(refused_dir.glob("*.docm"))
 
     import counselclear_verify_release_packet as verifier
 
-    report = verifier.verify_release_packet(done_dir)
-    assert report.valid, report.to_text()
+    packet_report = verifier.verify_release_packet(done_dir)
+    assert packet_report.valid, packet_report.to_text()
+
+    result_report = verifier.verify_release_result(refused_dir / "release_result.json")
+    assert result_report.valid, result_report.to_text()
