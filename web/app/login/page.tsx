@@ -44,7 +44,11 @@ export default function LoginPage() {
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
           <h1 className="text-xl font-semibold tracking-tight">CounselClear</h1>
-          <p className="mt-1 text-sm text-muted">Legal-document sanitization &amp; custody</p>
+          {/* PR 44: was "Legal-document sanitization & custody" -- same
+              conservative rewrite as layout.tsx's metadata description,
+              matching the Release Gate framing every surface past this
+              login screen already uses. */}
+          <p className="mt-1 text-sm text-muted">Policy-governed document release with custody records</p>
         </div>
 
         {config === null ? (

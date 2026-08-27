@@ -532,6 +532,135 @@ def test_main_auto_detects_release_result_vs_release_packet(tmp_path, capsys):
     assert "INTERNALLY CONSISTENT" in capsys.readouterr().out
 
 
+# --- verify_release_packet_and_result(): both artifacts present, cross-checked --
+
+
+def _matching_result_for(packet: dict, files: dict) -> dict:
+    """A release_result.json built to agree with `packet` on every field
+    verify_release_packet_and_result compares -- used as the "agree"
+    baseline; individual tests below mutate one field to force a
+    disagreement."""
+    return {
+        "spec_version": "1.0",
+        "release_id": packet["release_id"],
+        "job_id": packet["job_id"],
+        "document_id": packet["document_id"],
+        "matter_id": packet["matter_id"],
+        "status": packet["status"],
+        "policy_id": packet["policy"]["id"],
+        "profile_id": "counterparty_deal_room",
+        "recipient_type": "opposing_counsel",
+        "recipient_name": "",
+        "purpose": "",
+        "intended_external": True,
+        "reason": "",
+        "original_sha256": packet["original_sha256"],
+        "created_at": "2026-08-27T00:00:00+00:00",
+        "finished_at": "2026-08-27T00:00:05+00:00",
+        "audit_refs": {"release_created_seq": 1, "release_terminal_seq": 2},
+        "limitations": packet["limitations"],
+        "certificate_html_sha256": _sha256(files["certificate.html"]),
+        "generated_at": "2026-08-27T00:00:05+00:00",
+        "anchor": {"type": "none", "digest": None, "reference": None},
+    }
+
+
+def test_verify_both_artifacts_agree_when_consistent(tmp_path):
+    files = _packet_files(
+        release_id="REL1", job_id="JOB1", document_id="DOC1", matter_id="MAT1",
+        status="done", policy_id="external_sharing",
+    )
+    out = _write_dir(tmp_path, files)
+    packet = json.loads((out / "release_packet.json").read_text())
+    result = _matching_result_for(packet, files)
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+
+    report = verifier.verify_release_packet_and_result(out)
+    assert report.valid, report.to_text()
+    assert report.packet.valid
+    assert report.result.valid
+    assert all(cc.status != "mismatch" for cc in report.agreement)
+    matched = {cc.name for cc in report.agreement if cc.status == "match"}
+    for field_name in ("release_id", "job_id", "document_id", "matter_id", "status", "original_sha256", "limitations"):
+        assert f"{field_name} (packet vs result)" in matched, f"{field_name} should have matched, not been skipped"
+    assert "policy_id (packet vs result)" in matched
+    text = report.to_text()
+    assert "INTERNALLY CONSISTENT" in text.splitlines()[0]
+    assert "release_packet.json" in text
+    assert "release_result.json" in text
+
+
+def test_verify_both_artifacts_fails_loudly_on_status_disagreement(tmp_path):
+    files = _packet_files(
+        release_id="REL1", job_id="JOB1", document_id="DOC1", matter_id="MAT1",
+        status="done", policy_id="external_sharing",
+    )
+    out = _write_dir(tmp_path, files)
+    packet = json.loads((out / "release_packet.json").read_text())
+    result = _matching_result_for(packet, files)
+    result["status"] = "refused"  # disagrees with the packet's "done"
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+
+    report = verifier.verify_release_packet_and_result(out)
+    assert not report.valid
+    status_check = next(cc for cc in report.agreement if cc.name == "status (packet vs result)")
+    assert status_check.status == "mismatch"
+    assert "done" in status_check.detail
+    assert "refused" in status_check.detail
+    assert "INTERNALLY INCONSISTENT" in report.to_text().splitlines()[0]
+
+
+def test_verify_both_artifacts_fails_loudly_on_release_id_disagreement(tmp_path):
+    """The most consequential disagreement -- release_result.json
+    describing a DIFFERENT release than the packet it's sitting next to
+    (e.g. two files accidentally mixed from different runs)."""
+    files = _packet_files(
+        release_id="REL1", job_id="JOB1", document_id="DOC1", matter_id="MAT1", status="done",
+    )
+    out = _write_dir(tmp_path, files)
+    packet = json.loads((out / "release_packet.json").read_text())
+    result = _matching_result_for(packet, files)
+    result["release_id"] = "REL-DIFFERENT"
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+
+    report = verifier.verify_release_packet_and_result(out)
+    assert not report.valid
+    release_id_check = next(cc for cc in report.agreement if cc.name == "release_id (packet vs result)")
+    assert release_id_check.status == "mismatch"
+
+
+def test_verify_both_artifacts_profile_id_unavailable_for_legacy_packet(tmp_path):
+    """_packet_files() builds a legacy-shaped packet with no "release"
+    sub-object -- profile_id has nothing to compare against, which must
+    report "unavailable", not "mismatch", and must not fail the whole
+    report on its own."""
+    files = _packet_files(release_id="REL1", status="done")
+    out = _write_dir(tmp_path, files)
+    packet = json.loads((out / "release_packet.json").read_text())
+    assert "release" not in packet  # confirms the fixture really is legacy-shaped here
+    result = _matching_result_for(packet, files)
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+
+    report = verifier.verify_release_packet_and_result(out)
+    assert report.valid, report.to_text()
+    profile_check = next(cc for cc in report.agreement if cc.name == "profile_id (packet vs result)")
+    assert profile_check.status == "unavailable"
+
+
+def test_main_verifies_both_artifacts_when_both_present(tmp_path, capsys):
+    files = _packet_files(release_id="REL1", status="done")
+    out = _write_dir(tmp_path, files)
+    packet = json.loads((out / "release_packet.json").read_text())
+    result = _matching_result_for(packet, files)
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+
+    rc = verifier.main([str(out)])
+    assert rc == 0
+    text = capsys.readouterr().out
+    assert "Both release_packet.json and release_result.json are present" in text
+    assert "Agreement between release_packet.json and release_result.json" in text
+
+
 # --- doctrine guard: no engine/app dependency -----------------------------------
 
 

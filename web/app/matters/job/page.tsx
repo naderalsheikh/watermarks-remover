@@ -7,7 +7,7 @@ import { api } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format";
 import { useApiData } from "@/lib/useApi";
 import { hasMatterPerm } from "@/lib/matterPermissions";
-import type { Finding, Job, Manifest, Matter } from "@/lib/types";
+import type { Finding, Job, Manifest, Matter, Release } from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
 
@@ -20,6 +20,33 @@ function formatBytes(n: number): string {
 
 function titleCase(s: string): string {
   return s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Mirrors service/app/main.py's RELEASE_PROFILES/RECIPIENT_TYPE_LABEL and
+// web/app/matters/view/page.tsx's own copy of the latter (PR 44) -- a
+// third small literal, not a shared import, same reasoning as every
+// other policy/profile constant duplicated across this app's surfaces.
+const RELEASE_PROFILE_LABEL: Record<string, string> = {
+  counterparty_deal_room: "Counterparty / Deal Room Release",
+  public_filing_anonymized: "Public Filing / Anonymized Release",
+  ediscovery_production: "E-Discovery / Production Release",
+};
+
+function releaseProfileLabel(profileId: string): string {
+  return RELEASE_PROFILE_LABEL[profileId] ?? profileId;
+}
+
+const RECIPIENT_TYPE_LABEL: Record<string, string> = {
+  opposing_counsel: "Opposing counsel",
+  court: "Court / tribunal",
+  client: "Client",
+  regulator: "Regulator",
+  internal_reviewer: "Internal reviewer",
+  other: "Other",
+};
+
+function recipientTypeLabel(recipientType: string): string {
+  return RECIPIENT_TYPE_LABEL[recipientType] ?? recipientType;
 }
 
 const RISK_ORDER: Finding["risk_level"][] = ["critical", "high", "medium", "low", "info"];
@@ -199,7 +226,7 @@ function EmbeddedImageNotice({ actions }: { actions: string[] }) {
 // undecided content; it must never look identical to a fully-reviewed one.
 // Deliberately rendered above CustodyCard: this is the one disclosure that
 // must not be missable, and must hold regardless of whether the job was
-// submitted through this UI (which gates it, see SanitizePanel) or
+// submitted through this UI (which gates it, see ReleasePanel) or
 // directly via the API (which doesn't).
 const NO_DECISION_MARKER = "no operator decision was supplied";
 
@@ -407,6 +434,16 @@ function JobView({
         : Promise.resolve(null),
     `manifest:${matterId}:${jobId}:${manifestReady}`,
   );
+  // Release context (PR 44): reuses the existing release-detail route --
+  // no new backend surface. Fetched only when job.release_id is present
+  // (PR 40's own mechanism for discovering a job's Release at all).
+  const { data: release } = useApiData(
+    () =>
+      job?.release_id
+        ? api.get<Release>(`/v1/matters/${matterId}/releases/${job.release_id}`)
+        : Promise.resolve(null),
+    `release:${matterId}:${job?.release_id ?? ""}`,
+  );
   const [includeOriginal, setIncludeOriginal] = useState(false);
   // Dashboard "unreviewed findings" deep link (?highlight=unreviewed):
   // scroll straight to the warning once the manifest that renders it has
@@ -485,26 +522,55 @@ function JobView({
               </p>
               {/* PR 40: the ONLY way this page finds the Release that
                   wraps this job -- release_id travels on the job payload
-                  itself, no separate Release detail page or lookup route
-                  in this pass. release_result.json is produced for every
-                  terminal release regardless of outcome, so this link
-                  doesn't need to be gated on status the way the full
-                  release packet section below is (that one only exists
-                  for a done sanitize). Absent entirely for a job with no
-                  release_id -- an inspect job, or one created through the
+                  itself, no separate Release detail page or lookup route.
+                  release_result.json is produced for every terminal
+                  release regardless of outcome, so this link doesn't need
+                  to be gated on status the way the full release packet
+                  section below is (that one only exists for a done
+                  sanitize). Absent entirely for a job with no release_id
+                  -- an inspect job, or one created through the
                   still-untouched legacy /sanitize-jobs route. */}
               {job.release_id && (
-                <p className="mt-1 text-xs text-muted">
-                  Part of a release ·{" "}
-                  <a
-                    href={`/v1/matters/${matterId}/releases/${job.release_id}/result`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-medium text-accent hover:underline"
-                  >
-                    Download release result (JSON)
-                  </a>
-                </p>
+                <div className="mt-2 rounded-md border border-border bg-black/[0.02] px-3 py-2 text-sm dark:bg-white/[0.02]">
+                  {/* PR 44: reuses GET .../releases/{id} (existing since
+                      PR 39) -- no new backend route. release_result.json
+                      already carried this data; it just wasn't rendered
+                      anywhere a human would naturally look. Careful
+                      language throughout: "prepared for release", never
+                      "sent"/"delivered" -- this system has no way to know
+                      whether the packet actually reached anyone. */}
+                  {release ? (
+                    <>
+                      <p>
+                        Prepared for release under{" "}
+                        <span className="font-medium">{releaseProfileLabel(release.profile_id)}</span>
+                        {" "}(<code className="font-mono text-xs">{release.profile_id}</code>)
+                      </p>
+                      <p className="mt-1 text-muted">
+                        Recipient: {recipientTypeLabel(release.recipient_type)}
+                        {release.recipient_name ? ` — ${release.recipient_name}` : ""}
+                      </p>
+                      {release.purpose && <p className="mt-1 text-muted">Purpose: {release.purpose}</p>}
+                      <p className="mt-1 text-muted">
+                        {release.intended_external
+                          ? "Intended to leave the organization"
+                          : "Intended to remain internal — not for external release"}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-muted">Part of a release — loading details…</p>
+                  )}
+                  <p className="mt-2">
+                    <a
+                      href={`/v1/matters/${matterId}/releases/${job.release_id}/result`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-accent hover:underline"
+                    >
+                      Download release result (JSON)
+                    </a>
+                  </p>
+                </div>
               )}
               {job.status === "failed" && job.error && (
                 <div className="mt-3 rounded-md border border-red-600/30 bg-red-600/5 px-4 py-3 text-sm text-red-700 dark:text-red-400">

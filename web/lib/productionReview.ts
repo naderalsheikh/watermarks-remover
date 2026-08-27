@@ -16,7 +16,7 @@ export type ProductionReviewState = {
   approveSubtypes: string[];
 };
 
-// Extracted from SanitizePanel (web/app/matters/view/page.tsx) so the exact
+// Extracted from ReleasePanel (web/app/matters/view/page.tsx) so the exact
 // bug class it exists to prevent — a failed inspect-detail fetch reading as
 // "review available" and silently dropping both the per-finding controls
 // and the fallback acknowledgment gate — has a regression test that runs

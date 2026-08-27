@@ -9,7 +9,7 @@ where practical, and reports plainly what it could and could not verify
 isn't, in this release; see the module docstring's "Anchor status"
 section below).
 
-Two artifact shapes, two entry points:
+Two artifact shapes, three entry points:
 
 - `verify_release_packet()` -- a full release packet (.zip or extracted
   directory): derivative + manifest.json + report.json + certificate.html
@@ -18,8 +18,14 @@ Two artifact shapes, two entry points:
   file, or a directory containing it and optionally a sibling
   certificate.html): the lightweight artifact PR 39's Release object
   produces for EVERY terminal release, including a refused or failed one
-  that never gets a full packet. `main()` below auto-detects which one
-  it was handed.
+  that never gets a full packet.
+- `verify_release_packet_and_result()` (PR 44) -- when a directory
+  contains BOTH artifacts (e.g. the Airlock CLI's own done-release
+  output since PR 43), verifies each independently AND cross-checks
+  that they agree on release_id/job_id/document_id/matter_id/status/
+  policy or profile/original_sha256/limitations. Never silently picks
+  one artifact and ignores the other; a disagreement fails loudly.
+  `main()` below auto-detects which of the three shapes it was handed.
 
 This tool makes NO network calls, imports NOTHING from service/app or
 service/scripts, and never touches a database. It only ever reads bytes
@@ -523,6 +529,126 @@ def verify_release_result(path: Path) -> ReleaseResultReport:
     )
 
 
+# release_packet.json's field name -> release_result.json's field name, for
+# every fact the two artifacts both claim to describe. "unavailable" (not a
+# failure) when either side doesn't have the field at all -- e.g. profile_id
+# is absent from a legacy, non-Release packet. Anything present on both
+# sides that disagrees is a real MISMATCH: PR 44's whole point is that nothing
+# ever silently prefers one artifact over the other when both exist.
+_AGREEMENT_FIELDS = (
+    ("release_id", "release_id"),
+    ("job_id", "job_id"),
+    ("document_id", "document_id"),
+    ("matter_id", "matter_id"),
+    ("status", "status"),
+    ("original_sha256", "original_sha256"),
+    ("limitations", "limitations"),
+)
+
+
+@dataclass
+class CombinedReport:
+    """verify_release_packet_and_result()'s own report: both artifacts
+    verified independently (never silently preferring one when both
+    exist in the same directory), plus an explicit cross-check that they
+    describe the same release consistently."""
+
+    valid: bool
+    packet: VerificationReport
+    result: ReleaseResultReport
+    agreement: list[CrossCheck] = field(default_factory=list)
+
+    def to_text(self) -> str:
+        lines: list[str] = []
+        lines.append("INTERNALLY CONSISTENT" if self.valid else "INTERNALLY INCONSISTENT")
+        lines.append("")
+        lines.append(
+            "Both release_packet.json and release_result.json are present -- "
+            "verified independently below, then cross-checked for agreement."
+        )
+        lines.append("")
+        lines.append("=== release_packet.json ===")
+        lines.append(self.packet.to_text())
+        lines.append("")
+        lines.append("=== release_result.json ===")
+        lines.append(self.result.to_text())
+        lines.append("")
+        lines.append("=== Agreement between release_packet.json and release_result.json ===")
+        for cc in self.agreement:
+            marker = {"match": "ok", "mismatch": "MISMATCH", "unavailable": "not checkable"}[cc.status]
+            lines.append(f"  {cc.name}: {marker}" + (f" -- {cc.detail}" if cc.detail else ""))
+        return "\n".join(lines)
+
+
+def verify_release_packet_and_result(path: Path) -> CombinedReport:
+    """When a directory contains BOTH release_packet.json and
+    release_result.json (e.g. the Airlock CLI's own output for a done
+    release since PR 43), verify each independently and assert they
+    agree on release_id/job_id/document_id/matter_id/status/policy or
+    profile/original_sha256/limitations. Never silently picks one and
+    ignores the other; a disagreement fails loudly (valid=False), not
+    quietly. *path* must be a directory -- a bare release_packet.json
+    .zip can never also contain a release_result.json alongside it."""
+    packet_report = verify_release_packet(path)
+    result_report = verify_release_result(path)
+
+    agreement: list[CrossCheck] = []
+    try:
+        packet_manifest = json.loads((path / "release_packet.json").read_bytes())
+    except (OSError, json.JSONDecodeError):
+        packet_manifest = {}
+    try:
+        result_manifest = json.loads((path / "release_result.json").read_bytes())
+    except (OSError, json.JSONDecodeError):
+        result_manifest = {}
+
+    for packet_field, result_field in _AGREEMENT_FIELDS:
+        pv = packet_manifest.get(packet_field)
+        rv = result_manifest.get(result_field)
+        if pv is None or rv is None:
+            agreement.append(
+                CrossCheck(
+                    f"{packet_field} (packet vs result)", "unavailable",
+                    "not present in both artifacts",
+                )
+            )
+            continue
+        status = "match" if pv == rv else "mismatch"
+        detail = "" if status == "match" else f"packet={pv!r} result={rv!r}"
+        agreement.append(CrossCheck(f"{packet_field} (packet vs result)", status, detail))
+
+    # policy_id: packet nests it at policy.id; result has it flat.
+    packet_policy_id = (packet_manifest.get("policy") or {}).get("id")
+    result_policy_id = result_manifest.get("policy_id")
+    if packet_policy_id is not None and result_policy_id is not None:
+        status = "match" if packet_policy_id == result_policy_id else "mismatch"
+        detail = "" if status == "match" else f"packet={packet_policy_id!r} result={result_policy_id!r}"
+        agreement.append(CrossCheck("policy_id (packet vs result)", status, detail))
+    else:
+        agreement.append(CrossCheck("policy_id (packet vs result)", "unavailable", "not present in both artifacts"))
+
+    # profile_id: only present on a Release-aware packet's "release"
+    # sub-object (PR 42) -- absent entirely for a legacy packet, which is
+    # not a failure, just nothing to compare.
+    packet_profile_id = (packet_manifest.get("release") or {}).get("profile_id")
+    result_profile_id = result_manifest.get("profile_id")
+    if packet_profile_id is not None and result_profile_id is not None:
+        status = "match" if packet_profile_id == result_profile_id else "mismatch"
+        detail = "" if status == "match" else f"packet={packet_profile_id!r} result={result_profile_id!r}"
+        agreement.append(CrossCheck("profile_id (packet vs result)", status, detail))
+    else:
+        agreement.append(
+            CrossCheck("profile_id (packet vs result)", "unavailable", "not present in both artifacts")
+        )
+
+    valid = (
+        packet_report.valid
+        and result_report.valid
+        and all(cc.status != "mismatch" for cc in agreement)
+    )
+    return CombinedReport(valid=valid, packet=packet_report, result=result_report, agreement=agreement)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument(
@@ -531,14 +657,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    # Auto-detect: a bare release_result.json, or a directory that has one
-    # but no release_packet.json (a refused/failed release's output has
-    # no packet at all), goes through the smaller result verifier.
+    # Auto-detect, in priority order:
+    #   1. a directory with BOTH artifacts -> verify and cross-check both,
+    #      never silently pick one (PR 44).
+    #   2. a bare release_result.json, or a directory that has one but no
+    #      release_packet.json (a refused/failed release's output has no
+    #      packet at all) -> the smaller result verifier alone.
+    #   3. otherwise -> the full packet verifier alone.
     path = args.path
+    has_both = path.is_dir() and (path / "release_packet.json").is_file() and (path / "release_result.json").is_file()
     is_result = path.name == "release_result.json" or (
         path.is_dir() and (path / "release_result.json").is_file() and not (path / "release_packet.json").is_file()
     )
-    report = verify_release_result(path) if is_result else verify_release_packet(path)
+    if has_both:
+        report = verify_release_packet_and_result(path)
+    elif is_result:
+        report = verify_release_result(path)
+    else:
+        report = verify_release_packet(path)
     print(report.to_text())
     return 0 if report.valid else 1
 

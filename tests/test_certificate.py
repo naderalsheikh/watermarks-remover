@@ -170,6 +170,82 @@ def test_certificate_content_for_completed_sanitize_job(env):
     assert f'href="/matters/job?matter={mid}&amp;job={job["id"]}"' in body
 
 
+# --- release context (PR 44) -------------------------------------------------------
+
+
+def test_certificate_shows_release_context_for_a_release_wrapped_job(env):
+    """A job created via POST .../releases (not the legacy /sanitize-jobs
+    this file's own _sanitize() helper uses) must surface who it was
+    prepared for, under which profile, and why -- in careful "prepared
+    for release" language, never a delivery claim."""
+    c, _, _ = env
+    mid = _matter(c, "Release Certificate Matter")
+    doc = _upload(c, mid, "spa.docx")
+    r = c.post(
+        f"/v1/matters/{mid}/documents/{doc}/releases",
+        json={
+            "profile_id": "counterparty_deal_room",
+            "recipient_type": "opposing_counsel",
+            "recipient_name": "Jane Doe, Esq.",
+            "purpose": "settlement negotiation",
+            "intended_external": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    job = r.json()["job"]
+    assert job["status"] == "done"
+
+    body = _certificate(c, mid, job["id"]).text
+    assert "Counterparty / Deal Room Release" in body
+    assert "counterparty_deal_room" in body
+    assert "Opposing counsel" in body
+    assert "Jane Doe, Esq." in body
+    assert "settlement negotiation" in body
+    assert "Prepared for release" in body
+    assert "Intended to leave the organization" in body
+    # Careful language: never a delivery/transmission claim.
+    assert "Sent to" not in body
+    assert "Delivered to" not in body
+    assert "was sent" not in body.lower()
+    assert "was delivered" not in body.lower()
+
+
+def test_certificate_shows_internal_only_intent_when_not_external(env):
+    c, _, _ = env
+    mid = _matter(c, "Internal Release Matter")
+    doc = _upload(c, mid, "spa.docx")
+    r = c.post(
+        f"/v1/matters/{mid}/documents/{doc}/releases",
+        json={
+            "profile_id": "public_filing_anonymized",
+            "recipient_type": "internal_reviewer",
+            "intended_external": False,
+        },
+    )
+    assert r.status_code == 200, r.text
+    job = r.json()["job"]
+
+    body = _certificate(c, mid, job["id"]).text
+    assert "Internal reviewer" in body
+    assert "Intended to remain internal" in body
+    assert "not for external release" in body
+
+
+def test_certificate_has_no_release_section_for_a_legacy_job(env):
+    """A job created via the still-untouched /sanitize-jobs route has no
+    Release wrapper -- the certificate must not render a "Release"
+    section at all, not an empty or misleading one."""
+    c, _, _ = env
+    mid = _matter(c, "Legacy Certificate Matter")
+    doc = _upload(c, mid, "spa.docx")
+    job = _sanitize(c, mid, doc, policy_id="external_sharing")
+    assert job["status"] == "done"
+
+    body = _certificate(c, mid, job["id"]).text
+    assert "<h2>Release</h2>" not in body
+    assert "Prepared for release" not in body
+
+
 # --- no-decision / operator-kept limitations --------------------------------------
 
 

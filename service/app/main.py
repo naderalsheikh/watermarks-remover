@@ -316,6 +316,7 @@ def _render_job_certificate_html(
     audit_integrity_ok: bool,
     generated_at: str,
     generated_by: str,
+    release_context: dict | None = None,
 ) -> str:
     """Self-contained per-job custody/transaction certificate (PR 33).
 
@@ -349,6 +350,36 @@ def _render_job_certificate_html(
             "<h2>Policy</h2>"
             f"<p><code>{esc(policy_id)}</code> (v{esc(policy_version)})"
             f"{f' — {esc(policy_description)}' if policy_description else ''}</p>"
+        )
+
+    # release_context is None for a legacy job with no Release wrapper --
+    # this section is absent entirely then, same as policy_html is absent
+    # for an inspect job. "Prepared for release" throughout, deliberately
+    # never "sent"/"delivered": this certifies what CounselClear itself
+    # did (produced this under a chosen profile, for a stated recipient
+    # and purpose), never that the document actually reached anyone.
+    release_html = ""
+    if release_context is not None:
+        recipient_label = RECIPIENT_TYPE_LABEL.get(
+            release_context["recipient_type"], release_context["recipient_type"]
+        )
+        recipient_line = f"Recipient: {esc(recipient_label)}"
+        if release_context.get("recipient_name"):
+            recipient_line += f" — {esc(release_context['recipient_name'])}"
+        purpose_line = (
+            f"<br>Purpose: {esc(release_context['purpose'])}" if release_context.get("purpose") else ""
+        )
+        intent_line = (
+            "Intended to leave the organization"
+            if release_context["intended_external"]
+            else "Intended to remain internal — not for external release"
+        )
+        release_html = (
+            "<h2>Release</h2>"
+            f"<p>Prepared for release under profile <code>{esc(release_context['profile_label'])}</code> "
+            f"(<code>{esc(release_context['profile_id'])}</code>).<br>"
+            f"{recipient_line}{purpose_line}<br>"
+            f"{esc(intent_line)}.</p>"
         )
 
     hashes_html = f"<p>Original SHA-256: <code>{esc(original_sha256)}</code>"
@@ -452,6 +483,7 @@ Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
 {hashes_html}
 
 {policy_html}
+{release_html}
 {inspect_findings_html}
 
 <h2>Manifest actions</h2>
@@ -583,6 +615,21 @@ RECIPIENT_TYPES = (
     "internal_reviewer",
     "other",
 )
+
+# Mirrors web/app/matters/view/page.tsx's RECIPIENT_TYPE_LABEL -- the one
+# other place recipient_type's raw slug gets a human-readable label
+# (PR 44: the certificate now shows it too). Kept as a second literal
+# copy, not a shared import, for the same reason RECIPIENT_TYPES itself
+# is a tuple literal here rather than sourced from the frontend: main.py
+# has no dependency on web/, and shouldn't grow one for a label map.
+RECIPIENT_TYPE_LABEL = {
+    "opposing_counsel": "Opposing counsel",
+    "court": "Court / tribunal",
+    "client": "Client",
+    "regulator": "Regulator",
+    "internal_reviewer": "Internal reviewer",
+    "other": "Other",
+}
 
 
 class LoginBody(BaseModel):
@@ -2368,6 +2415,23 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             for ev in job_events
         )
 
+        # release_context (PR 44): None for a legacy job with no Release
+        # wrapper -- _render_job_certificate_html renders nothing for
+        # this section then, same as it already does for policy_html on
+        # an inspect job.
+        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
+        release_context = None
+        if release is not None:
+            profile = next((p for p in RELEASE_PROFILES if p["id"] == release.profile_id), None)
+            release_context = {
+                "profile_id": release.profile_id,
+                "profile_label": profile["label"] if profile else release.profile_id,
+                "recipient_type": release.recipient_type,
+                "recipient_name": release.recipient_name,
+                "purpose": release.purpose,
+                "intended_external": release.intended_external,
+            }
+
         body = _render_job_certificate_html(
             matter_id=matter.id,
             matter_name=matter.name,
@@ -2393,6 +2457,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             audit_integrity_ok=audit_integrity_ok,
             generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
             generated_by=generated_by,
+            release_context=release_context,
         )
         return body, policy_id, limitations
 
