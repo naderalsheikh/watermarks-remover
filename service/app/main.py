@@ -774,7 +774,39 @@ def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
     return result.rowcount or 0, affected_batch_ids
 
 
-def _log_startup_posture(cfg: Config, swept: int, storage) -> None:
+def _reconcile_stale_releases(s: Session) -> int:
+    """Catches a narrower crash window the sweep above cannot: a Job that
+    already reached a terminal status (done/refused/failed) through the
+    normal path -- sync_job's own commit -- before the process died on
+    the next line, mid-sync_release, leaving its sibling Release stuck
+    queued/running forever with no release.terminal event. The sweep
+    above only targets a Job still running/queued itself; a Job that's
+    already terminal is untouched by it and by definition, so this is a
+    separate check: any Release whose own status disagrees with its
+    (already-terminal) Job's status, reconciled the same way a normal
+    completion already would have.
+
+    Safe to run every boot, not just after a crash: a Release and its
+    Job are always expected to agree once the Job is terminal, so an
+    empty result here is the normal case, not a special one.
+    """
+    stale = (
+        s.query(Release, Job)
+        .join(Job, Job.id == Release.job_id)
+        .filter(
+            Release.status.in_(("queued", "running")),
+            Job.status.in_(("done", "refused", "failed")),
+        )
+        .all()
+    )
+    for _release, job in stale:
+        sync_release(s, job)
+    if stale:
+        s.commit()
+    return len(stale)
+
+
+def _log_startup_posture(cfg: Config, swept: int, storage, *, reconciled_releases: int = 0) -> None:
     """One-time, non-secret operational summary at boot — this app shipped
     with zero logging until now, which meant an operator running it
     unisolated or with a no-op malware scanner had no way to notice short
@@ -788,6 +820,7 @@ def _log_startup_posture(cfg: Config, swept: int, storage) -> None:
         db_backend="postgres" if cfg.database_url else "sqlite",
         storage=storage.describe(),
         orphaned_jobs_failed=swept,
+        stale_releases_reconciled=reconciled_releases,
     )
     if cfg.storage_mode == "s3" and cfg.retention_days <= 0:
         log.warning(
@@ -909,7 +942,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # batch.completed event -- nothing else ever re-checks it.
         for batch_id in affected_batch_ids:
             dispatcher.check_batch_completion(s, batch_id)
-    _log_startup_posture(cfg, swept, storage)
+        # Separate from the sweep above: a Release whose Job already
+        # reached a terminal status through the normal path, but whose
+        # own sync_release never ran (process died in between) -- the
+        # sweep's own job-status-based query can't see this case.
+        reconciled_releases = _reconcile_stale_releases(s)
+    _log_startup_posture(cfg, swept, storage, reconciled_releases=reconciled_releases)
     dispatcher.start()
 
     # Docs are fail-closed: /docs, /redoc and /openapi.json carry no auth
@@ -2189,21 +2227,32 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             .order_by(Job.created_utc.desc())
             .all()
         )
+        # release_id/profile_id: one batched lookup across this matter's
+        # jobs, not per-row -- same pattern _attention_items/_batch_dict/
+        # list_jobs already use. Null for an inspect job or one from the
+        # legacy /sanitize-jobs route, same as everywhere else.
+        releases_by_job = {
+            r.job_id: r
+            for r in s.query(Release).filter(Release.job_id.in_([j.id for j, _ in jobs])).all()
+        }
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(
             [
                 "job_id", "document_id", "document_filename", "kind", "policy_id",
                 "status", "error", "verification_pass", "created_utc", "finished_utc",
+                "release_id", "profile_id",
             ]
         )
         for job, filename in jobs:
             result = job.result_json or {}
+            release = releases_by_job.get(job.id)
             writer.writerow(
                 [
                     job.id, job.document_id, filename, job.kind, job.policy_id,
                     job.status, job.error, result.get("verification_pass", ""),
                     job.created_utc, job.finished_utc or "",
+                    release.id if release else "", release.profile_id if release else "",
                 ]
             )
         return Response(

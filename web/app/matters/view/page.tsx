@@ -319,10 +319,15 @@ const STATUS_TONE_CLASS: Record<StatusTone, string> = {
   orange: "text-orange-700 dark:text-orange-400",
 };
 
+// documentNextStep() returns the same tone for a done Release as for a
+// done legacy sanitize (and for "in progress" either way) -- filtering
+// by tone already correctly includes both, but "Sanitized"/"needs
+// sanitize" alone implied only the legacy case, which a reader clicking
+// the chip had no way to know included Released documents too.
 const STATUS_TONE_LABEL: Record<StatusTone, string> = {
   muted: "Not reviewed",
-  amber: "In progress / needs sanitize",
-  emerald: "Sanitized",
+  amber: "In progress / needs release",
+  emerald: "Sanitized / Released",
   red: "Failed",
   orange: "Refused",
 };

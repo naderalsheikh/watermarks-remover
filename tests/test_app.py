@@ -449,10 +449,14 @@ def test_jobs_export_returns_every_job_as_csv_and_the_route_is_not_shadowed(clie
     assert rows[0] == [
         "job_id", "document_id", "document_filename", "kind", "policy_id",
         "status", "error", "verification_pass", "created_utc", "finished_utc",
+        "release_id", "profile_id",
     ]
     assert len(rows) - 1 == 3
     assert {row[2] for row in rows[1:]} == {"doc0.txt", "doc1.txt", "doc2.txt"}
     assert all(row[5] == "done" for row in rows[1:])
+    # None of these are release-wrapped (inspect jobs never are) -- both
+    # new columns must be present but empty, not omitted.
+    assert all(row[10] == "" and row[11] == "" for row in rows[1:])
 
 
 def test_jobs_export_is_read_gated_not_admin_gated(tmp_path, monkeypatch):

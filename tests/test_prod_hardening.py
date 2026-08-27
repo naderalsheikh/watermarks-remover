@@ -91,6 +91,38 @@ def test_orphaned_jobs_are_failed_on_startup(tmp_path):
         assert s.get(Job, "jdone").status == "done"
 
 
+def test_full_app_boot_reconciles_a_stale_release_on_an_already_done_job(tmp_path):
+    """Integration-level check that _reconcile_stale_releases is actually
+    wired into create_app's startup, not just callable standalone -- a
+    Release whose Job already finished before the process died (the
+    sweep above can't see this: "jdone" is left alone by design) must
+    still come out synced after a fresh boot of the same data root."""
+    cfg, sf, pw = _seed_app(tmp_path)
+    with sf() as s:
+        _seed_matter_doc(s)
+        s.flush()
+        s.add(Job(id="jdone2", matter_id="m", document_id="d", kind="sanitize", status="done"))
+        s.add(
+            Release(
+                id="rdone2", matter_id="m", document_id="d", job_id="jdone2",
+                policy_id="external_sharing", profile_id="counterparty_deal_room",
+                recipient_type="other", requested_by="operator", status="running",
+            )
+        )
+        s.commit()
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setenv("COUNSELCLEAR_LOCAL_PASSWORD", pw)
+    try:
+        c = TestClient(create_app(cfg.data_root))
+        assert c.get("/health").status_code == 200
+    finally:
+        monkey.undo()
+
+    with sf() as s:
+        assert s.get(Release, "rdone2").status == "done"
+
+
 def test_sweep_syncs_orphaned_jobs_sibling_release_to_failed(tmp_path):
     """Bugfix: a Release-wrapped job orphaned by a restart (running, or
     queued with no batch -- both swept to "failed" above) used to leave

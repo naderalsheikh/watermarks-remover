@@ -520,3 +520,86 @@ def test_attention_item_for_refused_release_carries_release_id(env):
     item = next(i for i in dash["attention"] if i.get("document_id") == doc_id)
     assert item["release_id"] == release["id"]
     assert item["profile_id"] == release["profile_id"]
+
+
+# --- jobs CSV export carries release_id/profile_id ---------------------------------
+
+
+def test_jobs_export_csv_carries_release_id_and_profile_id(env):
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    release = _create_release(c, mid, doc_id).json()["release"]
+
+    r = c.get(f"/v1/matters/{mid}/jobs/export")
+    assert r.status_code == 200
+    import csv
+    import io
+
+    rows = list(csv.reader(io.StringIO(r.text)))
+    header = rows[0]
+    row = rows[1]
+    assert header[-2:] == ["release_id", "profile_id"]
+    assert row[header.index("release_id")] == release["id"]
+    assert row[header.index("profile_id")] == release["profile_id"]
+
+
+# --- boot reconciliation for a stale Release on an already-terminal Job ----------
+
+
+def test_reconcile_stale_releases_syncs_release_whose_job_already_finished(env):
+    """Bugfix: a Release whose Job already reached a terminal status
+    through the normal path, but whose own sync_release never ran (the
+    narrow crash window between sync_job's commit and sync_release's own
+    commit) -- the boot orphan sweep can't catch this, since it only
+    targets a Job still running/queued itself, not an already-terminal
+    one. _reconcile_stale_releases is the separate check for exactly
+    this: any Release whose status disagrees with its already-terminal
+    Job's status."""
+    from app.main import _reconcile_stale_releases
+
+    c, sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    with sf() as s:
+        s.add(
+            Job(
+                id="rj1", matter_id=mid, document_id=doc_id, kind="sanitize",
+                policy_id="external_sharing", status="done", finished_utc="2026-08-27T00:00:05+00:00",
+            )
+        )
+        s.add(
+            Release(
+                id="rr1", matter_id=mid, document_id=doc_id, job_id="rj1",
+                policy_id="external_sharing", profile_id="counterparty_deal_room",
+                recipient_type="other", requested_by="operator", status="queued",
+            )
+        )
+        s.commit()
+
+    with sf() as s:
+        reconciled = _reconcile_stale_releases(s)
+    assert reconciled == 1
+
+    with sf() as s:
+        release = s.get(Release, "rr1")
+        assert release.status == "done"
+        assert release.finished_utc == "2026-08-27T00:00:05+00:00"
+        terminal = next(
+            e
+            for e in s.query(AuditEvent).filter_by(matter_id=mid).all()
+            if e.action == "release.terminal" and e.payload.get("release_id") == "rr1"
+        )
+        assert terminal.payload["status"] == "done"
+
+
+def test_reconcile_stale_releases_is_a_noop_when_nothing_stale(env):
+    from app.main import _reconcile_stale_releases
+
+    c, sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    _create_release(c, mid, doc_id)  # a normal, already-synced release
+
+    with sf() as s:
+        assert _reconcile_stale_releases(s) == 0
