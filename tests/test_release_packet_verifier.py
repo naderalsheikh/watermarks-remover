@@ -506,6 +506,18 @@ def test_release_result_always_reports_not_externally_anchored():
     assert text.splitlines()[0] == "INTERNALLY CONSISTENT"
 
 
+def test_audit_refs_note_appears_for_both_report_types(tmp_path):
+    """audit_refs' seq numbers are declared, not independently checkable
+    offline -- this tool has no database access. Both report types must
+    say so explicitly, not just the anchor status."""
+    packet_report = verifier.verify_release_packet(_write_dir(tmp_path / "pkt", _packet_files()))
+    assert "audit_refs cites seq numbers" in packet_report.to_text()
+    assert "GET /v1/matters/{id}/audit" in packet_report.to_text()
+
+    result_report = verifier.ReleaseResultReport(valid=True, schema_ok=True, anchor_type="none")
+    assert "audit_refs cites seq numbers" in result_report.to_text()
+
+
 def test_main_auto_detects_release_result_vs_release_packet(tmp_path, capsys):
     result_dir = tmp_path / "refused"
     result_dir.mkdir()

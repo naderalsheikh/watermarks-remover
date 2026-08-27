@@ -23,7 +23,7 @@ from app.config import Config
 from app.db import make_engine, make_session_factory
 from app.main import create_app
 from app.migrate import upgrade_head
-from app.models import AuditEvent, Batch, Document, Job, Matter
+from app.models import AuditEvent, Batch, Document, Job, Matter, Release
 from app.security import LoginThrottle
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "legal"
@@ -89,6 +89,48 @@ def test_orphaned_jobs_are_failed_on_startup(tmp_path):
         assert "restart" in s.get(Job, "jrunning").error
         assert s.get(Job, "jqueued").status == "failed"
         assert s.get(Job, "jdone").status == "done"
+
+
+def test_sweep_syncs_orphaned_jobs_sibling_release_to_failed(tmp_path):
+    """Bugfix: a Release-wrapped job orphaned by a restart (running, or
+    queued with no batch -- both swept to "failed" above) used to leave
+    its sibling Release stuck "queued" forever, with no release.terminal
+    event -- the same class of gap a normally-completed job's Release
+    never has (dispatcher.sync_release). Covers both orphan shapes in one
+    test since _sweep_orphaned_jobs handles them in the same pass."""
+    from app.main import _sweep_orphaned_jobs
+
+    _cfg, sf, _pw = _seed_app(tmp_path)
+    with sf() as s:
+        _seed_matter_doc(s)
+        s.add(Job(id="jrunning", matter_id="m", document_id="d", kind="sanitize", status="running"))
+        s.add(Job(id="jqueued", matter_id="m", document_id="d", kind="sanitize", status="queued"))
+        s.add(
+            Release(
+                id="rrunning", matter_id="m", document_id="d", job_id="jrunning",
+                policy_id="external_sharing", profile_id="counterparty_deal_room",
+                recipient_type="other", requested_by="operator", status="running",
+            )
+        )
+        s.add(
+            Release(
+                id="rqueued", matter_id="m", document_id="d", job_id="jqueued",
+                policy_id="external_sharing", profile_id="counterparty_deal_room",
+                recipient_type="other", requested_by="operator", status="queued",
+            )
+        )
+        s.commit()
+
+    with sf() as s:
+        _sweep_orphaned_jobs(s)
+
+    with sf() as s:
+        for release_id in ("rrunning", "rqueued"):
+            release = s.get(Release, release_id)
+            assert release.status == "failed"
+            assert release.finished_utc is not None
+        terminal_events = [e for e in s.query(AuditEvent).filter_by(matter_id="m").all() if e.action == "release.terminal"]
+        assert {e.payload["release_id"] for e in terminal_events} == {"rrunning", "rqueued"}
 
 
 def test_sweep_fails_running_batch_child_but_preserves_queued_batch_child(tmp_path):

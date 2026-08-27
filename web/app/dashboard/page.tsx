@@ -76,6 +76,11 @@ const ACTION_LABEL: Record<string, string> = {
   "bundle.download": "Downloaded bundle",
   "attest.issued": "Issued attestation",
   "attest.used": "Used attestation",
+  // PR 41: Release's own two lifecycle events (service/app/main.py) --
+  // "terminal", not "completed": this fires for a refused/failed release
+  // too, not just a done one.
+  "release.created": "Prepared a release",
+  "release.terminal": "Release finished",
 };
 
 function formatTs(ts: string): string {

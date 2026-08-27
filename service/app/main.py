@@ -36,7 +36,7 @@ from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, per
 from .audit import append_event, event_hash, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
-from .dispatcher import BatchDispatcher
+from .dispatcher import BatchDispatcher, sync_release
 from .malware import get_scanner
 from .migrate import upgrade_head
 from .models import (
@@ -741,12 +741,24 @@ def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
         .distinct()
         .all()
     ]
-    result = s.execute(
-        update(Job)
-        .where(
+    # release_id/profile_id bugfix: a swept job's sibling Release (if
+    # any) must be synced to "failed" too, same as a normally-completed
+    # job already is (dispatcher.sync_release) -- otherwise it's stuck
+    # "queued" forever with no release.terminal event. Collected up
+    # front, before the bulk UPDATE, since the UPDATE itself can't hand
+    # back which rows it touched the way an ORM save would.
+    affected_job_ids = [
+        row[0]
+        for row in s.query(Job.id)
+        .filter(
             (Job.status == "running")
             | ((Job.status == "queued") & (Job.batch_id.is_(None)))
         )
+        .all()
+    ]
+    result = s.execute(
+        update(Job)
+        .where(Job.id.in_(affected_job_ids))
         .values(
             status="failed",
             error="interrupted by an application restart",
@@ -754,6 +766,11 @@ def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
         )
     )
     s.commit()
+    if affected_job_ids:
+        s.expire_all()
+        for job_id in affected_job_ids:
+            sync_release(s, s.get(Job, job_id))
+        s.commit()
     return result.rowcount or 0, affected_batch_ids
 
 
@@ -2059,12 +2076,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # Same permission the batch was created under -- whoever could
         # start this kind of run may also stop its not-yet-started part.
         _require(matter_id, batch.kind, s, user)
-        result = s.execute(
-            update(Job)
-            .where(Job.batch_id == batch_id, Job.status == "queued")
-            .values(status="failed", error="cancelled by operator", finished_utc=_now())
-        )
-        cancelled = result.rowcount or 0
+        # Collected up front, before the bulk UPDATE, same reasoning as
+        # _sweep_orphaned_jobs above: the UPDATE itself can't hand back
+        # which rows it touched the way an ORM save would, and each
+        # cancelled job's sibling Release (if any) needs syncing too.
+        cancelled_ids = [
+            row[0]
+            for row in s.query(Job.id).filter(Job.batch_id == batch_id, Job.status == "queued").all()
+        ]
+        if cancelled_ids:
+            s.execute(
+                update(Job)
+                .where(Job.id.in_(cancelled_ids))
+                .values(status="failed", error="cancelled by operator", finished_utc=_now())
+            )
+        cancelled = len(cancelled_ids)
         if cancelled:
             append_event(
                 s,
@@ -2074,6 +2100,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 payload={"batch_id": batch_id, "cancelled": cancelled},
             )
         s.commit()
+        if cancelled_ids:
+            # release_id/profile_id bugfix: a cancelled child's sibling
+            # Release (if any) is stuck "queued" forever, with no
+            # release.terminal event, unless synced here explicitly --
+            # cancel_batch bypasses the dispatcher's own normal per-job
+            # completion path entirely.
+            s.expire_all()
+            for job_id in cancelled_ids:
+                sync_release(s, s.get(Job, job_id))
+            s.commit()
         # Cancelling every still-queued child can itself be what finishes
         # the batch (nothing was ever claimed by the dispatcher to trigger
         # its own completion check) -- most visibly when the whole batch
@@ -2479,6 +2515,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "spec_version": "1.0",
             "packet_id": job.id,
             "release_id": release.id if release else None,
+            # Nullable as a whole (mirrors release_id): absent for a
+            # legacy, unwrapped job. Otherwise the same recipient/purpose/
+            # intent context release_result.json already carries -- a
+            # reviewer of the full packet shouldn't have to also fetch
+            # the lighter companion JSON just to see who this was for.
+            "release": (
+                {
+                    "profile_id": release.profile_id,
+                    "recipient_type": release.recipient_type,
+                    "recipient_name": release.recipient_name,
+                    "purpose": release.purpose,
+                    "intended_external": release.intended_external,
+                }
+                if release
+                else None
+            ),
             "matter_id": matter.id,
             "document_id": doc.id,
             "job_id": job.id,
@@ -2900,6 +2952,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         -- one computation, two callers, not two hand-maintained copies.
         """
         attention: list[dict] = []
+        # release_id/profile_id: one batched lookup across every Release
+        # in these matters, not per-item -- same pattern _batch_dict/
+        # list_jobs already use. Fetched once, up front, since both
+        # job-bearing queues below (unreviewed_findings, refused/failed)
+        # need it.
+        releases_by_job = {
+            r.job_id: r for r in s.query(Release).filter(Release.matter_id.in_(matter_ids)).all()
+        }
 
         # Trust-critical queue 1: done sanitize jobs whose manifest kept
         # findings without an operator decision. Every such job shipped a
@@ -2932,6 +2992,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     "document_id": job.document_id,
                     "document_name": doc_name,
                     "job_id": job.id,
+                    "release_id": releases_by_job[job.id].id if job.id in releases_by_job else None,
+                    "profile_id": (
+                        releases_by_job[job.id].profile_id if job.id in releases_by_job else None
+                    ),
                     "detail": (
                         f"{len(kept_unreviewed)} finding(s) kept without operator review"
                     ),
@@ -2960,6 +3024,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                         "document_name": doc_name,
                         "job_id": job.id,
                         "kind": job.kind,
+                        "release_id": (
+                            releases_by_job[job.id].id if job.id in releases_by_job else None
+                        ),
+                        "profile_id": (
+                            releases_by_job[job.id].profile_id if job.id in releases_by_job else None
+                        ),
                         "detail": job.error[:300] or label,
                         "created_utc": job.created_utc,
                     }

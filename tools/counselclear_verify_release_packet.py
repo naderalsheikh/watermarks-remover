@@ -164,6 +164,22 @@ def _anchor_note(anchor_type: str | None, *, artifact: str) -> str:
     return f"  anchor reference: (type={anchor_type})"
 
 
+# Shared by both report types, same reasoning as _anchor_note above: this
+# tool has no database access, so audit_refs' seq numbers (bundle_
+# download_seq / certificate_issued_seq / release_created_seq /
+# release_terminal_seq, depending on artifact type) are declared facts,
+# never independently confirmed the way a file hash is. Without this
+# line, "every file check: ok" could read as "the whole packet was
+# confirmed", which overstates what an offline, no-network tool can
+# actually do for a claim that only the live audit chain can settle.
+_AUDIT_REFS_NOTE = (
+    "  audit_refs cites seq numbers in the matter's own tamper-evident audit\n"
+    "  chain -- this tool has no database access, so those numbers are declared\n"
+    "  here, not verified. Cross-check them against the real chain with\n"
+    "  GET /v1/matters/{id}/audit."
+)
+
+
 @dataclass
 class VerificationReport:
     valid: bool
@@ -202,6 +218,7 @@ class VerificationReport:
         lines.append("")
         lines.append(f"Externally anchored: {'no' if self.anchor_type in (None, 'none') else self.anchor_type}")
         lines.append(_anchor_note(self.anchor_type, artifact="packet"))
+        lines.append(_AUDIT_REFS_NOTE)
         if self.errors:
             lines.append("")
             lines.append("Errors:")
@@ -242,6 +259,7 @@ class ReleaseResultReport:
         lines.append("")
         lines.append(f"Externally anchored: {'no' if self.anchor_type in (None, 'none') else self.anchor_type}")
         lines.append(_anchor_note(self.anchor_type, artifact="release result"))
+        lines.append(_AUDIT_REFS_NOTE)
         if self.errors:
             lines.append("")
             lines.append("Errors:")

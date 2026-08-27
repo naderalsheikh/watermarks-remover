@@ -40,6 +40,36 @@ from .runner import run_job, sync_job
 log = logging.getLogger("counselclear")
 
 
+def sync_release(s: Session, job: Job) -> None:
+    """A Job's sibling Release (if any -- most jobs have none, since not
+    every sanitize path goes through the Release-wrapping /releases
+    route) completes the moment ITS OWN Job finishes, independent of
+    anything else. Deliberately never folded into check_batch_completion
+    below: "batch completed" and "this one release completed" are
+    different events on purpose -- see Release's own docstring in
+    models.py.
+
+    A free function, not a BatchDispatcher method (it never touches
+    dispatcher state) -- so main.py's own two other Job-terminal paths
+    that bypass the dispatcher's normal per-job completion flow
+    (cancel_batch's bulk cancel, _sweep_orphaned_jobs' boot-time bulk
+    fail) can call it directly too, instead of leaving their own sibling
+    Release rows stuck "queued" forever with no release.terminal event.
+    """
+    release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
+    if release is None:
+        return
+    release.status = job.status
+    release.finished_utc = job.finished_utc
+    append_event(
+        s,
+        matter_id=job.matter_id,
+        actor_id=release.requested_by,
+        action="release.terminal",
+        payload={"release_id": release.id, "job_id": job.id, "status": job.status},
+    )
+
+
 class BatchDispatcher:
     """Polls for queued batch children and runs them on a bounded pool.
 
@@ -162,32 +192,10 @@ class BatchDispatcher:
             finished = s2.get(Job, job_id)
             batch = s2.get(Batch, batch_id)
             self._append_child_audit(s2, finished, batch)
-            self._sync_release(s2, finished)
+            sync_release(s2, finished)
             self.check_batch_completion(s2, batch_id)
         finally:
             s2.close()
-
-    def _sync_release(self, s: Session, job: Job) -> None:
-        """A Job's sibling Release (if any -- most batch children have
-        none, since not every /batches submission goes through the
-        Release-wrapping /releases route) completes the moment ITS OWN
-        Job finishes, independent of the rest of the batch. Deliberately
-        never folded into check_batch_completion below: "batch
-        completed" and "this one release completed" are different
-        events on purpose -- see Release's own docstring in models.py.
-        """
-        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
-        if release is None:
-            return
-        release.status = job.status
-        release.finished_utc = job.finished_utc
-        append_event(
-            s,
-            matter_id=job.matter_id,
-            actor_id=release.requested_by,
-            action="release.terminal",
-            payload={"release_id": release.id, "job_id": job.id, "status": job.status},
-        )
 
     def _append_child_audit(self, s: Session, job: Job, batch: Batch | None) -> None:
         if batch is None:  # defensive -- batch_id is a real FK, should never be missing

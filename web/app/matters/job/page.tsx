@@ -449,7 +449,11 @@ function JobView({
             <div className="mb-6">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-2xl font-semibold tracking-tight capitalize">
-                  {job.kind} job
+                  {/* job.kind is always "sanitize" for a release-wrapped
+                      job (inspect never gets one) -- "Sanitize job" would
+                      undersell what this page is actually about once a
+                      Release exists for it. */}
+                  {job.release_id ? "Release" : `${job.kind} job`}
                 </h1>
                 <StatusBadge status={job.status} />
                 {/* A done sanitize job has a release packet (below) as its
@@ -554,7 +558,7 @@ function JobView({
             {job.status === "done" && job.kind === "sanitize" && (
               <div className="mb-6 rounded-md border-2 border-accent p-4">
                 <p className="mb-3 text-sm font-medium">
-                  Release packet — the sanitized document and its proof, together
+                  Release packet — the sanitized document and its verification manifest, together
                 </p>
                 <div className="flex flex-wrap items-center gap-3">
                   <label className="flex items-center gap-2 text-sm">

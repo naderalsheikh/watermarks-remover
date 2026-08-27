@@ -18,12 +18,13 @@ function shortHash(h: string): string {
   return h.length > 16 ? `${h.slice(0, 8)}…${h.slice(-8)}` : h;
 }
 
-type Category = "matter" | "document" | "job" | "access" | "download";
+type Category = "matter" | "document" | "job" | "release" | "access" | "download";
 
 const CATEGORY_LABEL: Record<Category, string> = {
   matter: "Matter",
   document: "Documents",
   job: "Jobs",
+  release: "Releases",
   access: "Access",
   download: "Downloads",
 };
@@ -31,11 +32,15 @@ const CATEGORY_LABEL: Record<Category, string> = {
 // The small, fixed action vocabulary this product's audit chain actually
 // emits (service/app/main.py's append_event call sites) — grouped for the
 // filter chips below, not re-derived from a guess at naming conventions.
+// release.* gets its own category, not folded into "job": Release is the
+// business/custody event, Job is the execution mechanism (PR 39/40) --
+// blurring them back together here would undo the whole distinction.
 function categoryOf(action: string): Category {
   if (action.startsWith("matter.")) return "matter";
   if (action.startsWith("document.")) return "document";
   if (action.startsWith("acl.")) return "access";
   if (action.startsWith("bundle.")) return "download";
+  if (action.startsWith("release.")) return "release";
   return "job"; // job.inspect, job.sanitize, attest.issued, attest.used
 }
 

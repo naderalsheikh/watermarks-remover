@@ -34,7 +34,7 @@ from app.config import Config
 from app.db import make_engine, make_session_factory
 from app.main import create_app
 from app.migrate import upgrade_head
-from app.models import AuditEvent, Release
+from app.models import AuditEvent, Batch, Job, Release
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "legal"
 PW = "pw12345"
@@ -418,3 +418,105 @@ def test_batch_release_created_events_fire_per_release_not_once_per_batch(env):
         assert len(terminal_events) == 2
         assert len(batch_created) == 1
         assert len(batch_completed) == 1
+
+
+# --- bugfix: cancel_batch must sync a cancelled child's Release too ---------------
+
+
+def test_cancel_batch_syncs_cancelled_childs_release_to_failed(env):
+    """cancel_batch bulk-updates still-queued children directly, bypassing
+    the dispatcher's normal per-job completion path (BatchDispatcher.
+    sync_release) -- its sibling Release used to be left stuck "queued"
+    forever with no release.terminal event. Seeds the queued Batch/Job/
+    Release directly rather than racing the dispatcher for a still-queued
+    window."""
+    c, sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    with sf() as s:
+        s.add(
+            Batch(
+                id="cb1", matter_id=mid, kind="sanitize", policy_id="external_sharing",
+                requested_by="operator", total=1,
+            )
+        )
+        s.add(
+            Job(
+                id="cbj1", matter_id=mid, document_id=doc_id, kind="sanitize", batch_id="cb1",
+                policy_id="external_sharing", status="queued",
+            )
+        )
+        s.add(
+            Release(
+                id="cbr1", matter_id=mid, document_id=doc_id, batch_id="cb1", job_id="cbj1",
+                policy_id="external_sharing", profile_id="counterparty_deal_room",
+                recipient_type="other", requested_by="operator", status="queued",
+            )
+        )
+        s.commit()
+
+    r = c.post(f"/v1/matters/{mid}/batches/cb1/cancel")
+    assert r.status_code == 200, r.text
+
+    with sf() as s:
+        release = s.get(Release, "cbr1")
+        assert release.status == "failed"
+        assert release.finished_utc is not None
+        terminal = next(
+            e
+            for e in s.query(AuditEvent).filter_by(matter_id=mid).all()
+            if e.action == "release.terminal" and e.payload.get("release_id") == "cbr1"
+        )
+        assert terminal.payload["status"] == "failed"
+
+
+# --- release_packet.json carries release context, additive to PR 39/40 ------------
+
+
+def test_release_packet_json_carries_release_context(env):
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    body = _create_release(
+        c, mid, doc_id, recipient_type="client", recipient_name="Acme Corp",
+        purpose="quarterly filing", intended_external=False,
+    ).json()
+    release, job = body["release"], body["job"]
+
+    bundle = c.get(f"/v1/matters/{mid}/jobs/{job['id']}/bundle")
+    assert bundle.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(bundle.content))
+    packet = json.loads(zf.read("release_packet.json"))
+    assert packet["release"]["profile_id"] == release["profile_id"]
+    assert packet["release"]["recipient_type"] == "client"
+    assert packet["release"]["recipient_name"] == "Acme Corp"
+    assert packet["release"]["purpose"] == "quarterly filing"
+    assert packet["release"]["intended_external"] is False
+
+
+def test_release_packet_json_release_is_null_for_legacy_job(env):
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    r = c.post(f"/v1/matters/{mid}/documents/{doc_id}/sanitize-jobs", json={"policy_id": "external_sharing"})
+    job_id = r.json()["id"]
+    bundle = c.get(f"/v1/matters/{mid}/jobs/{job_id}/bundle")
+    packet = json.loads(zipfile.ZipFile(io.BytesIO(bundle.content)).read("release_packet.json"))
+    assert packet["release_id"] is None
+    assert packet["release"] is None
+
+
+# --- dashboard/summary attention items carry release_id/profile_id ---------------
+
+
+def test_attention_item_for_refused_release_carries_release_id(env):
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "macro.docm")
+    release = _create_release(c, mid, doc_id).json()["release"]
+    assert release["status"] == "refused"
+
+    dash = c.get("/v1/dashboard").json()
+    item = next(i for i in dash["attention"] if i.get("document_id") == doc_id)
+    assert item["release_id"] == release["id"]
+    assert item["profile_id"] == release["profile_id"]
