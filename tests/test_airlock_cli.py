@@ -65,11 +65,17 @@ class FakeClient:
             "findings_before": ["docx-comments: 1 comment(s)"],
             "verification": {"pass": True, "checks": []},
         }
+        release_packet = {
+            "spec_version": "1.0", "job_id": job_id, "matter_id": matter_id,
+            "policy": {"id": "external_sharing", "version": 1, "digest": None},
+            "anchor": {"type": "none", "digest": None, "reference": None},
+        }
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
             zf.writestr("manifest.json", json.dumps(manifest))
             zf.writestr("report.json", json.dumps({"verification": manifest["verification"]}))
             zf.writestr("certificate.html", "<!doctype html><html><body>certificate</body></html>")
+            zf.writestr("release_packet.json", json.dumps(release_packet))
             zf.writestr("README.txt", "CounselClear release packet\n")
             zf.writestr("derivative/doc.sanitized.docx", b"fake derivative bytes")
         return buf.getvalue()
@@ -105,12 +111,14 @@ def test_run_airlock_success_writes_derivative_manifest_certificate_and_summary(
     assert json.loads((out / "manifest.json").read_text())["derivative"]["sha256"] == "d" * 64
     assert (out / "report.json").exists()
     assert (out / "certificate.html").read_bytes().startswith(b"<!doctype html>")
+    assert json.loads((out / "release_packet.json").read_text())["job_id"] == "job1"
     summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
     assert summary["status"] == "done"
     assert summary["job_id"] == "job1"
     assert summary["document_id"] == "doc1"
     assert set(summary["files_written"]) == {
-        "doc.sanitized.docx", "manifest.json", "report.json", "certificate.html", "AIRLOCK_RESULT.json",
+        "doc.sanitized.docx", "manifest.json", "report.json", "certificate.html",
+        "release_packet.json", "README.txt", "AIRLOCK_RESULT.json",
     }
     # The no-decision action from the fake manifest must surface as a
     # limitation, not get silently absorbed into "success".
@@ -287,7 +295,17 @@ def test_airlock_cli_end_to_end_against_a_real_server(tmp_path, live_server):
     assert (out / "manifest.json").exists()
     assert (out / "report.json").exists()
     assert (out / "certificate.html").read_bytes().startswith(b"<!doctype html>")
+    assert (out / "release_packet.json").exists()
     assert any(out.glob("*.docx"))
     summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
     assert summary["matter_id"] == matter["id"]
     assert summary["status"] == "done"
+
+    # PR 37: the CLI's own extracted output directory, written verbatim
+    # from a real server's real release packet, passes the real verifier
+    # -- not a synthetic fixture.
+    import counselclear_verify_release_packet as verifier
+
+    report = verifier.verify_release_packet(out)
+    assert report.valid, report.to_text()
+    assert report.anchor_type == "none"

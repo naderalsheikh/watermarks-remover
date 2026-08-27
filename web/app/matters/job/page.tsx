@@ -315,6 +315,11 @@ function BundleContents({
           (that&apos;s manifest.json).
         </li>
         <li>
+          <code className="font-mono">release_packet.json</code> — content hashes for every
+          file above, checkable offline without trusting this page (not externally
+          anchored yet).
+        </li>
+        <li>
           <code className="font-mono">README.txt</code> — names every file above for someone
           opening this packet without this page.
         </li>
@@ -560,6 +565,20 @@ function JobView({
                     Open it on its own
                   </a>
                   .
+                </p>
+                {/* PR 37: honest, narrow claim only -- what the manifest
+                    actually lets a recipient do (recompute hashes offline
+                    and confirm nothing was swapped), not what it doesn't
+                    yet do. No "unforgeable"/"independently timestamped"/
+                    "court-proof"/"unimpeachable" -- see
+                    docs/release-packet-verification-and-anchoring-proposal.md
+                    §7; this packet is not externally anchored yet. */}
+                <p className="mt-1 text-xs text-muted">
+                  Also includes <code className="font-mono">release_packet.json</code>, a
+                  machine-verifiable manifest — content hashes for every file in this packet,
+                  checkable offline with{" "}
+                  <code className="font-mono">tools/counselclear_verify_release_packet.py</code>.
+                  This packet is not externally anchored (no independent timestamp yet).
                 </p>
                 {manifest && (
                   <BundleContents manifest={manifest} includeOriginal={includeOriginal} />

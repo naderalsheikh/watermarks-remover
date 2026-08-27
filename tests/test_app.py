@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import sys
 import zipfile
 from pathlib import Path
 
@@ -545,7 +547,7 @@ def test_inspect_job_reports_findings(client):
     assert any("layer" in _blob(f).lower() for f in found) or found
 
 
-def test_sanitize_job_privacy_bundle_excludes_original(client):
+def test_sanitize_job_privacy_bundle_excludes_original(client, tmp_path):
     doc = _upload(client, "spa.docx")
     r = client.post(
         f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
@@ -566,6 +568,7 @@ def test_sanitize_job_privacy_bundle_excludes_original(client):
         names = zf.namelist()
         cert_html = zf.read("certificate.html").decode()
         readme = zf.read("README.txt").decode()
+        release_packet = json.loads(zf.read("release_packet.json"))
     assert not any(n.startswith("original/") for n in names)
     # PR 36: the release packet -- derivative, manifest, report, the same
     # custody certificate available standalone, and a README naming each
@@ -576,6 +579,27 @@ def test_sanitize_job_privacy_bundle_excludes_original(client):
     assert "README.txt" in names
     assert "STANDALONE EXPORT" in cert_html  # the real certificate, not a stub
     assert "certificate.html" in readme and "manifest.json" in readme
+
+    # PR 37: release_packet.json travels in every packet, and a real
+    # download from this real route passes the real offline verifier --
+    # not just a synthetic fixture the verifier's own unit tests build.
+    assert "release_packet.json" in names
+    assert release_packet["job_id"] == job_id
+    assert release_packet["matter_id"] == doc["_matter"]
+    assert release_packet["policy"]["id"] == "privacy_only"
+    assert release_packet["anchor"]["type"] == "none"
+
+    tools_dir = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    import counselclear_verify_release_packet as verifier
+
+    zip_path = tmp_path / "downloaded-packet.zip"
+    zip_path.write_bytes(bundle.content)
+    report = verifier.verify_release_packet(zip_path)
+    assert report.valid, report.to_text()
+    assert report.anchor_type == "none"
+    assert "NOT EXTERNALLY ANCHORED" in report.to_text()
 
 
 def test_include_original_denied_by_default(client):

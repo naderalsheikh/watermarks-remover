@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import io
 import json
@@ -1691,15 +1692,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     def _build_certificate_html(
         s: Session, *, matter: Matter, job: Job, doc: Document, generated_by: str
-    ) -> tuple[str, str | None]:
-        """Shared by job_certificate (PR 33) and job_bundle (PR 36, the
+    ) -> tuple[str, str | None, list[str]]:
+        """Shared by job_certificate (PR 33) and job_bundle (PR 36/37, the
         release packet): the exact same certificate content either way,
         so a certificate pulled standalone and one embedded in a release
         packet can never read differently for the same job. Returns
-        (html_body, policy_id) -- callers append their own certificate.issued
-        audit event (payload needs policy_id, job/doc ids callers already
-        have) rather than this helper doing it, since job_bundle commits
-        it alongside its own bundle.download event in one place.
+        (html_body, policy_id, limitations) -- callers append their own
+        certificate.issued audit event (payload needs policy_id, job/doc
+        ids callers already have) rather than this helper doing it, since
+        job_bundle commits it alongside its own bundle.download event in
+        one place.
         """
         result = job.result_json or {}
         manifest = result.get("manifest") or {} if job.kind == "sanitize" else {}
@@ -1793,18 +1795,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
             generated_by=generated_by,
         )
-        return body, policy_id
+        return body, policy_id, limitations
 
     def _append_certificate_issued(
         s: Session, *, matter_id: str, actor_id: str, job: Job, doc: Document, policy_id: str | None
-    ) -> None:
+    ) -> AuditEvent:
         # Mandatory on every pull, including repeats -- "who has pulled a
         # certificate for this document, and when" is itself part of the
         # custody record (approved product decision, 2026-08-26). A
         # release packet embedding the certificate (job_bundle, PR 36) is
         # just as much an issuance as the standalone route, so it fires
-        # this too, alongside its own bundle.download event.
-        append_event(
+        # this too, alongside its own bundle.download event. Returns the
+        # created row so job_bundle (PR 37) can cite its seq in
+        # release_packet.json's audit_refs.
+        return append_event(
             s,
             matter_id=matter_id,
             actor_id=actor_id,
@@ -1847,7 +1851,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         job = _job(matter_id, job_id, s)
         doc = _document(matter_id, job.document_id, s)
 
-        body, policy_id = _build_certificate_html(s, matter=matter, job=job, doc=doc, generated_by=user)
+        body, policy_id, _limitations = _build_certificate_html(
+            s, matter=matter, job=job, doc=doc, generated_by=user
+        )
         _append_certificate_issued(s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id)
         s.commit()
         return Response(content=body, media_type="text/html")
@@ -1884,62 +1890,124 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             original_ref = doc.storage_path
             original_name = doc.filename
 
-        cert_html, policy_id = _build_certificate_html(s, matter=matter, job=job, doc=doc, generated_by=user)
+        cert_html, policy_id, limitations = _build_certificate_html(
+            s, matter=matter, job=job, doc=doc, generated_by=user
+        )
 
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            bundle = Path(job.bundle_dir)
-            for rel in ("manifest.json",):
-                p = bundle / rel
-                if p.exists():
-                    zf.write(p, arcname=rel)
-            deriv_dir = bundle / "derivative"
-            # A truncated/failed worker output can lack the derivative tree
-            # entirely — that's a 409 ("no bundle"), not an unhandled 500.
-            if not deriv_dir.is_dir():
-                raise HTTPException(409, f"job bundle is incomplete: {deriv_dir} missing")
-            deriv_names = [p.name for p in sorted(deriv_dir.iterdir())]
-            for name in deriv_names:
-                zf.write(deriv_dir / name, arcname=f"derivative/{name}")
-            report = {
-                "verification": (job.result_json or {}).get("manifest", {}).get("verification"),
-                "findings_before": (job.result_json or {})
-                .get("manifest", {})
-                .get("findings_before"),
-            }
-            zf.writestr("report.json", json.dumps(report, indent=2, sort_keys=True))
-            zf.writestr("certificate.html", cert_html)
-            zf.writestr(
-                "README.txt",
-                "CounselClear release packet\n"
-                "============================\n"
-                f"Matter:   {matter.name} ({matter.id})\n"
-                f"Document: {doc.filename} ({doc.id})\n"
-                f"Job:      {job.id} ({job.kind}, {job.status})\n"
-                f"Policy:   {policy_id or '(n/a)'}\n\n"
-                "Files in this packet:\n"
-                f"  derivative/{deriv_names[0] if deriv_names else '<name>'}"
-                "   -- the sanitized document\n"
-                "  manifest.json   -- full custody manifest: hashes, policy, actions taken\n"
-                "  report.json     -- verification result and pre-sanitize findings summary\n"
-                "  certificate.html -- the custody certificate; open in a browser for a\n"
-                "                     human-readable summary, including any limitations\n"
-                "  README.txt      -- this file\n\n"
-                "certificate.html is the same certificate available on its own at\n"
-                f"/v1/matters/{matter.id}/jobs/{job.id}/certificate -- read it before\n"
-                "relying on this packet: it discloses anything kept without review,\n"
-                "reviewed-and-kept findings, and any refusal/failure, not just a pass/fail.\n",
-            )
-            if original_ref and storage.exists(original_ref):
-                zf.writestr(f"original/{original_name}", storage.read(original_ref))
-        append_event(
+        bundle = Path(job.bundle_dir)
+        manifest_path = bundle / "manifest.json"
+        manifest_bytes = manifest_path.read_bytes() if manifest_path.exists() else b"{}"
+        deriv_dir = bundle / "derivative"
+        # A truncated/failed worker output can lack the derivative tree
+        # entirely — that's a 409 ("no bundle"), not an unhandled 500.
+        if not deriv_dir.is_dir():
+            raise HTTPException(409, f"job bundle is incomplete: {deriv_dir} missing")
+        deriv_names = [p.name for p in sorted(deriv_dir.iterdir())]
+        deriv_bytes_by_name = {name: (deriv_dir / name).read_bytes() for name in deriv_names}
+        report = {
+            "verification": (job.result_json or {}).get("manifest", {}).get("verification"),
+            "findings_before": (job.result_json or {}).get("manifest", {}).get("findings_before"),
+        }
+        report_bytes = json.dumps(report, indent=2, sort_keys=True).encode("utf-8")
+        cert_bytes = cert_html.encode("utf-8")
+        readme_text = (
+            "CounselClear release packet\n"
+            "============================\n"
+            f"Matter:   {matter.name} ({matter.id})\n"
+            f"Document: {doc.filename} ({doc.id})\n"
+            f"Job:      {job.id} ({job.kind}, {job.status})\n"
+            f"Policy:   {policy_id or '(n/a)'}\n\n"
+            "Files in this packet:\n"
+            f"  derivative/{deriv_names[0] if deriv_names else '<name>'}"
+            "   -- the sanitized document\n"
+            "  manifest.json   -- full custody manifest: hashes, policy, actions taken\n"
+            "  report.json     -- verification result and pre-sanitize findings summary\n"
+            "  certificate.html -- the custody certificate; open in a browser for a\n"
+            "                     human-readable summary, including any limitations\n"
+            "  release_packet.json -- machine-readable manifest: content hashes of every\n"
+            "                     file in this packet, audit references, and whether this\n"
+            "                     packet is externally anchored (not yet -- see that file's\n"
+            "                     own \"anchor\" field). Check it with\n"
+            "                     tools/counselclear_verify_release_packet.py.\n"
+            "  README.txt      -- this file\n\n"
+            "certificate.html is the same certificate available on its own at\n"
+            f"/v1/matters/{matter.id}/jobs/{job.id}/certificate -- read it before\n"
+            "relying on this packet: it discloses anything kept without review,\n"
+            "reviewed-and-kept findings, and any refusal/failure, not just a pass/fail.\n"
+        )
+        readme_bytes = readme_text.encode("utf-8")
+
+        # Audit events first, not last: release_packet.json (built below)
+        # cites their seq numbers, so this row must exist -- and be
+        # committed, append_event's own responsibility -- before the
+        # packet claiming to reference it is assembled.
+        bundle_event = append_event(
             s,
             matter_id=matter_id,
             actor_id=user,
             action="bundle.download",
             payload={"job_id": job.id, "include_original": include_original},
         )
-        _append_certificate_issued(s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id)
+        cert_event = _append_certificate_issued(
+            s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id
+        )
+
+        def _sha256(data: bytes) -> str:
+            return hashlib.sha256(data).hexdigest()
+
+        policy_version = (job.result_json or {}).get("manifest", {}).get("policy", {}).get("version", 1)
+        release_packet = {
+            "spec_version": "1.0",
+            "packet_id": job.id,
+            "matter_id": matter.id,
+            "document_id": doc.id,
+            "job_id": job.id,
+            "kind": job.kind,
+            "status": job.status,
+            "policy": {
+                "id": policy_id,
+                "version": policy_version if policy_id else None,
+                # Reserved, not implemented (docs/release-packet-verification-and-
+                # anchoring-proposal.md §3): hash-pinning the actual policy rule
+                # content, not just its id/version label, is separate design work.
+                "digest": None,
+            },
+            "hashes": {
+                "derivative": {
+                    "filename": deriv_names[0] if deriv_names else None,
+                    "sha256": _sha256(deriv_bytes_by_name[deriv_names[0]]) if deriv_names else None,
+                },
+                "manifest_json_sha256": _sha256(manifest_bytes),
+                "report_json_sha256": _sha256(report_bytes),
+                "certificate_html_sha256": _sha256(cert_bytes),
+                "readme_txt_sha256": _sha256(readme_bytes),
+            },
+            "audit_refs": {
+                "bundle_download_seq": bundle_event.seq,
+                "certificate_issued_seq": cert_event.seq,
+            },
+            "limitations": limitations,
+            "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "generated_by": user,
+            # Not yet implemented -- see docs/release-packet-verification-and-
+            # anchoring-proposal.md §5/§6. "none" is an honest statement, not
+            # an omission: this packet's timestamp and content are currently
+            # self-attested by this system only.
+            "anchor": {"type": "none", "digest": None, "reference": None},
+        }
+        release_packet_bytes = json.dumps(release_packet, indent=2, sort_keys=True).encode("utf-8")
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", manifest_bytes)
+            for name, data in deriv_bytes_by_name.items():
+                zf.writestr(f"derivative/{name}", data)
+            zf.writestr("report.json", report_bytes)
+            zf.writestr("certificate.html", cert_bytes)
+            zf.writestr("release_packet.json", release_packet_bytes)
+            zf.writestr("README.txt", readme_bytes)
+            if original_ref and storage.exists(original_ref):
+                zf.writestr(f"original/{original_name}", storage.read(original_ref))
         s.commit()
         return Response(
             content=buf.getvalue(),

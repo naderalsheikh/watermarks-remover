@@ -161,10 +161,11 @@ class Client:
 
     def get_release_packet_zip(self, matter_id: str, job_id: str) -> bytes | None:
         """The release packet (service/app/main.py's job_bundle route,
-        PR 36): derivative + manifest.json + report.json + certificate.html
-        + README.txt, all in one zip -- the same thing the web UI's
-        "Download release packet" button fetches. None if the job isn't
-        done (nothing to package) or the packet is incomplete server-side."""
+        PR 36/37): derivative + manifest.json + report.json +
+        certificate.html + release_packet.json + README.txt, all in one
+        zip -- the same thing the web UI's "Download release packet"
+        button fetches. None if the job isn't done (nothing to package)
+        or the packet is incomplete server-side."""
         status, body, _ctype = self._raw("GET", f"/v1/matters/{matter_id}/jobs/{job_id}/bundle")
         if status in (404, 409):  # 409: job not done / release packet incomplete
             return None
@@ -273,11 +274,16 @@ def run_airlock(
                         (output_dir / deriv_name).write_bytes(zf.read(name))
                         result.files_written.append(deriv_name)
                 if "manifest.json" in names:
-                    manifest = json.loads(zf.read("manifest.json"))
-                    (output_dir / "manifest.json").write_text(
-                        json.dumps(manifest, indent=2, sort_keys=True)
-                    )
+                    manifest_bytes = zf.read("manifest.json")
+                    # Written verbatim, same reasoning as release_packet.json
+                    # below: release_packet.json's own manifest_json_sha256
+                    # was computed over these exact bytes server-side, so a
+                    # Python-reformatted re-encoding (even of equivalent
+                    # JSON) would break that hash. Still parsed separately,
+                    # in memory only, to derive the limitations list.
+                    (output_dir / "manifest.json").write_bytes(manifest_bytes)
                     result.files_written.append("manifest.json")
+                    manifest = json.loads(manifest_bytes)
                     actions = manifest.get("actions") or []
                     result.limitations = [a for a in actions if any(m in a for m in _LIMITATION_MARKERS)]
                 if "report.json" in names:
@@ -286,6 +292,23 @@ def run_airlock(
                 if "certificate.html" in names:
                     (output_dir / "certificate.html").write_bytes(zf.read("certificate.html"))
                     result.files_written.append("certificate.html")
+                if "release_packet.json" in names:
+                    # Written verbatim (not re-serialized) -- this is the
+                    # exact machine-verifiable manifest a copy of
+                    # tools/counselclear_verify_release_packet.py can check
+                    # offline, so the CLI's copy must be byte-identical to
+                    # what the server produced, not a Python-reformatted
+                    # re-encoding of the same data.
+                    (output_dir / "release_packet.json").write_bytes(zf.read("release_packet.json"))
+                    result.files_written.append("release_packet.json")
+                if "README.txt" in names:
+                    # release_packet.json's hashes include README.txt --
+                    # extracting it too (alongside this CLI's own richer
+                    # AIRLOCK_RESULT.json) means this output directory is
+                    # a complete, self-verifying packet on its own, not a
+                    # partial one that would fail its own verifier.
+                    (output_dir / "README.txt").write_bytes(zf.read("README.txt"))
+                    result.files_written.append("README.txt")
     else:
         # refused/failed: no derivative, so no release packet either (the
         # server 409s -- see get_release_packet_zip). The standalone
