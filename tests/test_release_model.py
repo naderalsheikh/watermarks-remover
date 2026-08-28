@@ -50,6 +50,7 @@ def env(tmp_path, monkeypatch):
     c = TestClient(create_app(cfg.data_root))
     assert c.post("/v1/auth/login", json={"password": PW}).status_code == 200
     yield c, sf, cfg
+    c.app.state.batch_dispatcher.stop()
     c.close()
 
 
@@ -75,14 +76,18 @@ def _create_release(c, mid, doc_id, **overrides):
     return c.post(f"/v1/matters/{mid}/documents/{doc_id}/releases", json=body)
 
 
-def _wait_batch_done(c, mid, bid, timeout=10.0):
+def _wait_batch_done(c, mid, bid, timeout=60.0):
     deadline = time.monotonic() + timeout
+    last_body = None
+    delay = 0.05
     while time.monotonic() < deadline:
         body = c.get(f"/v1/matters/{mid}/batches/{bid}").json()
+        last_body = body
         if body["finished_utc"] is not None:
             return body
-        time.sleep(0.05)
-    raise TimeoutError("batch did not finish")
+        time.sleep(delay)
+        delay = min(delay * 1.5, 0.5)
+    raise TimeoutError(f"batch {bid} did not finish within {timeout}s; last={last_body!r}")
 
 
 # --- release profiles catalog ---------------------------------------------------

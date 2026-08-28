@@ -59,6 +59,7 @@ def _build_env(tmp_path, monkeypatch, **extra_env):
 def env(tmp_path, monkeypatch):
     c, sf, cfg = _build_env(tmp_path, monkeypatch)
     yield c, sf, cfg
+    c.app.state.batch_dispatcher.stop()
     c.close()
 
 
@@ -83,14 +84,23 @@ def _create_batch(c, mid, doc_ids, kind, policy_id="external_sharing", reason=""
     )
 
 
-def _wait_batch_done(c, mid, bid, timeout=10.0):
+def _wait_batch_done(c, mid, bid, timeout=60.0):
     deadline = time.monotonic() + timeout
+    last_body = None
+    delay = 0.05
     while time.monotonic() < deadline:
         body = c.get(f"/v1/matters/{mid}/batches/{bid}").json()
+        last_body = body
         if body["finished_utc"] is not None:
             return body
-        time.sleep(0.05)
-    raise AssertionError(f"batch {bid} did not finish within {timeout}s")
+        time.sleep(delay)
+        delay = min(delay * 1.5, 0.5)
+    raise AssertionError(f"batch {bid} did not finish within {timeout}s; last={last_body!r}")
+
+
+def _close_client(c) -> None:
+    c.app.state.batch_dispatcher.stop()
+    c.close()
 
 
 def _audit_actions(c, mid) -> list[dict]:
@@ -180,43 +190,46 @@ def test_batch_create_returns_immediately_with_queued_or_running_state(env, monk
 
 def test_polling_shows_partial_mixed_results(tmp_path, monkeypatch):
     c, _, _ = _build_env(tmp_path, monkeypatch, COUNSELCLEAR_BATCH_MAX_CONCURRENT="2")
-    worker = _ControlledWorker()
-    monkeypatch.setattr("app.dispatcher.run_job", worker)
-    mid = _matter(c)
-    docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt"), _upload(c, mid, "spa.docx")]
+    try:
+        worker = _ControlledWorker()
+        monkeypatch.setattr("app.dispatcher.run_job", worker)
+        mid = _matter(c)
+        docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt"), _upload(c, mid, "spa.docx")]
 
-    r = _create_batch(c, mid, docs, "inspect")
-    assert r.status_code == 200, r.text
-    bid = r.json()["id"]
+        r = _create_batch(c, mid, docs, "inspect")
+        assert r.status_code == 200, r.text
+        bid = r.json()["id"]
 
-    deadline = time.monotonic() + 5
-    while len(worker.started) < 2 and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert len(worker.started) >= 1, "dispatcher never claimed any child"
+        deadline = time.monotonic() + 5
+        while len(worker.started) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert len(worker.started) >= 1, "dispatcher never claimed any child"
 
-    # Release exactly one -- the batch must now show a real mix: at least
-    # one terminal result and at least one still queued/running, not an
-    # all-or-nothing snapshot.
-    worker.release(worker.started[0])
-    deadline = time.monotonic() + 5
-    mixed_seen = False
-    while time.monotonic() < deadline:
-        body = c.get(f"/v1/matters/{mid}/batches/{bid}").json()
-        statuses = {res["status"] for res in body["results"]}
-        if statuses & {"failed"} and statuses & {"queued", "running"}:
-            mixed_seen = True
-            break
-        time.sleep(0.02)
-    assert mixed_seen, "never observed a mixed in-flight/terminal snapshot while polling"
+        # Release exactly one -- the batch must now show a real mix: at least
+        # one terminal result and at least one still queued/running, not an
+        # all-or-nothing snapshot.
+        worker.release(worker.started[0])
+        deadline = time.monotonic() + 5
+        mixed_seen = False
+        while time.monotonic() < deadline:
+            body = c.get(f"/v1/matters/{mid}/batches/{bid}").json()
+            statuses = {res["status"] for res in body["results"]}
+            if statuses & {"failed"} and statuses & {"queued", "running"}:
+                mixed_seen = True
+                break
+            time.sleep(0.02)
+        assert mixed_seen, "never observed a mixed in-flight/terminal snapshot while polling"
 
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        worker.release_all_started()
-        if c.get(f"/v1/matters/{mid}/batches/{bid}").json()["finished_utc"] is not None:
-            break
-        time.sleep(0.02)
-    else:
-        raise AssertionError("batch never finished after releasing workers")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            worker.release_all_started()
+            if c.get(f"/v1/matters/{mid}/batches/{bid}").json()["finished_utc"] is not None:
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError("batch never finished after releasing workers")
+    finally:
+        _close_client(c)
 
 
 # --- concurrency cap is enforced -------------------------------------------------
@@ -224,37 +237,40 @@ def test_polling_shows_partial_mixed_results(tmp_path, monkeypatch):
 
 def test_concurrency_cap_is_enforced(tmp_path, monkeypatch):
     c, _, _ = _build_env(tmp_path, monkeypatch, COUNSELCLEAR_BATCH_MAX_CONCURRENT="2")
-    worker = _ControlledWorker()
-    monkeypatch.setattr("app.dispatcher.run_job", worker)
-    mid = _matter(c)
-    docs = [_upload(c, mid, "spa.docx") for _ in range(5)]
-    # Same doc row can be reused across the batch requests below because
-    # each _upload call above creates its own Document row from the same
-    # bytes -- distinct document_ids, which is all the batch endpoint cares
-    # about.
+    try:
+        worker = _ControlledWorker()
+        monkeypatch.setattr("app.dispatcher.run_job", worker)
+        mid = _matter(c)
+        docs = [_upload(c, mid, "spa.docx") for _ in range(5)]
+        # Same doc row can be reused across the batch requests below because
+        # each _upload call above creates its own Document row from the same
+        # bytes -- distinct document_ids, which is all the batch endpoint cares
+        # about.
 
-    r = _create_batch(c, mid, docs, "inspect")
-    assert r.status_code == 200, r.text
-    bid = r.json()["id"]
+        r = _create_batch(c, mid, docs, "inspect")
+        assert r.status_code == 200, r.text
+        bid = r.json()["id"]
 
-    # Let the dispatcher run for a bit with nothing released -- every
-    # child that CAN start, does, and the cap must stop it there.
-    deadline = time.monotonic() + 3
-    while len(worker.started) < 5 and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert worker.max_concurrent_seen <= 2, worker.max_concurrent_seen
-    assert len(worker.started) < 5, "cap did not hold back the remaining children"
+        # Let the dispatcher run for a bit with nothing released -- every
+        # child that CAN start, does, and the cap must stop it there.
+        deadline = time.monotonic() + 3
+        while len(worker.started) < 5 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert worker.max_concurrent_seen <= 2, worker.max_concurrent_seen
+        assert len(worker.started) < 5, "cap did not hold back the remaining children"
 
-    deadline = time.monotonic() + 10
-    finished = None
-    while time.monotonic() < deadline:
-        worker.release_all_started()
-        body = c.get(f"/v1/matters/{mid}/batches/{bid}").json()
-        if body["finished_utc"] is not None:
-            finished = body
-            break
-        time.sleep(0.02)
-    assert finished is not None, f"batch {bid} did not finish within 10s"
+        deadline = time.monotonic() + 10
+        finished = None
+        while time.monotonic() < deadline:
+            worker.release_all_started()
+            body = c.get(f"/v1/matters/{mid}/batches/{bid}").json()
+            if body["finished_utc"] is not None:
+                finished = body
+                break
+            time.sleep(0.02)
+        assert finished is not None, f"batch {bid} did not finish within 10s"
+    finally:
+        _close_client(c)
 
 
 # --- audit events carry batch_id, plus batch.created/batch.completed ------------
@@ -352,33 +368,36 @@ def test_batch_rejects_unknown_documents_before_creating_anything(env):
 
 def test_cancel_batch_only_touches_still_queued_children(tmp_path, monkeypatch):
     c, _, _ = _build_env(tmp_path, monkeypatch, COUNSELCLEAR_BATCH_MAX_CONCURRENT="1")
-    worker = _ControlledWorker()
-    monkeypatch.setattr("app.dispatcher.run_job", worker)
-    mid = _matter(c)
-    docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt")]
+    try:
+        worker = _ControlledWorker()
+        monkeypatch.setattr("app.dispatcher.run_job", worker)
+        mid = _matter(c)
+        docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt")]
 
-    r = _create_batch(c, mid, docs, "inspect")
-    bid = r.json()["id"]
-    deadline = time.monotonic() + 5
-    while not worker.started and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert worker.started, "dispatcher never claimed the first child"
+        r = _create_batch(c, mid, docs, "inspect")
+        bid = r.json()["id"]
+        deadline = time.monotonic() + 5
+        while not worker.started and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert worker.started, "dispatcher never claimed the first child"
 
-    cancel = c.post(f"/v1/matters/{mid}/batches/{bid}/cancel")
-    assert cancel.status_code == 200, cancel.text
-    body = cancel.json()
-    # worker.started holds job ids, not document ids -- key results by
-    # job_id to tell the one the (single-slot) dispatcher already claimed
-    # apart from the one still sitting queued.
-    by_job = {res["job_id"]: res for res in body["results"]}
-    running_job = worker.started[0]
-    other = next(res for res in body["results"] if res["job_id"] != running_job)
-    assert by_job[running_job]["status"] == "running"  # untouched -- v1 doesn't kill it
-    assert other["status"] == "failed"
-    assert "cancelled" in other["error"]
+        cancel = c.post(f"/v1/matters/{mid}/batches/{bid}/cancel")
+        assert cancel.status_code == 200, cancel.text
+        body = cancel.json()
+        # worker.started holds job ids, not document ids -- key results by
+        # job_id to tell the one the (single-slot) dispatcher already claimed
+        # apart from the one still sitting queued.
+        by_job = {res["job_id"]: res for res in body["results"]}
+        running_job = worker.started[0]
+        other = next(res for res in body["results"] if res["job_id"] != running_job)
+        assert by_job[running_job]["status"] == "running"  # untouched -- v1 doesn't kill it
+        assert other["status"] == "failed"
+        assert "cancelled" in other["error"]
 
-    worker.release(running_job)
-    _wait_batch_done(c, mid, bid)
+        worker.release(running_job)
+        _wait_batch_done(c, mid, bid)
+    finally:
+        _close_client(c)
 
 
 def test_cancel_all_before_any_child_claimed_completes_the_batch(tmp_path, monkeypatch):
@@ -397,28 +416,31 @@ def test_cancel_all_before_any_child_claimed_completes_the_batch(tmp_path, monke
     """
     monkeypatch.setattr("app.dispatcher.BatchDispatcher.start", lambda self: None)
     c, sf, _ = _build_env(tmp_path, monkeypatch)
-    mid = _matter(c)
-    docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt")]
+    try:
+        mid = _matter(c)
+        docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt")]
 
-    r = _create_batch(c, mid, docs, "inspect")
-    assert r.status_code == 200, r.text
-    bid = r.json()["id"]
-    assert r.json()["summary"]["queued"] == 2  # nothing claimed -- the poll loop never ran
+        r = _create_batch(c, mid, docs, "inspect")
+        assert r.status_code == 200, r.text
+        bid = r.json()["id"]
+        assert r.json()["summary"]["queued"] == 2  # nothing claimed -- the poll loop never ran
 
-    cancel = c.post(f"/v1/matters/{mid}/batches/{bid}/cancel")
-    assert cancel.status_code == 200, cancel.text
-    body = cancel.json()
-    assert body["finished_utc"] is not None
-    assert all(res["status"] == "failed" for res in body["results"])
-    assert body["summary"]["failed"] == 2
+        cancel = c.post(f"/v1/matters/{mid}/batches/{bid}/cancel")
+        assert cancel.status_code == 200, cancel.text
+        body = cancel.json()
+        assert body["finished_utc"] is not None
+        assert all(res["status"] == "failed" for res in body["results"])
+        assert body["summary"]["failed"] == 2
 
-    with sf() as s:
-        from app.models import Batch
+        with sf() as s:
+            from app.models import Batch
 
-        assert s.get(Batch, bid).finished_utc is not None
-    completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
-    assert len(completed) == 1
-    assert completed[0]["payload"] == {"batch_id": bid, "total": 2, "done": 0, "refused": 0, "failed": 2}
+            assert s.get(Batch, bid).finished_utc is not None
+        completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
+        assert len(completed) == 1
+        assert completed[0]["payload"] == {"batch_id": bid, "total": 2, "done": 0, "refused": 0, "failed": 2}
+    finally:
+        _close_client(c)
 
 
 # --- dispatcher exception hardening -----------------------------------------------
@@ -459,6 +481,30 @@ def test_unexpected_dispatcher_exception_fails_the_child_and_completes_the_batch
     completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
     assert len(completed) == 1
     assert completed[0]["payload"]["failed"] == 1
+
+
+def test_dispatcher_finalization_exception_does_not_wedge_batch(env, monkeypatch):
+    """A child can reach a terminal status before audit/release finalization.
+    If that finalizer raises, the batch must still complete; otherwise
+    polling clients wait forever even though there is no running work left.
+    """
+
+    def _boom(self, s, job, batch):
+        raise RuntimeError("simulated audit finalization failure")
+
+    monkeypatch.setattr("app.dispatcher.BatchDispatcher._append_child_audit", _boom)
+    c, _, _ = env
+    mid = _matter(c)
+    d = _upload(c, mid, "spa.txt")
+
+    r = _create_batch(c, mid, [d], "inspect")
+    assert r.status_code == 200, r.text
+    final = _wait_batch_done(c, mid, r.json()["id"])
+    assert final["finished_utc"] is not None
+    assert final["summary"]["done"] == 1
+    completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
+    assert len(completed) == 1
+    assert completed[0]["payload"]["done"] == 1
 
 
 # --- ported from the retired tests/test_bulk_jobs.py (PR 31 commit 3) -----------

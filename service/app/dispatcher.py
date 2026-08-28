@@ -102,11 +102,19 @@ class BatchDispatcher:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="batch-dispatcher")
+        self._started = False
 
     def start(self) -> None:
-        self._thread.start()
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            self._thread.start()
 
     def stop(self) -> None:
+        with self._lock:
+            if not self._started:
+                return
         self._stop.set()
         self._wake.set()
         self._thread.join(timeout=2)
@@ -115,6 +123,7 @@ class BatchDispatcher:
     def wake(self) -> None:
         """Call right after a batch is created so its children dispatch
         promptly instead of waiting up to ``poll_interval_s``."""
+        self.start()
         self._wake.set()
 
     def _loop(self) -> None:
@@ -142,6 +151,21 @@ class BatchDispatcher:
                     continue
                 self._in_flight.add(job_id)
             self._executor.submit(self._run_one, job_id)
+        self._complete_ready_batches()
+
+    def _complete_ready_batches(self) -> None:
+        """Reconcile any unfinished batch whose children are already terminal.
+
+        The normal path marks a batch complete when each child exits
+        _run_one_inner, but completion must not depend on that one finalizer
+        call succeeding: audit/release-sync errors, process death, or a test
+        interruption after a child reaches a terminal status should not leave
+        polling clients waiting forever once all children are terminal.
+        """
+        with self._session_factory() as s:
+            batch_ids = [row[0] for row in s.query(Batch.id).filter(Batch.finished_utc.is_(None)).all()]
+            for batch_id in batch_ids:
+                self.check_batch_completion(s, batch_id)
 
     def _run_one(self, job_id: str) -> None:
         try:
@@ -191,9 +215,14 @@ class BatchDispatcher:
                     s2.commit()
             finished = s2.get(Job, job_id)
             batch = s2.get(Batch, batch_id)
-            self._append_child_audit(s2, finished, batch)
-            sync_release(s2, finished)
-            self.check_batch_completion(s2, batch_id)
+            try:
+                self._append_child_audit(s2, finished, batch)
+                sync_release(s2, finished)
+            except Exception:
+                log.exception("batch dispatcher: job %s finalization raised unexpectedly", job_id)
+                s2.rollback()
+            finally:
+                self.check_batch_completion(s2, batch_id)
         finally:
             s2.close()
 

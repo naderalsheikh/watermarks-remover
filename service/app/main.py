@@ -1190,7 +1190,6 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # sweep's own job-status-based query can't see this case.
         reconciled_releases = _reconcile_stale_releases(s)
     _log_startup_posture(cfg, swept, storage, reconciled_releases=reconciled_releases)
-    dispatcher.start()
 
     # Docs are fail-closed: /docs, /redoc and /openapi.json carry no auth
     # check, so they only exist when explicitly opted in with
@@ -1207,6 +1206,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         redoc_url="/redoc" if docs_enabled else None,
         openapi_url="/openapi.json" if docs_enabled else None,
     )
+    app.state.batch_dispatcher = dispatcher
+
+    @app.on_event("startup")
+    def _start_dispatcher() -> None:
+        dispatcher.start()
 
     @app.on_event("shutdown")
     def _stop_dispatcher() -> None:
