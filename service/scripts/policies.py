@@ -32,6 +32,7 @@ import container_meta
 from av_meta import clean_av
 from common import subprocess_preexec_fn
 from findings import Finding, findings_for_report
+from report_html import SUBTYPE_LABELS
 from text_unicode import clean_text
 
 SUBTYPES = (
@@ -91,10 +92,16 @@ DEFAULT_POLICIES: dict[str, dict[str, str]] = {
         "embeddings_ole": "strip",
         "custom_xml": "strip",
         "external_links": "strip",
-        "pdf_js_actions": "strip",
+        # PR 48: was "strip" -- the engine has no PDF annotation/attachment/
+        # active-content object-graph editor (only OOXML strips, exiftool/
+        # qpdf metadata rewrites, and byte-preserving embedded-image
+        # strips exist). "strip" claimed an action that always ended in
+        # _apply_pdf's own refusal when the content was present; "refuse"
+        # says what actually happens. See _PDF_UNSTRIPPABLE_SUBTYPES below.
+        "pdf_js_actions": "refuse",
         "pdf_acroform": "flag",
-        "pdf_attachments": "strip",
-        "pdf_annots": "strip",
+        "pdf_attachments": "refuse",
+        "pdf_annots": "refuse",
         "tracked_changes": "accept_all",
         "pdf_incremental": "rebuild",
         "c2pa": "strip",
@@ -135,7 +142,13 @@ DEFAULT_POLICIES: dict[str, dict[str, str]] = {
         "embeddings_ole": "approve",
         "custom_xml": "strip",
         "external_links": "approve",
-        "pdf_js_actions": "strip",
+        # PR 48: same reasoning as external_sharing above. pdf_attachments/
+        # pdf_annots stay "approve" -- _APPROVE_RESOLVES_TO derives from
+        # external_sharing's own row (now "refuse"), so an operator who
+        # approves one of these still gets a real, honestly-labeled
+        # refusal rather than a silent no-op -- just no longer one framed
+        # as a successful strip.
+        "pdf_js_actions": "refuse",
         "pdf_acroform": "approve",
         "pdf_attachments": "approve",
         "pdf_annots": "approve",
@@ -495,25 +508,55 @@ def _ooxml_kwargs(plan: ActionPlan) -> dict[str, Any]:
     return kwargs, a
 
 
-_PDF_CONTENT_STRIP_SUBTYPES = (
+# PR 48: subtypes with no PDF object-graph editor at all -- no code
+# anywhere in container_meta.py touches /Annots, /EmbeddedFiles,
+# /OpenAction, /JS, /AA, or /AcroForm. Default policies now say "refuse"
+# for the three that are actually reachable (pdf_js_actions/pdf_annots/
+# pdf_attachments); pdf_acroform stays here too, defensively, in case a
+# custom policy overlay ever sets it to "strip" or "refuse" directly --
+# the engine can't strip it either way, so both values must still refuse
+# rather than silently ship. This list names what the engine can't do,
+# not which single action value triggers the check.
+_PDF_UNSTRIPPABLE_SUBTYPES = (
     "pdf_js_actions",
     "pdf_annots",
     "pdf_attachments",
     "pdf_acroform",
 )
 
+# Stable, greppable marker distinguishing "the engine has no
+# implementation for this yet" from a deliberate policy refusal (macros,
+# an unattested signature). No structured reason code exists end-to-end
+# today -- job.error is a plain string all the way from the worker
+# subprocess's result.json through to the API response (service/app/
+# runner.py's sync_job just copies payload["error"] verbatim) -- so the
+# frontend matches on this exact substring instead. Known technical debt:
+# a real reason-code field would need a Job column/migration to carry it
+# through that boundary; out of scope for this pass. Keep this constant
+# and web/app/matters/job/page.tsx's copy of the same string in sync.
+PDF_CONTENT_REFUSAL_MARKER = "pdf content removal not implemented"
+
 
 def _apply_pdf(
     data: bytes, plan: ActionPlan, a: dict[str, str]
 ) -> tuple[bytes, list[ActionRecord]]:
-    # only refuse for content the document actually carries
+    # only refuse for content the document actually carries. "strip" is
+    # still checked alongside "refuse" so a custom overlay that sets one
+    # of these to "strip" (the pre-PR-48 default's own value) still
+    # refuses instead of silently doing nothing -- the engine's inability
+    # to strip this content doesn't depend on which honest-vs-dishonest
+    # label a policy gives it.
     needed = [
-        st for st in _PDF_CONTENT_STRIP_SUBTYPES if a[st] == "strip" and st in plan.present_subtypes
+        st
+        for st in _PDF_UNSTRIPPABLE_SUBTYPES
+        if a[st] in ("strip", "refuse") and st in plan.present_subtypes
     ]
     if needed:
+        labels = ", ".join(SUBTYPE_LABELS.get(st, st) for st in needed)
         raise PolicyError(
-            f"engine does not implement pdf content strip for: {', '.join(needed)};"
-            " refusing to ship a partial derivative"
+            f"{PDF_CONTENT_REFUSAL_MARKER}: this policy requires removing {labels} from "
+            "this PDF, but that removal isn't implemented; no derivative was produced "
+            "rather than releasing a partial result"
         )
     privacy_pdf = a["authoring_props"] == "strip_listed"
     rebuild = a["pdf_incremental"] == "rebuild"

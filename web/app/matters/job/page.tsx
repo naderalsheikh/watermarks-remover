@@ -22,6 +22,29 @@ function titleCase(s: string): string {
   return s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// PR 48: mirrors service/scripts/policies.py's PDF_CONTENT_REFUSAL_MARKER
+// exactly -- a narrow string match, not a structured reason code, because
+// job.error is a plain string end-to-end (service/app/runner.py's
+// sync_job copies it verbatim from the worker's result.json). Distinguishes
+// "the engine has no PDF annotation/attachment/active-content editor yet"
+// from a deliberate policy refusal (macros, an unattested signature).
+// Known technical debt: a real reason-code field would need a Job
+// column/migration to carry it through the worker-subprocess boundary.
+// Keep this string in sync with the backend constant.
+const PDF_CONTENT_REFUSAL_MARKER = "pdf content removal not implemented";
+
+function isPdfContentCapabilityRefusal(error: string | null): boolean {
+  return !!error && error.includes(PDF_CONTENT_REFUSAL_MARKER);
+}
+
+function stripCapabilityRefusalPrefix(error: string | null): string {
+  if (!error) return "";
+  const idx = error.indexOf(PDF_CONTENT_REFUSAL_MARKER);
+  if (idx === -1) return error;
+  const rest = error.slice(idx + PDF_CONTENT_REFUSAL_MARKER.length).replace(/^:\s*/, "");
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
+
 // Mirrors service/app/main.py's RELEASE_PROFILES/RECIPIENT_TYPE_LABEL and
 // web/app/matters/view/page.tsx's own copy of the latter (PR 44) -- a
 // third small literal, not a shared import, same reasoning as every
@@ -605,19 +628,42 @@ function JobView({
                       overclaimed -- it's accurate for a deliberate refusal
                       (macros, an unattested signature) but not for a PDF
                       hitting the engine's own not-yet-implemented content-
-                      strip paths (pdf_annots/pdf_attachments/pdf_js_actions,
-                      policies.py's _apply_pdf), which also raises a
-                      PolicyError and lands here. The heading no longer
-                      asserts intent it can't back for every case; the body
-                      already states the real, accurate fact (a derivative
-                      was withheld rather than shipped incomplete) regardless
-                      of which of the two reasons caused it. */}
-                  <p className="font-medium">Refused by policy — no derivative was produced.</p>
-                  <p className="mt-1">
-                    The selected policy declined to produce a derivative for this document
-                    rather than ship an incomplete or unsafe result.
-                    {job.error ? ` ${job.error}` : ""}
-                  </p>
+                      strip paths, which also raises and lands here.
+                      PR 48: those two cases are now told apart -- a
+                      deliberate policy decision (nothing to ask for) reads
+                      differently from a capability gap (the policy asked
+                      for a removal the engine can't perform yet). Matched
+                      by a narrow string check on job.error, not a
+                      structured reason code -- see policies.py's own
+                      PDF_CONTENT_REFUSAL_MARKER docstring for why: job.error
+                      is a plain string end-to-end today (service/app/
+                      runner.py's sync_job copies it verbatim from the
+                      worker's result.json), and adding a real code would
+                      need a Job column/migration to carry it through that
+                      boundary. Keep this constant in sync with policies.py's
+                      copy of the same string. */}
+                  {isPdfContentCapabilityRefusal(job.error) ? (
+                    <>
+                      <p className="font-medium">
+                        Refused — this policy would require removing PDF content that
+                        isn&apos;t implemented yet.
+                      </p>
+                      <p className="mt-1">
+                        {stripCapabilityRefusalPrefix(job.error)} This is a gap in what the
+                        engine can currently remove, not a decision that this content should
+                        stay.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="font-medium">Refused by policy — no derivative was produced.</p>
+                      <p className="mt-1">
+                        The selected policy declined to produce a derivative for this document
+                        rather than ship an incomplete or unsafe result.
+                        {job.error ? ` ${job.error}` : ""}
+                      </p>
+                    </>
+                  )}
                 </div>
               )}
               {(job.status === "running" || job.status === "queued") && (
