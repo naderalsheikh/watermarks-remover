@@ -44,8 +44,20 @@ _PASSIVE = {"keep", "flag", "inspect_only"}
 _MUTATING = {"strip", "accept_all", "rebuild", "sanitize"}
 # Dropped-part name fragments allowed under non-strict policies (external_sharing /
 # production). Matched case-insensitively against the full part path.
+#
+# "customxml" matches the customXml/*.xml tree parts (e.g. customXml/item1.xml)
+# but NOT docProps/custom.xml -- a different OOXML part (custom *document
+# properties*, not custom XML data storage) whose literal "." between
+# "custom" and "xml" breaks that substring match. container_meta.py's
+# drop_custom_xml flag (set from policy custom_xml == "strip",
+# policies.py's DEFAULT_POLICIES) deliberately drops both under the same
+# policy action -- "docprops/custom.xml" is listed separately, as the
+# full expected path rather than a bare "custom.xml" fragment, so this
+# only recognizes that one specific, intended part and not an arbitrary
+# unrelated *.custom.xml part elsewhere in the archive.
 _ALLOWED_DROP_TAGS = (
-    "comment", "customxml", "embedding", "externallink", "notesslide", "people", "person",
+    "comment", "customxml", "docprops/custom.xml", "embedding", "externallink",
+    "notesslide", "people", "person",
 )
 
 _PDF_PAGE_RE = re.compile(rb"/Type\s*/Page(?![a-zA-Z])")

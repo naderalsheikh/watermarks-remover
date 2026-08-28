@@ -150,6 +150,58 @@ def test_part_inventory_allowlist_is_case_insensitive_and_covers_identity_parts(
     assert inv["pass"] is True, inv["detail"]
 
 
+def test_docprops_custom_xml_drop_passes_inventory_under_external_sharing():
+    """Regression: a real DOCX carrying docProps/custom.xml (custom document
+    properties -- e.g. a firm's "Matter Number" field, distinct from the
+    customXml/*.xml *data storage* tree) used to fail part_inventory under
+    external_sharing/production. container_meta.py's drop_custom_xml flag
+    (set from policy custom_xml == "strip") deliberately drops this part
+    the same way it drops customXml/ trees -- but verify.py's allowlist
+    fragment "customxml" doesn't match "docprops/custom.xml" (the literal
+    "." between "custom" and "xml" breaks the substring match), so the
+    drop was flagged as an unexplained part loss and the release failed
+    with "verification failed: part_inventory" for a document doing
+    exactly what the policy intended."""
+    content_types = (
+        '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/>"
+        "<Override PartName='/docProps/custom.xml' ContentType='application/vnd.openxmlformats-officedocument.custom-properties+xml'/>"
+        "</Types>"
+    )
+    custom_props = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" '
+        'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+        '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="Matter Number">'
+        "<vt:lpwstr>2026-CV-00456</vt:lpwstr></property></Properties>"
+    )
+    data = _zip(
+        {
+            "[Content_Types].xml": content_types,
+            "word/document.xml": (
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                "<w:body><w:p><w:r><w:t>Trust terms.</w:t></w:r></w:p></w:body></w:document>"
+            ),
+            "docProps/custom.xml": custom_props,
+        }
+    )
+    res = inspect_bytes(data, "trust.docx")
+    plan = plan_actions(res, "external_sharing")
+    cleaned, _records = apply_actions(data, plan)
+
+    with zipfile.ZipFile(io.BytesIO(cleaned)) as zf:
+        names = set(zf.namelist())
+    assert "docProps/custom.xml" not in names  # the drop this policy intends
+
+    report = verify_derivative(data, cleaned, plan, name="trust.docx")
+    inv = next(c for c in report["checks"] if c["name"] == "part_inventory")
+    assert inv["pass"] is True, inv["detail"]
+    assert "docProps/custom.xml" in inv["detail"]
+    assert report["pass"] is True
+
+
 def test_part_inventory_still_rejects_non_allowlisted_drop():
     from policies import ActionPlan
 
