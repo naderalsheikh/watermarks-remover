@@ -179,7 +179,7 @@ function ReleasePanel({
 
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className="mb-1 block text-xs font-medium">Recipient</label>
+          <label className="mb-1 block text-xs font-medium">Recipient (required)</label>
           <select
             value={recipientType}
             onChange={(e) => setRecipientType(e.target.value)}
@@ -289,10 +289,14 @@ function ReleasePanel({
         />
         This release is intended to leave the organization
       </label>
-      <label className="flex items-center gap-2 text-xs">
-        <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />
-        I attest to breaking a digital signature if this job requires it
-      </label>
+      {/* PR 47: was a top-level checkbox, always rendered regardless of
+          whether this document has a signature at all -- there's no way
+          to know that in advance without an inspect job (a Release can
+          run without one), so it can't be conditionally hidden the way a
+          real detection would. Moved into Technical details instead: it's
+          genuinely an edge case, not a primary choice, and competing with
+          "intended to leave the organization" for a first-time evaluator's
+          attention overstated how often it matters. */}
       {selectedProfile && (
         <details className="text-xs text-muted">
           <summary className="cursor-pointer select-none">Technical details</summary>
@@ -301,6 +305,10 @@ function ReleasePanel({
             release is not externally anchored — see the release packet or release result for what
             that means.
           </p>
+          <label className="mt-2 flex items-center gap-2">
+            <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />
+            I attest to breaking a digital signature, if this document has one
+          </label>
         </details>
       )}
       {submitError && <p className="text-xs text-red-600">{submitError}</p>}
@@ -576,7 +584,12 @@ function DocumentRow({
                   href={`/matters/job?matter=${matterId}&job=${j.id}`}
                   className="font-medium capitalize hover:underline"
                 >
-                  {j.kind}
+                  {/* PR 47: j.kind is always "sanitize" for a release-wrapped
+                      job (inspect never gets one) -- the same reason the job
+                      page's own H1 already branches on release_id instead of
+                      showing raw kind. This list didn't, so every job-history
+                      entry read "Sanitize" regardless of outcome. */}
+                  {j.release_id ? "Release" : j.kind}
                 </Link>
                 <StatusBadge status={j.status} />
                 {j.kind === "sanitize" && <span className="text-muted">{j.policy_id}</span>}
@@ -967,7 +980,7 @@ function ReportsAndExports({
       </div>
       <p className="mt-2 text-xs text-muted">
         Custody certificates are per document, not per matter — open any completed inspect or
-        sanitize job below and use its <strong>Open custody certificate</strong> link.
+        release job below and use its <strong>Open custody certificate</strong> link.
       </p>
     </div>
   );
@@ -1177,6 +1190,18 @@ function MatterView({
           action a reviewer might reasonably expect to have and the
           "why can't I do this" explanation is worth keeping visible,
           same reasoning as the per-document/bulk buttons below. */}
+      {/* PR 47: "Load sample matter" reuses the same demo matter forever
+          (by name + is_demo) -- an evaluator's own test upload here has no
+          reset path and silently makes every future demo session noisier.
+          A note, not a block: uploading here is a real, supported action,
+          just one worth a second thought on a matter meant to stay a
+          clean walkthrough. */}
+      {matterQ.data?.is_demo && (
+        <p className="mb-1 text-xs text-muted">
+          This is the shared demo matter — uploads here stick around for every future
+          walkthrough. Create a new matter instead if you want to try your own document.
+        </p>
+      )}
       <form onSubmit={upload} className="mb-1 flex flex-wrap items-center gap-2">
         <input
           ref={fileInput}
@@ -1214,7 +1239,7 @@ function MatterView({
         <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
           {debouncedDocSearch
             ? `No documents match "${debouncedDocSearch}".`
-            : "No documents yet — upload one above to inspect or sanitize it."}
+            : "No documents yet — upload one above to inspect or release it."}
         </div>
       )}
 

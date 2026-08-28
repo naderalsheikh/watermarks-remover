@@ -108,9 +108,10 @@ gated, off by default, and not what this walkthrough demonstrates.
    **Dashboard** totals/attention feed — that aggregation deliberately
    excludes `is_demo` matters so seeding one never pollutes an operator's
    real caseload view.
-8. Try your own document — upload one to any matter and prepare a release
-   on it, to confirm the same loop works on real content, not just the
-   seeded fixtures.
+8. Try your own document — create a **new** matter (not the demo one; it
+   warns you why in-app) and upload it there, then prepare a release, to
+   confirm the same loop works on real content, not just the seeded
+   fixtures.
 9. **Sign out**.
 
 Empty/loading/error states are exercised automatically: a fresh matter

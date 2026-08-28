@@ -569,7 +569,13 @@ def test_sanitize_job_privacy_bundle_excludes_original(client, tmp_path):
 
     bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{job_id}/bundle")
     assert bundle.status_code == 200
-    assert bundle.headers["content-disposition"].endswith('-release-packet.zip"')
+    # PR 47: the filename now names the document (stem of its own upload
+    # name), not just the job id -- previously indistinguishable from any
+    # other job's download once saved to disk.
+    assert (
+        bundle.headers["content-disposition"]
+        == f'attachment; filename="spa-release-packet-{job_id}.zip"'
+    )
     with zipfile.ZipFile(io.BytesIO(bundle.content)) as zf:
         names = zf.namelist()
         cert_html = zf.read("certificate.html").decode()
@@ -606,6 +612,38 @@ def test_sanitize_job_privacy_bundle_excludes_original(client, tmp_path):
     assert report.valid, report.to_text()
     assert report.anchor_type == "none"
     assert "NOT EXTERNALLY ANCHORED" in report.to_text()
+
+
+def test_bundle_filename_sanitizes_a_hostile_document_name(client):
+    """The document's own filename (arbitrary user content -- whatever the
+    uploader named it) rides into a Content-Disposition header verbatim
+    except for _safe_download_stem's sanitization -- confirm a name
+    carrying a quote and a backslash can't break out of the quoted-string
+    value or inject a second header field."""
+    matter = client.post("/v1/matters", json={"name": "hostile-name"}).json()["id"]
+    data = (FIXTURES / "spa.docx").read_bytes()
+    hostile_name = 'evil"; filename="pwned\\.docx'
+    r = client.post(
+        f"/v1/matters/{matter}/documents",
+        files={"file": (hostile_name, data, "application/octet-stream")},
+    )
+    assert r.status_code == 200, r.text
+    doc_id = r.json()["id"]
+
+    job = client.post(
+        f"/v1/matters/{matter}/documents/{doc_id}/sanitize-jobs",
+        json={"policy_id": "privacy_only", "reason": "hostile name test"},
+    ).json()
+    assert job["status"] == "done", job["error"]
+
+    bundle = client.get(f"/v1/matters/{matter}/jobs/{job['id']}/bundle")
+    assert bundle.status_code == 200
+    disposition = bundle.headers["content-disposition"]
+    # Exactly one filename parameter, no stray quote/backslash escaping out
+    # of it -- a real header-injection concern for content this arbitrary.
+    assert disposition.count('filename="') == 1
+    assert '"' not in disposition[len('attachment; filename="') : -1]
+    assert disposition.endswith(f'-release-packet-{job["id"]}.zip"')
 
 
 def test_include_original_denied_by_default(client):

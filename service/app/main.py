@@ -2805,6 +2805,19 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s.commit()
         return Response(content=body, media_type="text/html")
 
+    def _safe_download_stem(name: str) -> str:
+        """A document's own filename, stripped to its stem and made safe as
+        a Content-Disposition quoted-string value -- arbitrary user content
+        (whatever the uploader named the file), so control characters and
+        quote/backslash are replaced rather than passed through raw. Used
+        so a downloaded release packet's own filename identifies which
+        document it's for -- previously just "{job.id}-release-packet.zip",
+        indistinguishable from any other job's download once saved.
+        """
+        stem = Path(name).stem or "document"
+        safe = "".join(c if c.isprintable() and c not in '"\\' else "_" for c in stem)
+        return safe[:80] or "document"
+
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}/bundle")
     def job_bundle(
         matter_id: str,
@@ -2983,10 +2996,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             if original_ref and storage.exists(original_ref):
                 zf.writestr(f"original/{original_name}", storage.read(original_ref))
         s.commit()
+        download_name = f"{_safe_download_stem(doc.filename)}-release-packet-{job.id}.zip"
         return Response(
             content=buf.getvalue(),
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{job.id}-release-packet.zip"'},
+            headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
         )
 
     @app.get("/v1/matters/{matter_id}/acl")

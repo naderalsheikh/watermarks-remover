@@ -332,7 +332,7 @@ function BundleContents({
       <ul className="mt-1 list-inside list-disc space-y-1">
         <li>
           <code className="font-mono">derivative/{manifest.derivative.filename}</code> — the
-          sanitized output.
+          document prepared for release.
         </li>
         <li>
           <code className="font-mono">certificate.html</code> — the same custody certificate
@@ -601,10 +601,18 @@ function JobView({
               )}
               {job.status === "refused" && (
                 <div className="mt-3 rounded-md border border-orange-600/30 bg-orange-600/5 px-4 py-3 text-sm text-orange-800 dark:text-orange-300">
-                  {/* PR 45: same underlying fact, framed so a first-time
-                      reader recognizes this as the gate doing its job --
-                      not an application error to troubleshoot. */}
-                  <p className="font-medium">Refused by policy — this is expected, not an error.</p>
+                  {/* PR 47: PR 45's "this is expected, not an error" framing
+                      overclaimed -- it's accurate for a deliberate refusal
+                      (macros, an unattested signature) but not for a PDF
+                      hitting the engine's own not-yet-implemented content-
+                      strip paths (pdf_annots/pdf_attachments/pdf_js_actions,
+                      policies.py's _apply_pdf), which also raises a
+                      PolicyError and lands here. The heading no longer
+                      asserts intent it can't back for every case; the body
+                      already states the real, accurate fact (a derivative
+                      was withheld rather than shipped incomplete) regardless
+                      of which of the two reasons caused it. */}
+                  <p className="font-medium">Refused by policy — no derivative was produced.</p>
                   <p className="mt-1">
                     The selected policy declined to produce a derivative for this document
                     rather than ship an incomplete or unsafe result.
@@ -649,7 +657,7 @@ function JobView({
             {job.status === "done" && job.kind === "sanitize" && (
               <div className="mb-6 rounded-md border-2 border-accent p-4">
                 <p className="mb-3 text-sm font-medium">
-                  Release packet — the sanitized document and its verification manifest, together
+                  Release packet — the derivative and its verification manifest, together
                 </p>
                 <div className="flex flex-wrap items-center gap-3">
                   <label className="flex items-center gap-2 text-sm">

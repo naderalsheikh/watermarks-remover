@@ -46,12 +46,12 @@ const ATTENTION_META: Record<
     label: "Failed job",
     badge: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
     whyItMatters: "Something broke before the job could finish, rather than reaching a verdict.",
-    whatToDo: "Open the job for the error, then retry the inspect or sanitize.",
+    whatToDo: "Open the job for the error, then retry the inspect or release.",
   },
   stale: {
     label: "Stale matter",
     badge: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
-    whyItMatters: "No inspect, sanitize, or access change here in over a week.",
+    whyItMatters: "No inspect, release, or access change here in over a week.",
     whatToDo: "Open the matter to confirm it's still actually idle, not just unattended.",
   },
 };
@@ -70,7 +70,14 @@ const ACTION_LABEL: Record<string, string> = {
   "matter.create": "Created matter",
   "document.upload": "Uploaded document",
   "job.inspect": "Ran inspection",
-  "job.sanitize": "Sanitized document",
+  // PR 47: was "Sanitized document" -- job.sanitize fires for every
+  // Release-wrapped job too (PR 39: it's a second, independently-
+  // timestamped row alongside release.created/release.terminal for the
+  // same fact), so a real matter's feed could show "Prepared a
+  // release"/"Release finished" next to "Sanitized document" for what a
+  // reader experiences as one action. Same vocabulary now, not a merged
+  // event -- merging the rows themselves is a bigger change than this pass.
+  "job.sanitize": "Released document",
   "acl.grant": "Granted access",
   "acl.revoke": "Revoked access",
   "bundle.download": "Downloaded bundle",
