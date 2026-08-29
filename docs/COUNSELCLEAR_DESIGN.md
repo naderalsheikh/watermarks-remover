@@ -2156,3 +2156,13 @@ Tightens the operator-facing top-level docs after PR 51's CounselClear-first pac
 - **Legacy boundary made explicit**: `## Upstream utility and research surfaces` is renamed to `## Legacy upstream utility and research surfaces`, and the section now says plainly that readers not intentionally working on watermark-removal research, detector harnesses, or `wr-core` can stop there.
 
 Verification stayed scoped to the changed file: `git diff --check README.md` clean.
+
+### PR 53 -- Legacy upstream utility docs extracted from root README -- implemented (2026-08-29)
+
+Continues the README tightening from PR 51-52 without changing any build or runtime behavior. The goal is to make the repository root materially CounselClear-first by moving the long upstream utility narrative out of the default entry point, not by deleting the historical material.
+
+- **Legacy upstream material moved to its own document**: the detailed `wr-core` utility, detector-harness, research-backend, benchmark, and release-history sections that previously continued through the root `README.md` now live in `docs/UPSTREAM_UTILITY_LEGACY.md`.
+- **Root README now ends at the product boundary**: after the CounselClear quickstart and a short legacy note, the top-level `README.md` simply points interested readers to `docs/UPSTREAM_UTILITY_LEGACY.md` and then stops. This removes the previous "keep scrolling into the old utility docs" failure mode for a first-time CounselClear evaluator.
+- **Link hygiene preserved in the extracted doc**: relative links inside the extracted upstream material were rewritten to resolve from `docs/UPSTREAM_UTILITY_LEGACY.md` rather than the repository root, so the document remains usable as engineering reference instead of becoming archival dead text.
+
+Verification stayed scoped to the changed files: `git diff --check README.md docs/UPSTREAM_UTILITY_LEGACY.md docs/COUNSELCLEAR_DESIGN.md` clean, plus a targeted grep confirming no unresolved root-relative markdown links remained in `docs/UPSTREAM_UTILITY_LEGACY.md`.
