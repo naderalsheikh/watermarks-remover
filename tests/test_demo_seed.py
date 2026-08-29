@@ -120,10 +120,12 @@ def test_demo_seed_creates_matter_with_three_documents_and_releases(env):
     spa_full = c.get(f"/v1/matters/{matter_id}/jobs/{spa['id']}").json()
     spa_findings = spa_full["result"]["manifest"]["findings_before"]
     spa_actions = spa_full["result"]["manifest"]["actions"]
+    spa_records = spa_full["result"]["manifest"]["action_records"]
     assert any("hidden-text" in f.lower() or "vanish" in f.lower() for f in spa_findings)
     assert any("comment" in f.lower() for f in spa_findings)
     assert any("comment" in a.lower() for a in spa_actions)  # comment: stripped
-    assert not any("hidden" in a.lower() or "vanish" in a.lower() for a in spa_actions)  # hidden text: flagged, kept
+    hidden_record = next(r for r in spa_records if r["subtype"] == "hidden_text")
+    assert hidden_record["action"] == "flag"  # hidden text: flagged, not stripped
 
     # macro.docm: a deterministic refusal, no attestation ambiguity.
     macro = by_filename["Sample - Macro-Enabled Draft.docm"]
@@ -138,9 +140,10 @@ def test_demo_seed_creates_matter_with_three_documents_and_releases(env):
     assert hidden["release_id"] is not None
     full = c.get(f"/v1/matters/{matter_id}/jobs/{hidden['id']}").json()
     findings_before = full["result"]["manifest"]["findings_before"]
-    actions = full["result"]["manifest"]["actions"]
+    records = full["result"]["manifest"]["action_records"]
     assert any("hidden" in f.lower() for f in findings_before)
-    assert not any("hidden" in a.lower() for a in actions)  # flagged, never stripped
+    hidden_sheet = next(r for r in records if r["subtype"] == "hidden_structure")
+    assert hidden_sheet["action"] == "flag"  # flagged, never stripped
 
     with sf() as s:
         row = s.get(Matter, matter_id)

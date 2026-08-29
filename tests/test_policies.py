@@ -152,7 +152,10 @@ def test_operator_decisions_are_honored():
     assert plan.actions["comments_and_notes"]["action"] == "strip"
     assert plan.actions["comments_and_notes"]["reason"] == "operator_approved"
     keep_plan = plan_actions(res, "production", decisions={"tracked_changes": "keep"})
-    assert keep_plan.actions["tracked_changes"] == {"action": "keep", "reason": "operator_kept"}
+    assert keep_plan.actions["tracked_changes"] == {
+        "action": "keep",
+        "reason": "operator_kept",
+    }
     with pytest.raises(PolicyError):
         plan_actions(res, "production", decisions={"comments_and_notes": "reject_all"})
     with pytest.raises(PolicyError):
@@ -168,12 +171,12 @@ def test_operator_approved_subtype_that_resolves_to_keep_is_disclosed():
     structural no-op the operator didn't ask for and wouldn't expect from
     clicking "Approve". Before this test's fix, that combination (reason
     "operator_approved", action "keep") produced no ActionRecord at all
-    -- neither the no_decision nor operator_kept branches of
-    _approve_default_keep_records matched it, so it was invisible in the
+    -- neither the no_decision nor operator_kept branches of the old
+    approve-default keep disclosure matched it, so it was invisible in the
     manifest exactly like the other two silent-omission cases this file
     already covers."""
     from findings import Finding, FindingLocation
-    from policies import _approve_default_keep_records
+    from policies import _surviving_finding_records
 
     finding = Finding(
         category="invisible_text",
@@ -191,13 +194,18 @@ def test_operator_approved_subtype_that_resolves_to_keep_is_disclosed():
         decisions={"layer_a_non_body": "approve"},
         source_sha256="0" * 64,
     )
-    assert plan.actions["layer_a_non_body"] == {"action": "keep", "reason": "operator_approved"}
+    assert plan.actions["layer_a_non_body"] == {
+        "action": "keep",
+        "reason": "operator_approved",
+        "legal_justification": {"basis": "unspecified", "note": ""},
+    }
 
-    records = _approve_default_keep_records(plan)
+    records = _surviving_finding_records(plan, set())
     assert len(records) == 1
     assert records[0].subtype == "layer_a_non_body"
     assert records[0].action == "keep"
     assert "approved, but this subtype has no strip action" in records[0].detail
+    assert records[0].legal_justification == {"basis": "unspecified", "note": ""}
 
 
 def test_signed_pdf_requires_attestation():
@@ -216,7 +224,11 @@ def test_macro_files_refused_by_mutating_policies():
             plan_actions(res, pid)
     # evidence_preservation inspects only
     evd = plan_actions(res, "evidence_preservation")
-    assert evd.actions["macros_vba"] == {"action": "inspect_only", "reason": "policy_default"}
+    assert evd.actions["macros_vba"] == {
+        "action": "inspect_only",
+        "reason": "policy_default",
+        "legal_justification": {"basis": "unspecified", "note": ""},
+    }
 
 
 def test_evidence_preservation_is_all_keep_and_apply_raises():
@@ -276,7 +288,7 @@ def test_apply_privacy_docx_keeps_markup_and_comments_blanks_listed_props():
 def test_apply_production_docx_discloses_findings_kept_without_a_decision():
     """production's comments_and_notes/tracked_changes default to "approve",
     which resolves to "keep" (not strip) when no operator decision is
-    supplied. Before this test's fix (policies.py's _approve_default_keep_records),
+    supplied. Before this test's fix (policies.py's surviving-finding records),
     apply_actions produced *no* record at all for those kept, present
     findings -- so a caller reading only manifest.actions had no way to
     tell "reviewed and kept" apart from "never looked at". This asserts
@@ -307,9 +319,8 @@ def test_apply_production_docx_discloses_findings_kept_without_a_decision():
 
 def test_apply_production_docx_with_decisions_records_no_gap():
     """The counterpart to the test above: once every present approve-default
-    subtype has an explicit operator decision, _approve_default_keep_records has
-    nothing left to add -- present_subtypes minus decided subtypes is
-    empty, so no "no operator decision" record appears."""
+    subtype has an explicit operator decision, the no-decision disclosure has
+    nothing left to add -- no "no operator decision" record appears."""
     data = _load("spa.docx")
     res = inspect_bytes(data, "spa.docx")
     plan = plan_actions(
@@ -342,8 +353,58 @@ def test_apply_production_docx_explicit_keep_is_visible_and_distinct_from_no_dec
     assert by_subtype["comments_and_notes"].action == "keep"
     assert "reviewed and kept by operator" in by_subtype["comments_and_notes"].detail
     assert "no operator decision was supplied" not in by_subtype["comments_and_notes"].detail
+    assert by_subtype["comments_and_notes"].legal_justification == {
+        "basis": "unspecified",
+        "note": "",
+    }
     # approved subtypes still resolve to a real action, not a keep record
     assert by_subtype["tracked_changes"].action != "keep"
+
+
+def test_operator_keep_records_structured_legal_justification():
+    data = _load("spa.docx")
+    res = inspect_bytes(data, "spa.docx")
+    plan = plan_actions(
+        res,
+        "production",
+        decisions={"comments_and_notes": "keep", "tracked_changes": "approve"},
+        legal_justifications={
+            "comments_and_notes": {
+                "basis": "privilege",
+                "note": "Attorney-client negotiation comments withheld.",
+            }
+        },
+    )
+    assert plan.actions["comments_and_notes"]["legal_justification"] == {
+        "basis": "privilege",
+        "note": "Attorney-client negotiation comments withheld.",
+    }
+
+    _cleaned, records = apply_actions(data, plan)
+    record = next(
+        r for r in records
+        if r.subtype == "comments_and_notes" and r.legal_justification is not None
+    )
+    assert record.to_dict()["legal_justification"] == {
+        "basis": "privilege",
+        "note": "Attorney-client negotiation comments withheld.",
+    }
+
+
+def test_policy_rejects_invalid_legal_justification_payloads():
+    res = inspect_bytes(_load("spa.docx"), "spa.docx")
+    with pytest.raises(PolicyError, match="unknown subtype"):
+        plan_actions(
+            res,
+            "production",
+            legal_justifications={"made_up": {"basis": "privilege"}},
+        )
+    with pytest.raises(PolicyError, match="must be one of"):
+        plan_actions(
+            res,
+            "production",
+            legal_justifications={"comments_and_notes": {"basis": "because_i_said_so"}},
+        )
 
 
 def test_apply_sharing_docx_strips_everything():

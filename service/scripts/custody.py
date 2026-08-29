@@ -118,6 +118,7 @@ def emit_manifest(
     policy_id: str,
     actions: list[str],
     processor: dict[str, Any],
+    action_records: list[dict[str, Any]] | None = None,
     findings_before: list[str] | None = None,
     verification: dict[str, Any] | None = None,
     operator_id: str | None = None,
@@ -143,6 +144,7 @@ def emit_manifest(
         "policy": {"id": policy_id, "version": 1},
         "processor": processor,
         "actions": list(actions),
+        "action_records": list(action_records or []),
         "findings_before": list(findings_before or []),
         "verification": dict(verification or {}),
         "timestamps": {

@@ -42,14 +42,33 @@ def _packet_files(
     """A self-consistent set of packet files, hashes computed for real --
     the same shape job_bundle produces, built independently here so the
     test isn't just checking the verifier agrees with itself."""
+    action_records = [
+        {
+            "subtype": "comments_and_notes",
+            "action": "keep",
+            "detail": "kept: reviewed and kept by operator",
+            "legal_justification": {"basis": "privilege", "note": "Attorney-client comments withheld."},
+        }
+    ]
+    legal_justifications = [
+        {
+            "subtype": "comments_and_notes",
+            "action": "keep",
+            "legal_justification": {"basis": "privilege", "note": "Attorney-client comments withheld."},
+        }
+    ]
     manifest_json = json.dumps(
         {
             "policy": {"id": policy_id, "version": 1},
             "derivative": {"sha256": _sha256(derivative_bytes), "filename": derivative_filename},
+            "action_records": action_records,
         },
         sort_keys=True,
     ).encode()
-    report_json = json.dumps({"verification": {"pass": True, "checks": []}}, sort_keys=True).encode()
+    report_json = json.dumps(
+        {"report_version": 1, "verification": {"pass": True, "checks": []}, "findings_before": [], "action_records": action_records},
+        sort_keys=True,
+    ).encode()
     cert_html = (
         f"<!doctype html><html><body>Job ID: <code>{job_id}</code> "
         f"Matter: X (<code>{matter_id}</code>) "
@@ -77,6 +96,7 @@ def _packet_files(
             "readme_txt_sha256": _sha256(readme_txt),
         },
         "audit_refs": {"bundle_download_seq": 1, "certificate_issued_seq": 2},
+        "legal_justifications": legal_justifications,
         "limitations": [],
         "generated_at": "2026-08-27T00:00:00+00:00",
         "generated_by": "operator",
@@ -443,6 +463,7 @@ def _release_result(
         "created_at": "2026-08-27T00:00:00+00:00",
         "finished_at": "2026-08-27T00:00:05+00:00",
         "audit_refs": {"release_created_seq": 1, "release_terminal_seq": 2},
+        "legal_justifications": [],
         "limitations": [f"job {status}: {reason}"],
         "certificate_html_sha256": _sha256(cert_html),
         "generated_at": "2026-08-27T00:00:05+00:00",
@@ -563,6 +584,7 @@ def _matching_result_for(packet: dict, files: dict) -> dict:
         "created_at": "2026-08-27T00:00:00+00:00",
         "finished_at": "2026-08-27T00:00:05+00:00",
         "audit_refs": {"release_created_seq": 1, "release_terminal_seq": 2},
+        "legal_justifications": packet["legal_justifications"],
         "limitations": packet["limitations"],
         "certificate_html_sha256": _sha256(files["certificate.html"]),
         "generated_at": "2026-08-27T00:00:05+00:00",
@@ -586,7 +608,16 @@ def test_verify_both_artifacts_agree_when_consistent(tmp_path):
     assert report.result.valid
     assert all(cc.status != "mismatch" for cc in report.agreement)
     matched = {cc.name for cc in report.agreement if cc.status == "match"}
-    for field_name in ("release_id", "job_id", "document_id", "matter_id", "status", "original_sha256", "limitations"):
+    for field_name in (
+        "release_id",
+        "job_id",
+        "document_id",
+        "matter_id",
+        "status",
+        "original_sha256",
+        "legal_justifications",
+        "limitations",
+    ):
         assert f"{field_name} (packet vs result)" in matched, f"{field_name} should have matched, not been skipped"
     assert "policy_id (packet vs result)" in matched
     text = report.to_text()

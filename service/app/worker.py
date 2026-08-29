@@ -47,6 +47,7 @@ def _write_result(output_dir: Path, payload: dict) -> None:
 
 def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, attest: bool,
              matter_id: str | None = None, decisions: dict[str, str] | None = None,
+             legal_justifications: dict | None = None,
              layer_b: str | None = None) -> int:
     """Pure: no DB, no network, no filesystem access outside the two given
     paths. Always exits 0 once result.json is written — the *content* of
@@ -111,6 +112,7 @@ def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, a
                 matter_id=matter_id,
                 signature_break_attestation=attest,
                 decisions=decisions,
+                legal_justifications=legal_justifications,
                 layer_b_strength=layer_b,
             )
             return finish(
@@ -159,6 +161,10 @@ def main(argv: list[str] | None = None) -> int:
              "resolves to keep, per plan_actions' own no_decision default",
     )
     jp.add_argument(
+        "--legal-justifications", default=None,
+        help="JSON object {subtype: {basis, note}} for legal grounds on surviving findings",
+    )
+    jp.add_argument(
         "--layer-b", default=None, choices=("preserve", "paraphrase"),
         help="PR 20: run a Layer B (statistical watermark) rewrite at this strength; "
              "a meaning-lock miss fails the job instead of falling back to the original",
@@ -174,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "run-job":
         decisions = json.loads(args.decisions) if args.decisions else None
+        legal_justifications = json.loads(args.legal_justifications) if args.legal_justifications else None
         return _run_job(
             kind=args.kind,
             input_path=args.input,
@@ -182,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             attest=args.attest,
             matter_id=args.matter_id,
             decisions=decisions,
+            legal_justifications=legal_justifications,
             layer_b=args.layer_b,
         )
 

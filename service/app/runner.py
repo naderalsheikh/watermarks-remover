@@ -63,7 +63,7 @@ def job_root(cfg: Config, matter_id: str, job_id: str) -> Path:
 def build_subprocess_cmd(
     *, input_path: Path, output_dir: Path, kind: str, policy_id: str,
     attest: bool, matter_id: str, decisions: dict[str, str] | None = None,
-    layer_b: dict | None = None,
+    legal_justifications: dict | None = None, layer_b: dict | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable, "-m", "app.worker", "run-job",
@@ -77,6 +77,8 @@ def build_subprocess_cmd(
         cmd.append("--attest")
     if decisions:
         cmd += ["--decisions", json.dumps(decisions)]
+    if legal_justifications:
+        cmd += ["--legal-justifications", json.dumps(legal_justifications)]
     if layer_b:
         # Only the strength crosses the process boundary; the attestation
         # record itself stays in the API DB (Job.layer_b). The worker's
@@ -88,7 +90,9 @@ def build_subprocess_cmd(
 def build_docker_cmd(
     cfg: Config, *, mount_root: Path, input_path: Path, output_dir: Path,
     kind: str, policy_id: str, attest: bool, matter_id: str,
-    decisions: dict[str, str] | None = None, layer_b: dict | None = None,
+    decisions: dict[str, str] | None = None,
+    legal_justifications: dict | None = None,
+    layer_b: dict | None = None,
 ) -> list[str]:
     image = cfg.worker_image
     if not _DIGEST_RE.search(image):
@@ -168,6 +172,8 @@ def build_docker_cmd(
         cmd.append("--attest")
     if decisions:
         cmd += ["--decisions", json.dumps(decisions)]
+    if legal_justifications:
+        cmd += ["--legal-justifications", json.dumps(legal_justifications)]
     if layer_b:
         # Same product semantics as the subprocess path: the worker must
         # actually run the rewrite (its meaning-lock gate fails the job on
@@ -240,6 +246,7 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storag
         input_path=staged_input, output_dir=output_dir, kind=kind,
         policy_id=job.policy_id, attest=bool(job.attestation), matter_id=job.matter_id,
         decisions=job.finding_decisions or None,
+        legal_justifications=job.legal_justifications or None,
         layer_b=job.layer_b or None,
     )  # type: ignore[arg-type]  # layer_b: dict | None (Pyright: attribute of None)
 

@@ -499,6 +499,58 @@ def test_release_packet_json_carries_release_context(env):
     assert packet["release"]["intended_external"] is False
 
 
+def test_release_artifacts_carry_operator_legal_justification(env):
+    c, _sf, _cfg = env
+    mid = _matter(c)
+    doc_id = _upload(c, mid, "spa.docx")
+    body = _create_release(
+        c,
+        mid,
+        doc_id,
+        profile_id="ediscovery_production",
+        recipient_type="court",
+        finding_decisions={
+            "comments_and_notes": "keep",
+            "tracked_changes": "approve",
+        },
+        legal_justifications={
+            "comments_and_notes": {
+                "basis": "work_product",
+                "note": "Counsel drafting comments withheld from production.",
+            }
+        },
+    ).json()
+    release, job, result = body["release"], body["job"], body["release_result"]
+    expected = [
+        {
+            "subtype": "comments_and_notes",
+            "action": "keep",
+            "legal_justification": {
+                "basis": "work_product",
+                "note": "Counsel drafting comments withheld from production.",
+            },
+        }
+    ]
+
+    assert release["status"] == "done"
+    assert result["legal_justifications"] == expected
+
+    bundle = c.get(f"/v1/matters/{mid}/jobs/{job['id']}/bundle")
+    assert bundle.status_code == 200, bundle.text
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+        report = json.loads(zf.read("report.json"))
+        packet = json.loads(zf.read("release_packet.json"))
+    action = next(
+        r
+        for r in manifest["action_records"]
+        if r["subtype"] == "comments_and_notes" and "legal_justification" in r
+    )
+    assert action["legal_justification"] == expected[0]["legal_justification"]
+    assert report["action_records"] == manifest["action_records"]
+    assert packet["legal_justifications"] == expected
+
+
 def test_release_packet_json_release_is_null_for_legacy_job(env):
     c, _sf, _cfg = env
     mid = _matter(c)

@@ -835,6 +835,16 @@ class MatterBody(BaseModel):
     name: str
 
 
+class LegalJustificationBody(BaseModel):
+    basis: str = "unspecified"
+    note: str = ""
+
+
+class LayerBBody(BaseModel):
+    strength: str
+    token: str
+
+
 class SanitizeBody(BaseModel):
     policy_id: str = "external_sharing"
     reason: str = ""
@@ -845,6 +855,10 @@ class SanitizeBody(BaseModel):
     # failed job with a clear PolicyError message) — the same place
     # policy_id's own validity is checked, not pre-validated here.
     finding_decisions: dict[str, str] = {}
+    # {subtype: {basis, note}}. Operator-supplied legal basis for findings
+    # that survive the derivative; the worker validates basis/subtype and
+    # records "unspecified" when a surviving finding has no supplied basis.
+    legal_justifications: dict[str, LegalJustificationBody] = {}
     # PR 20: Layer B (statistical watermark) rewrite, gated by the signed
     # attestation token issued by POST /v1/attestations. Absent = Layer A
     # only. The token is verified server-side before the job is created.
@@ -884,6 +898,7 @@ class ReleaseBody(BaseModel):
     reason: str = ""
     signature_break_attestation: bool = False
     finding_decisions: dict[str, str] = {}
+    legal_justifications: dict[str, LegalJustificationBody] = {}
     layer_b: LayerBBody | None = None
 
 
@@ -899,12 +914,6 @@ class BatchReleaseBody(BaseModel):
     purpose: str = ""
     intended_external: bool = True
     reason: str = ""
-
-
-class LayerBBody(BaseModel):
-    strength: str
-    token: str
-
 
 class AttestationBody(BaseModel):
     matter_id: str
@@ -924,6 +933,23 @@ class AclBody(BaseModel):
     # acl.revoke -- an admin may legitimately want to step back after
     # handing off -- but it must be a deliberate act, not a stray click.
     confirm_self_revoke: bool = False
+
+
+def _legal_justifications_payload(
+    items: dict[str, LegalJustificationBody] | None,
+) -> dict[str, dict[str, str]]:
+    """Serialize request-model legal bases without duplicating policy validation.
+
+    The worker/policy layer remains authoritative for subtype and basis
+    validity. The app boundary only normalizes Pydantic request objects into
+    plain JSON so the job row can carry operator-supplied legal context across
+    the process boundary.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for subtype, item in (items or {}).items():
+        note = item.note if item.note is not None else ""
+        out[subtype] = {"basis": item.basis, "note": note[:1000]}
+    return out
 
 
 log = logging.getLogger("counselclear")
@@ -1785,6 +1811,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             reason=body.reason[:500],
             attestation=bool(body.signature_break_attestation),
             finding_decisions=dict(body.finding_decisions),
+            legal_justifications=_legal_justifications_payload(body.legal_justifications),
             layer_b=layer_b,
         )
         s.add(job)
@@ -1867,6 +1894,40 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "finished_utc": r.finished_utc,
         }
 
+    def _legal_justifications_from_manifest(manifest: dict) -> list[dict[str, object]]:
+        """Extract operator-facing legal bases from manifest action records.
+
+        The manifest is the custody source of truth for what survived the
+        derivative. Release artifacts repeat only the compact legal-basis view
+        so a verifier/reviewer can find it without reverse-engineering every
+        action string.
+        """
+        out: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        for record in manifest.get("action_records") or []:
+            if not isinstance(record, dict):
+                continue
+            legal = record.get("legal_justification")
+            if not isinstance(legal, dict):
+                continue
+            subtype = str(record.get("subtype") or "")
+            action = str(record.get("action") or "")
+            key = (subtype, action)
+            if not subtype or not action or key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "subtype": subtype,
+                    "action": action,
+                    "legal_justification": {
+                        "basis": str(legal.get("basis") or "unspecified"),
+                        "note": str(legal.get("note") or ""),
+                    },
+                }
+            )
+        return out
+
     def _build_release_result(
         s: Session, *, matter: Matter, release: Release, job: Job, doc: Document, audit_refs: dict
     ) -> dict:
@@ -1897,6 +1958,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         reason = ""
         if job.status in ("refused", "failed"):
             reason = job.error or "no further detail recorded"
+        manifest = (job.result_json or {}).get("manifest") or {}
         return {
             "spec_version": "1.0",
             "release_id": release.id,
@@ -1915,6 +1977,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "created_at": release.created_utc,
             "finished_at": release.finished_utc,
             "audit_refs": audit_refs,
+            "legal_justifications": _legal_justifications_from_manifest(manifest),
             "limitations": limitations,
             "certificate_html_sha256": hashlib.sha256(cert_html.encode("utf-8")).hexdigest(),
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -1976,6 +2039,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             reason=body.reason[:500],
             attestation=bool(body.signature_break_attestation),
             finding_decisions=dict(body.finding_decisions),
+            legal_justifications=_legal_justifications_payload(body.legal_justifications),
             layer_b=layer_b,
         )
         s.add(job)
@@ -2872,6 +2936,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "report_version": 1,
             "verification": (job.result_json or {}).get("manifest", {}).get("verification"),
             "findings_before": (job.result_json or {}).get("manifest", {}).get("findings_before"),
+            "action_records": (job.result_json or {}).get("manifest", {}).get("action_records", []),
         }
         report_bytes = json.dumps(report, indent=2, sort_keys=True).encode("utf-8")
         cert_bytes = cert_html.encode("utf-8")
@@ -2978,6 +3043,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "bundle_download_seq": bundle_event.seq,
                 "certificate_issued_seq": cert_event.seq,
             },
+            "legal_justifications": _legal_justifications_from_manifest(
+                (job.result_json or {}).get("manifest") or {}
+            ),
             "limitations": limitations,
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "generated_by": user,
@@ -3325,7 +3393,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             s.query(AuditEvent, Matter.name)
             .join(Matter, Matter.id == AuditEvent.matter_id)
             .filter(AuditEvent.matter_id.in_(admin_matter_ids))
-            .order_by(AuditEvent.at.desc())
+            .order_by(AuditEvent.at.desc(), AuditEvent.seq.desc())
             .limit(10)
             .all()
             if admin_matter_ids

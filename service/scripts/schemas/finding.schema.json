@@ -113,6 +113,33 @@
     "removal_changes_visible_content": { "type": "boolean" },
     "requires_approval": { "type": "boolean" },
     "requires_attestation": { "type": "boolean" },
+    "legal_justification": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["basis", "note"],
+          "additionalProperties": false,
+          "properties": {
+            "basis": {
+              "enum": [
+                "unspecified",
+                "privilege",
+                "work_product",
+                "pii_confidentiality",
+                "relevance",
+                "court_order",
+                "client_instruction",
+                "litigation_hold",
+                "gdpr_access",
+                "other"
+              ]
+            },
+            "note": { "type": "string", "maxLength": 1000 }
+          }
+        }
+      ]
+    },
     "notes": { "type": ["string", "null"] }
   }
 }

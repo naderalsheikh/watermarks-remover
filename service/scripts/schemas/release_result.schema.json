@@ -21,6 +21,7 @@
     "created_at",
     "finished_at",
     "audit_refs",
+    "legal_justifications",
     "limitations",
     "certificate_html_sha256",
     "generated_at",
@@ -53,6 +54,10 @@
         "release_terminal_seq": { "type": "integer", "minimum": 1 }
       }
     },
+    "legal_justifications": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/legal_justification_record" }
+    },
     "limitations": { "type": "array", "items": { "type": "string" } },
     "certificate_html_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "generated_at": { "type": "string", "minLength": 1 },
@@ -64,6 +69,40 @@
         "type": { "type": "string" },
         "digest": { "type": ["string", "null"] },
         "reference": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "legal_justification": {
+      "type": "object",
+      "required": ["basis", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "basis": {
+          "enum": [
+            "unspecified",
+            "privilege",
+            "work_product",
+            "pii_confidentiality",
+            "relevance",
+            "court_order",
+            "client_instruction",
+            "litigation_hold",
+            "gdpr_access",
+            "other"
+          ]
+        },
+        "note": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "legal_justification_record": {
+      "type": "object",
+      "required": ["subtype", "action", "legal_justification"],
+      "additionalProperties": false,
+      "properties": {
+        "subtype": { "type": "string", "minLength": 1 },
+        "action": { "type": "string", "minLength": 1 },
+        "legal_justification": { "$ref": "#/$defs/legal_justification" }
       }
     }
   }

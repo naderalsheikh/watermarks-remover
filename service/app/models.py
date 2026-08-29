@@ -148,6 +148,12 @@ class Job(Base):
     # unreachable through the API and production sanitize was effectively
     # a no-op strip.
     finding_decisions: Mapped[dict] = mapped_column(JSONColumn, default=dict)
+    # {subtype: {basis, note}} for operator-supplied legal grounds on
+    # findings that survive a derivative (keep/flag/inspect_only). Kept
+    # separate from finding_decisions: approve|keep is the mechanical
+    # action choice; this is the evidentiary basis for leaving content in
+    # or withholding it from the derivative.
+    legal_justifications: Mapped[dict] = mapped_column(JSONColumn, default=dict)
     # PR 20: set only when the sanitize job ran a Layer B (statistical
     # watermark) rewrite under a signed attestation. {strength, label,
     # subject, jti} — the jti is the single-use attestation token id so

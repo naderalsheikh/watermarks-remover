@@ -3,7 +3,7 @@
   "$id": "https://counselclear.local/schemas/report.v1.schema.json",
   "title": "CounselClear Release Packet Report v1",
   "type": "object",
-  "required": ["report_version", "verification", "findings_before"],
+  "required": ["report_version", "verification", "findings_before", "action_records"],
   "additionalProperties": false,
   "properties": {
     "report_version": { "const": 1 },
@@ -13,6 +13,42 @@
     "findings_before": {
       "type": ["array", "null"],
       "items": { "type": "string" }
+    },
+    "action_records": { "type": "array", "items": { "$ref": "#/$defs/action_record" } }
+  },
+  "$defs": {
+    "legal_justification": {
+      "type": "object",
+      "required": ["basis", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "basis": {
+          "enum": [
+            "unspecified",
+            "privilege",
+            "work_product",
+            "pii_confidentiality",
+            "relevance",
+            "court_order",
+            "client_instruction",
+            "litigation_hold",
+            "gdpr_access",
+            "other"
+          ]
+        },
+        "note": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "action_record": {
+      "type": "object",
+      "required": ["subtype", "action", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "subtype": { "type": "string", "minLength": 1 },
+        "action": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" },
+        "legal_justification": { "$ref": "#/$defs/legal_justification" }
+      }
     }
   }
 }

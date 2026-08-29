@@ -800,6 +800,7 @@ def clean_to_bundle(
     matter_id: str | None = None,
     signature_break_attestation: bool = False,
     decisions: dict[str, str] | None = None,
+    legal_justifications: dict[str, Any] | None = None,
     layer_b_strength: str | None = None,
 ) -> dict[str, Any]:
     """Inspect -> plan -> apply -> verify -> store write-once + manifest.
@@ -835,6 +836,7 @@ def clean_to_bundle(
             policy_id,
             decisions,
             signature_break_attestation=signature_break_attestation,
+            legal_justifications=legal_justifications,
         )
         cleaned, records = _run_capped(lambda: apply_actions(data, plan), Caps().apply_timeout_s)
     except PolicyError as e:
@@ -895,6 +897,7 @@ def clean_to_bundle(
     original_path, _orig_created = custody_mod.write_once(original_dest, data)
     derivative_path, _deriv_created = custody_mod.write_once(derivative_dest, cleaned)
 
+    action_records = [r.to_dict() if hasattr(r, "to_dict") else dict(r) for r in records]
     actions = [f"{r.subtype}:{r.action}: {r.detail}" for r in records] or list(
         result.finding_strings
     )
@@ -943,6 +946,7 @@ def clean_to_bundle(
         derivative_bytes=len(cleaned),
         policy_id=policy_id,
         actions=actions,
+        action_records=action_records,
         processor=processor_dict,
         findings_before=result.finding_strings,
         verification=verification,

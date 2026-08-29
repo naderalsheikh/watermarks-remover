@@ -72,6 +72,23 @@ ACTIONS = frozenset(
     }
 )
 
+LEGAL_JUSTIFICATION_BASES = frozenset(
+    {
+        "unspecified",
+        "privilege",
+        "work_product",
+        "pii_confidentiality",
+        "relevance",
+        "court_order",
+        "client_instruction",
+        "litigation_hold",
+        "gdpr_access",
+        "other",
+    }
+)
+
+UNSPECIFIED_LEGAL_JUSTIFICATION = {"basis": "unspecified", "note": ""}
+
 # privacy_only blanks only these authoring fields (plus GPS via jpeg_gps);
 # other fields are blanked only when their value matches PII.
 PRIVACY_PROP_FIELDS = container_meta._PRIVACY_PROP_FIELDS
@@ -276,7 +293,7 @@ class ActionPlan:
     policy_id: str
     source_sha256: str
     kind: str
-    actions: dict[str, dict[str, str]] = field(default_factory=dict)
+    actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     present_subtypes: set[str] = field(default_factory=set)
     unmapped_findings: list[str] = field(default_factory=list)
     signature_break_attestation: bool = False
@@ -350,12 +367,44 @@ def _collect_subtypes(result: Any) -> tuple[list[str], list[str]]:
     return subtypes, unmapped
 
 
+def _normalize_legal_justifications(raw: Any) -> dict[str, dict[str, str]]:
+    """Validate {subtype: {basis, note}} without importing pydantic here.
+
+    This is intentionally operator-supplied, not policy-derived. When no
+    basis is supplied for a surviving finding, the plan records
+    basis="unspecified" rather than inventing privilege/work-product/etc.
+    from a sanitizer policy default.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise PolicyError("legal_justifications must be an object")
+    out: dict[str, dict[str, str]] = {}
+    for st, item in raw.items():
+        if st not in SUBTYPES:
+            raise PolicyError(f"legal_justification for unknown subtype: {st}")
+        if not isinstance(item, dict):
+            raise PolicyError(f"legal_justification for {st} must be an object")
+        basis = item.get("basis", "unspecified")
+        note = item.get("note", "")
+        if not isinstance(basis, str) or basis not in LEGAL_JUSTIFICATION_BASES:
+            allowed = "|".join(sorted(LEGAL_JUSTIFICATION_BASES))
+            raise PolicyError(f"legal_justification basis for {st} must be one of {allowed}")
+        if note is None:
+            note = ""
+        if not isinstance(note, str):
+            raise PolicyError(f"legal_justification note for {st} must be a string")
+        out[st] = {"basis": basis, "note": note[:1000]}
+    return out
+
+
 def plan_actions(
     result: Any,
     policy: str | dict[str, str] = "external_sharing",
     decisions: dict[str, str] | None = None,
     *,
     signature_break_attestation: bool = False,
+    legal_justifications: dict[str, Any] | None = None,
     source_sha256: str | None = None,
 ) -> ActionPlan:
     """Build an ActionPlan from an inspect result + policy + decisions."""
@@ -382,6 +431,7 @@ def plan_actions(
             raise PolicyError(f"decision for unknown subtype: {st}")
         if d not in ("approve", "keep"):
             raise PolicyError(f"decision must be approve|keep, got {st}={d}")
+    legal_basis_by_subtype = _normalize_legal_justifications(legal_justifications)
 
     seen, unmapped = _collect_subtypes(result)
 
@@ -440,6 +490,10 @@ def plan_actions(
             if st == "cms_or_xml_dsig" and "cms_or_xml_dsig" in seen:
                 reason = "attested_signature_break" if signature_break_attestation else reason
             plan.actions[st] = {"action": default, "reason": reason}
+        if st in seen and plan.actions[st]["action"] in ("keep", "flag", "inspect_only"):
+            plan.actions[st]["legal_justification"] = legal_basis_by_subtype.get(
+                st, dict(UNSPECIFIED_LEGAL_JUSTIFICATION)
+            )
     return plan
 
 
@@ -451,6 +505,17 @@ class ActionRecord:
     subtype: str
     action: str
     detail: str
+    legal_justification: dict[str, str] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "subtype": self.subtype,
+            "action": self.action,
+            "detail": self.detail,
+        }
+        if self.legal_justification is not None:
+            d["legal_justification"] = dict(self.legal_justification)
+        return d
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -698,30 +763,20 @@ OPERATOR_KEPT_MARKER = "reviewed and kept by operator"
 APPROVED_BUT_NO_OP_MARKER = "approved, but this subtype has no strip action under this policy"
 
 
-def _approve_default_keep_records(plan: ActionPlan) -> list[ActionRecord]:
-    """Explicit record for every present subtype whose approve-default
-    resolved to "keep" -- whether because no operator decision was
-    supplied (reason "no_decision"), the operator explicitly chose to
-    keep it (reason "operator_kept"), or the operator approved it but
-    that subtype's approve-resolution is itself "keep" (reason
-    "operator_approved" with action "keep" -- see
-    APPROVED_BUT_NO_OP_MARKER). Without this, a subtype like
-    tracked_changes or comments_and_notes that was found but resolved to
-    "keep" produces *no* ActionRecord at all -- the manifest's actions
-    list simply omits it, while findings_before still lists it and
-    verification.pass can still read true (reinspect_targeted_gone
-    trivially holds when nothing was targeted). That combination -- a
-    done, verification-passed sanitize job whose derivative still contains
-    a high-consequence finding, with nothing in the manifest saying so --
-    is exactly the silently-wrong outcome this product's own trust bar
-    forbids, for an undecided finding, a reviewed-and-kept one, and an
-    approved-but-structurally-inert one alike. Single choke point in
-    apply_actions rather than one fix per (kind, format) branch, so it
-    covers every document kind uniformly, including ones added later."""
+def _surviving_finding_records(plan: ActionPlan, existing: set[tuple[str, str]]) -> list[ActionRecord]:
+    """Explicit records for present findings that survive the derivative.
+
+    This covers the older approve-default keep disclosures plus policy
+    flag/inspect-only outcomes. Legal basis is operator-supplied when
+    present; otherwise it remains explicitly unspecified.
+    """
     records = []
     for st in sorted(plan.present_subtypes):
         eff = plan.actions.get(st, {})
         reason, action = eff.get("reason"), eff.get("action")
+        legal_justification = eff.get("legal_justification")
+        if action in ("flag", "inspect_only") and (st, str(action)) in existing:
+            continue
         if reason == "no_decision":
             records.append(
                 ActionRecord(
@@ -729,6 +784,7 @@ def _approve_default_keep_records(plan: ActionPlan) -> list[ActionRecord]:
                     "keep",
                     f"kept: {NO_DECISION_MARKER} for this approve-default finding "
                     "(per-finding review is not yet available in this build)",
+                    legal_justification=legal_justification,
                 )
             )
         elif reason == "operator_kept":
@@ -737,6 +793,7 @@ def _approve_default_keep_records(plan: ActionPlan) -> list[ActionRecord]:
                     st,
                     "keep",
                     f"kept: {OPERATOR_KEPT_MARKER} for this approve-default finding",
+                    legal_justification=legal_justification,
                 )
             )
         elif reason == "operator_approved" and action == "keep":
@@ -745,6 +802,25 @@ def _approve_default_keep_records(plan: ActionPlan) -> list[ActionRecord]:
                     st,
                     "keep",
                     f"kept: {APPROVED_BUT_NO_OP_MARKER} ({st})",
+                    legal_justification=legal_justification,
+                )
+            )
+        elif action == "flag":
+            records.append(
+                ActionRecord(
+                    st,
+                    "flag",
+                    "flagged by policy; finding remains in derivative",
+                    legal_justification=legal_justification,
+                )
+            )
+        elif action == "inspect_only":
+            records.append(
+                ActionRecord(
+                    st,
+                    "inspect_only",
+                    "inspect-only policy; finding remains in original",
+                    legal_justification=legal_justification,
                 )
             )
     return records
@@ -753,7 +829,8 @@ def _approve_default_keep_records(plan: ActionPlan) -> list[ActionRecord]:
 def apply_actions(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionRecord]]:
     """Execute a plan. Returns (cleaned_bytes, records)."""
     cleaned, records = _apply_actions_impl(data, plan)
-    records.extend(_approve_default_keep_records(plan))
+    existing = {(r.subtype, r.action) for r in records}
+    records.extend(_surviving_finding_records(plan, existing))
     return cleaned, records
 
 

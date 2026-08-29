@@ -94,8 +94,9 @@ def test_job_json_columns_render_jsonb_on_postgres():
     from app.models import Job
 
     pg_sql = _create_table_sql(Job.__table__, postgresql.dialect())
-    # result_json, finding_decisions, layer_b (PR 20)
-    assert pg_sql.count("JSONB") == 3
+    # result_json, finding_decisions, legal_justifications, layer_b
+    assert pg_sql.count("JSONB") == 4
+    assert "LEGAL_JUSTIFICATIONS JSONB" in pg_sql
 
 
 def test_migrations_emit_jsonb_for_fresh_postgres_offline():

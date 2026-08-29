@@ -20,6 +20,7 @@ from jsonschema import Draft202012Validator
 
 REPO = Path(__file__).resolve().parents[1]
 SCHEMA_DIR = REPO / "service" / "scripts" / "schemas"
+ENGINE_SCHEMA_DIR = REPO / "engine" / "schemas"
 APP_DIR = REPO / "service" / "app"
 SCRIPTS = REPO / "service" / "scripts"
 for p in (str(SCRIPTS), str(APP_DIR.parent), str(REPO / "tools")):
@@ -74,10 +75,20 @@ def _release(c, matter_id: str, document_id: str) -> dict:
     r = c.post(
         f"/v1/matters/{matter_id}/documents/{document_id}/releases",
         json={
-            "profile_id": "counterparty_deal_room",
-            "recipient_type": "opposing_counsel",
+            "profile_id": "ediscovery_production",
+            "recipient_type": "court",
             "recipient_name": "Schema Reviewer",
             "purpose": "schema contract test",
+            "finding_decisions": {
+                "comments_and_notes": "keep",
+                "tracked_changes": "approve",
+            },
+            "legal_justifications": {
+                "comments_and_notes": {
+                    "basis": "work_product",
+                    "note": "Counsel drafting comments withheld from production.",
+                }
+            },
         },
     )
     assert r.status_code == 200, r.text
@@ -86,12 +97,36 @@ def _release(c, matter_id: str, document_id: str) -> dict:
 
 def test_artifact_schemas_are_valid_draft_2020_12():
     for name in (
+        "finding.schema.json",
         "manifest.schema.json",
         "report.schema.json",
         "release_packet.schema.json",
         "release_result.schema.json",
     ):
         Draft202012Validator.check_schema(_schema(name))
+    Draft202012Validator.check_schema(json.loads((ENGINE_SCHEMA_DIR / "finding.schema.json").read_text()))
+
+
+def test_finding_schema_copies_accept_optional_legal_justification():
+    finding = {
+        "finding_id": "f_0123456789abcdef",
+        "category": "revision_history",
+        "subtype": "comments_and_notes",
+        "format": "docx",
+        "location": {"pane": "comment"},
+        "action_recommended": "flag",
+        "action_allowed_by_policy": ["keep", "strip", "flag"],
+        "content_visible": True,
+        "risk_level": "high",
+        "confidence": "confirmed",
+        "removal_changes_visible_content": False,
+        "legal_justification": {"basis": "privilege", "note": "Attorney-client note."},
+    }
+    for schema_path in (
+        SCHEMA_DIR / "finding.schema.json",
+        ENGINE_SCHEMA_DIR / "finding.schema.json",
+    ):
+        jsonschema.validate(finding, json.loads(schema_path.read_text()))
 
 
 def test_emit_manifest_matches_published_schema():
@@ -138,6 +173,25 @@ def test_real_release_artifacts_match_published_schemas(client):
     jsonschema.validate(report, _schema("report.schema.json"))
     jsonschema.validate(release_packet, _schema("release_packet.schema.json"))
     assert report["report_version"] == 1
+    expected = [
+        {
+            "subtype": "comments_and_notes",
+            "action": "keep",
+            "legal_justification": {
+                "basis": "work_product",
+                "note": "Counsel drafting comments withheld from production.",
+            },
+        }
+    ]
+    assert release_result["legal_justifications"] == expected
+    assert release_packet["legal_justifications"] == expected
+    action = next(
+        r
+        for r in manifest["action_records"]
+        if r["subtype"] == "comments_and_notes" and "legal_justification" in r
+    )
+    assert action["legal_justification"] == expected[0]["legal_justification"]
+    assert report["action_records"] == manifest["action_records"]
 
 
 def test_verifier_required_fields_track_published_schemas():

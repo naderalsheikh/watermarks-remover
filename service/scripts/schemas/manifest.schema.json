@@ -11,6 +11,7 @@
     "policy",
     "processor",
     "actions",
+    "action_records",
     "findings_before",
     "verification",
     "timestamps",
@@ -51,6 +52,7 @@
     },
     "processor": { "type": "object" },
     "actions": { "type": "array", "items": { "type": "string" } },
+    "action_records": { "type": "array", "items": { "$ref": "#/$defs/action_record" } },
     "findings_before": { "type": "array", "items": { "type": "string" } },
     "verification": { "type": "object" },
     "timestamps": {
@@ -79,5 +81,40 @@
       }
     },
     "layer_b": { "type": "object" }
+  },
+  "$defs": {
+    "legal_justification": {
+      "type": "object",
+      "required": ["basis", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "basis": {
+          "enum": [
+            "unspecified",
+            "privilege",
+            "work_product",
+            "pii_confidentiality",
+            "relevance",
+            "court_order",
+            "client_instruction",
+            "litigation_hold",
+            "gdpr_access",
+            "other"
+          ]
+        },
+        "note": { "type": "string", "maxLength": 1000 }
+      }
+    },
+    "action_record": {
+      "type": "object",
+      "required": ["subtype", "action", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "subtype": { "type": "string", "minLength": 1 },
+        "action": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" },
+        "legal_justification": { "$ref": "#/$defs/legal_justification" }
+      }
+    }
   }
 }

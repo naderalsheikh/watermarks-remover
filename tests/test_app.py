@@ -780,6 +780,39 @@ def test_finding_decisions_makes_production_approve_cells_reachable(client):
             assert "word/comments.xml" not in inner.namelist()
 
 
+def test_sanitize_job_manifest_carries_operator_legal_justification(client):
+    doc = _upload(client, "spa.docx")
+    r = client.post(
+        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
+        json={
+            "policy_id": "production",
+            "finding_decisions": {
+                "comments_and_notes": "keep",
+                "tracked_changes": "approve",
+            },
+            "legal_justifications": {
+                "comments_and_notes": {
+                    "basis": "privilege",
+                    "note": "Attorney-client negotiation comments withheld.",
+                }
+            },
+        },
+    ).json()
+    assert r["status"] == "done", r["error"]
+
+    manifest = client.get(f"/v1/matters/{doc['_matter']}/jobs/{r['id']}/manifest").json()
+    record = next(
+        record
+        for record in manifest["action_records"]
+        if record["subtype"] == "comments_and_notes" and "legal_justification" in record
+    )
+    assert record["action"] == "keep"
+    assert record["legal_justification"] == {
+        "basis": "privilege",
+        "note": "Attorney-client negotiation comments withheld.",
+    }
+
+
 def test_finding_decisions_bad_value_refuses_the_job_with_a_clear_error(client):
     """plan_actions raises PolicyError for an unknown decision value, which
     clean_to_bundle wraps as a policy refusal — same category as a macro

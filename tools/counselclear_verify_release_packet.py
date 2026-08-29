@@ -93,6 +93,7 @@ SCHEMA_DIR = Path(__file__).resolve().parents[1] / "service" / "scripts" / "sche
 _FALLBACK_RELEASE_PACKET_FIELDS = (
     "spec_version",
     "packet_id",
+    "release_id",
     "matter_id",
     "document_id",
     "job_id",
@@ -101,14 +102,15 @@ _FALLBACK_RELEASE_PACKET_FIELDS = (
     "policy",
     "hashes",
     "audit_refs",
+    "legal_justifications",
     "limitations",
     "generated_at",
     "generated_by",
     "anchor",
     # PR 39: original_sha256 travels at the top level -- binding original
     # to derivative never requires opening manifest.json's own nested
-    # copy first. release_id is declared but NOT required (absent for a
-    # legacy packet with no Release wrapper) -- see verify_release_packet.
+    # copy first. release_id is required but nullable (null for a legacy
+    # packet with no Release wrapper) -- see verify_release_packet.
     "original_sha256",
 )
 
@@ -125,11 +127,17 @@ _FALLBACK_RELEASE_RESULT_FIELDS = (
     "matter_id",
     "status",
     "policy_id",
+    "profile_id",
+    "recipient_type",
+    "recipient_name",
+    "purpose",
+    "intended_external",
     "reason",
     "original_sha256",
     "created_at",
     "finished_at",
     "audit_refs",
+    "legal_justifications",
     "limitations",
     "certificate_html_sha256",
     "generated_at",
@@ -565,6 +573,7 @@ _AGREEMENT_FIELDS = (
     ("matter_id", "matter_id"),
     ("status", "status"),
     ("original_sha256", "original_sha256"),
+    ("legal_justifications", "legal_justifications"),
     ("limitations", "limitations"),
 )
 
