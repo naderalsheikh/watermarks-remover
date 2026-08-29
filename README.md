@@ -4,7 +4,7 @@ _ _ _ ____ ___ ____ ____ _  _ ____ ____ _  _ ____    ____ ____ _  _ ____ _  _ __
 |_|_| |  |  |  |___ |  \ |  | |  | |  \ | \_ ___]    |  \ |___ |  | |__|  \/  |___ |  \
 ```
 
-# watermarks-remover
+# CounselClear / watermarks-remover
 
 <!-- logo: figlet -d .figlet -f cybermedium -w 120 "watermarks-remover" -->
 
@@ -12,6 +12,49 @@ _ _ _ ____ ___ ____ ____ _  _ ____ ____ _  _ ____    ____ ____ _  _ ____ _  _ __
 [![Release](https://img.shields.io/github/v/release/guillaumemeyer/watermarks-remover)](https://github.com/guillaumemeyer/watermarks-remover/releases)
 [![Stars](https://img.shields.io/github/stars/guillaumemeyer/watermarks-remover)](https://github.com/guillaumemeyer/watermarks-remover/stargazers)
 [![Forks](https://img.shields.io/github/forks/guillaumemeyer/watermarks-remover)](https://github.com/guillaumemeyer/watermarks-remover/forks)
+
+This repository currently contains **two distinct surfaces**:
+
+1. **CounselClear**: the Release Gate product for policy-governed document release, custody records, verification, and offline review artifacts.
+2. **`watermarks-remover` upstream utility**: the older watermark-removal and detection service plus optional research harnesses.
+
+If you are evaluating or deploying the current product direction, start with **CounselClear**, not the upstream utility.
+
+## CounselClear default path
+
+Primary surfaces:
+
+- `service/app/` — API, releases, audit chain, certificates, batches
+- `web/` — Release Gate UI
+- `service/Dockerfile.counselclear` — default product image
+- `tools/counselclear_airlock.py` — scriptable release workflow
+- `tools/counselclear_verify_release_packet.py` — offline verifier
+
+Start the product stack:
+
+```bash
+docker compose up --build -d
+```
+
+That brings up CounselClear on `http://127.0.0.1:8443`.
+
+For local development outside Docker:
+
+```bash
+COUNSELCLEAR_LOCAL_PASSWORD=evalpass123 \
+uvicorn app_launcher:app --app-dir service --host 127.0.0.1 --port 8443
+
+cd web
+npm run dev
+```
+
+Then open `http://localhost:3000`.
+
+The current product walkthrough is in [`docs/counselclear-eval-runbook.md`](docs/counselclear-eval-runbook.md).
+
+## Upstream utility and research surfaces
+
+The rest of this README describes the upstream `watermarks-remover` utility and its optional research harnesses. Those surfaces remain in the repo, but they are **not** the default CounselClear product path.
 
 Agent skill + stdlib Python service to strip **multi-vendor AI provenance marks** from text and files — for privacy and hygiene on content **you own**. The skill is a thin client: it drives the machinery over HTTP, so the agent host needs no Python.
 
@@ -218,9 +261,10 @@ Published images (GHCR):
 
 | Image tag | Contents | Published? |
 | --- | --- | --- |
-| `ghcr.io/guillaumemeyer/watermarks-remover:<tag>` / `:latest` | Core HTTP service + all cleaners + exiftool / qpdf / c2patool | Yes |
-| `…:markllm-<tag>` / `:markllm-latest` | MarkLLM text-watermark harness (Apache-2.0 upstream) | Yes |
-| `…:markdiffusion-<tag>` / `:markdiffusion-latest` | MarkDiffusion image harness (Apache-2.0 upstream) | Yes |
+| `ghcr.io/guillaumemeyer/watermarks-remover-counselclear:<tag>` / `:latest` | CounselClear API/worker image | Yes |
+| `ghcr.io/guillaumemeyer/watermarks-remover:<tag>` / `:latest` | Upstream utility image | Historical/upstream surface |
+| `…:markllm-<tag>` / `:markllm-latest` | MarkLLM text-watermark harness (Apache-2.0 upstream) | Not part of the CounselClear publish path |
+| `…:markdiffusion-<tag>` / `:markdiffusion-latest` | MarkDiffusion image harness (Apache-2.0 upstream) | Not part of the CounselClear publish path |
 | `watermarks-remover-ctrlregen:local` | CtrlRegen pixel removal — **never published** (`noai-watermark` ships no LICENSE) | Local build only |
 | `watermarks-remover-synthid-scorer:local` | reverse-SynthID scorer — **never published** (non-commercial Research License) | Local build only (CLI scorer + optional `wr-synthid-score` HTTP sidecar under the `heavy` profile) |
 
@@ -234,16 +278,16 @@ docker run --rm -v "$(pwd):/data" watermarks-remover \
   /app/scripts/clean_file.py /data/notes.md -o /data/notes.cleaned.md
 ```
 
-Whole-infra bring-up:
+Whole-infra bring-up for the upstream utility and research harnesses:
 
 ```bash
-docker compose up -d                         # core HTTP service only
+docker compose --profile upstream up -d      # upstream core HTTP service only
 docker compose --profile harness up -d       # + markllm / markdiffusion
 docker compose --profile heavy up -d         # + ctrlregen / synthid (local builds)
-docker compose --profile harness --profile heavy up -d   # all services
+docker compose --profile upstream --profile harness --profile heavy up -d   # all upstream/research services
 ```
 
-The compose stack maps the core service to `127.0.0.1:8765`. The harness/heavy services are one-shot CLIs — invoke with `docker compose run --rm <service> …` when you need verification or pixel work.
+The upstream utility maps `wr-core` to `127.0.0.1:8765`. The harness/heavy services are one-shot CLIs — invoke with `docker compose run --rm <service> …` when you need verification or pixel work.
 
 Validate the running stack (exit code only, no output on success):
 
@@ -251,7 +295,7 @@ Validate the running stack (exit code only, no output on success):
 make compose-check        # or: ./compose-check.sh
 ```
 
-Checks `wr-core` via `GET /health` and runs each harness/heavy service with `--help`, requiring exit `0`.
+Checks the default CounselClear stack via `GET /health/ready`. It does not validate the upstream/research harnesses.
 
 ### Configuration (env vars for docker compose)
 
@@ -266,8 +310,8 @@ curl -s -X POST http://127.0.0.1:8765/clean -H 'Content-Type: application/json' 
 Everything else is optional and lives in a `.env` file at the repo root. `docker compose` **auto-loads `.env`** and interpolates the `${VAR}` references in `compose.yaml` from it (shell exports win over `.env` if both are set).
 
 ```bash
-cp .env.example .env       # then edit
-docker compose up -d       # picks up .env automatically
+cp .env.example .env               # then edit
+docker compose up --build -d       # picks up .env automatically
 ```
 
 `.env` is **gitignored** (deny-by-default) — never commit it. For host-side CLI runs (`rewrite_text.py`, the skill), export the same file into the environment:
@@ -295,7 +339,7 @@ set -a; . ./.env; set +a; python3 service/scripts/rewrite_text.py /tmp/x.txt -o 
 
 Layer B is agent-orchestrated in the skill (it rewrites with its own model), so the `WATERMARKS_REWRITE_*` vars are only needed when driving `rewrite_text.py` directly.
 
-Images publish automatically on `v*` tags via [`.github/workflows/release-images.yml`](.github/workflows/release-images.yml).
+The release workflow on `v*` tags publishes the CounselClear image only via [`.github/workflows/release-images.yml`](.github/workflows/release-images.yml). Research harness images are not part of that publish path.
 
 ## Optional SynthID pixel scoring
 

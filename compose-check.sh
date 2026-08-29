@@ -1,30 +1,23 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Validate the running compose stack. Minimal output; exit code only:
-#   0 = every service passes, 1 = any service fails.
+# Validate the default CounselClear compose stack. Minimal output; exit code
+# only:
+#   0 = every default-stack service passes, 1 = any service fails.
 #
-#   wr-core       -> HTTP /health must answer
-#   harness/heavy -> one-shot CLIs must exit 0 on --help
+#   cc-api -> HTTP /health/ready must answer
+#
+# Research harnesses and the upstream wr-core utility are intentionally not
+# part of this default check. They remain explicit opt-in surfaces.
 
-BASE_URL="${WATERMARKS_SERVICE_URL:-http://127.0.0.1:8765}"
-COMPOSE=(docker compose --profile harness --profile heavy)
+BASE_URL="${COUNSELCLEAR_BASE_URL:-http://127.0.0.1:8443}"
 FAIL=0
 
-if curl -fsS "$BASE_URL/health" >/dev/null 2>&1; then
-  echo "wr-core: OK"
+if curl -fsS "$BASE_URL/health/ready" >/dev/null 2>&1; then
+  echo "cc-api: OK"
 else
-  echo "wr-core: FAIL (no /health at $BASE_URL)"
+  echo "cc-api: FAIL (no /health/ready at $BASE_URL)"
   FAIL=1
 fi
-
-for svc in wr-markllm wr-markdiffusion wr-ctrlregen wr-synthid; do
-  if "${COMPOSE[@]}" run --rm "$svc" --help >/dev/null 2>&1; then
-    echo "$svc: OK"
-  else
-    echo "$svc: FAIL"
-    FAIL=1
-  fi
-done
 
 exit "$FAIL"

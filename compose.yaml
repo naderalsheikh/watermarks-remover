@@ -1,11 +1,12 @@
-# Whole-infra bring-up for watermarks-remover.
+# Whole-infra bring-up for CounselClear.
 #
-#   docker compose up --build -d            # core HTTP service only
-#   docker compose --profile harness up --build -d   # + markllm / markdiffusion harnesses
-#   docker compose --profile heavy up --build -d     # + ctrlregen / synthid (local builds)
+#   docker compose up --build -d                      # CounselClear default stack
+#   docker compose --profile upstream up --build -d   # upstream wr-core utility
+#   docker compose --profile harness up --build -d    # + markllm / markdiffusion harnesses
+#   docker compose --profile heavy up --build -d      # + ctrlregen / synthid (local builds)
 #
-# The skill and any web app talk to the wr-core service at http://127.0.0.1:8765
-# (loopback-only host mapping). The heavy/harness images are one-shot CLIs:
+# CounselClear lives at http://127.0.0.1:8443 by default. The upstream
+# wr-core utility and the heavy/harness images are explicit opt-in surfaces:
 # `up` starts them with `--help` to confirm the image, and real jobs run via
 # `docker compose run`, e.g.:
 #   docker compose run --rm wr-ctrlregen /data/shot.png -o /data/out.png
@@ -14,7 +15,7 @@
 # redistributable (all-rights-reserved / non-commercial Research License), so
 # they build from source locally and are never pushed to GHCR.
 
-name: watermarks-remover
+name: counselclear
 
 # CounselClear legal profile (core only — no harness/heavy services):
 #   docker compose --profile legal up --build cc-api
@@ -42,7 +43,6 @@ name: watermarks-remover
 # from the same installed cc-api code, with no container boundary around it.
 services:
   cc-api:
-    profiles: [legal]
     build:
       context: service
       dockerfile: Dockerfile.counselclear
@@ -113,7 +113,6 @@ services:
   # stale within days). Needs egress to database.clamav.net:443 — this is
   # the only legal-profile service with network access; job workers never.
   cc-freshclam:
-    profiles: [legal]
     build:
       context: service
       dockerfile: Dockerfile.counselclear
@@ -142,7 +141,6 @@ services:
   # /data, and for docker mode deployments where cc-api's runner spawns it
   # per job with --network none (see COUNSELCLEAR_WORKER_MODE above).
   cc-worker:
-    profiles: [legal]
     build:
       context: service
       dockerfile: Dockerfile.counselclear
@@ -191,6 +189,7 @@ services:
     restart: unless-stopped
 
   wr-core:
+    profiles: [upstream]
     build:
       context: service
       dockerfile: Dockerfile

@@ -100,14 +100,14 @@ docker-markdiffusion-build:
 docker-markdiffusion-help:
 	docker run --rm watermarks-remover-markdiffusion --help
 
-# Core HTTP service (text + file/image metadata cleaning).
+# Upstream utility service (text + file/image metadata cleaning).
 docker-core-build:
 	docker build -f service/Dockerfile -t watermarks-remover service/
 
 docker-core-help:
 	docker run --rm watermarks-remover /app/scripts/server.py --help
 
-# Run the HTTP service locally (stdlib only, no Docker).
+# Run the upstream utility locally (stdlib only, no Docker).
 serve:
 	$(PYTHON) $(SCRIPTS)/server.py --host 127.0.0.1 --port 8765
 
@@ -115,7 +115,7 @@ compose-up:
 	docker compose up --build -d
 
 compose-up-heavy:
-	docker compose --profile harness --profile heavy up --build -d
+	docker compose --profile upstream --profile harness --profile heavy up --build -d
 
 compose-check:
 	./compose-check.sh
