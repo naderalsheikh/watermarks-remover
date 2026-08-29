@@ -61,6 +61,17 @@
     "limitations": { "type": "array", "items": { "type": "string" } },
     "certificate_html_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "generated_at": { "type": "string", "minLength": 1 },
+    "signature_ref": {
+      "type": "object",
+      "required": ["algorithm", "key_id", "signed_fields"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "key_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "signed_fields": { "const": "release_packet.v1.canonical" }
+      },
+      "_comment_optional": "not in required -- results issued before PR 57 carry no reference and must keep validating"
+    },
     "anchor": {
       "type": "object",
       "required": ["type", "digest", "reference"],

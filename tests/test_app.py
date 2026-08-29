@@ -600,7 +600,12 @@ def test_sanitize_job_privacy_bundle_excludes_original(client, tmp_path):
     assert release_packet["job_id"] == job_id
     assert release_packet["matter_id"] == doc["_matter"]
     assert release_packet["policy"]["id"] == "privacy_only"
-    assert release_packet["anchor"]["type"] == "none"
+    # PR 57 (MUST-2): the anchor is now the operator's Ed25519 signature,
+    # not "none" -- an operator-level claim, still honestly reported as
+    # not EXTERNALLY anchored by the verifier.
+    assert release_packet["anchor"]["type"] == "ed25519-operator"
+    assert release_packet["signature"]["algorithm"] == "ed25519"
+    assert release_packet["anchor"]["reference"] == release_packet["signature"]["key_id"]
 
     tools_dir = str(Path(__file__).resolve().parents[1] / "tools")
     if tools_dir not in sys.path:
@@ -611,7 +616,11 @@ def test_sanitize_job_privacy_bundle_excludes_original(client, tmp_path):
     zip_path.write_bytes(bundle.content)
     report = verifier.verify_release_packet(zip_path)
     assert report.valid, report.to_text()
-    assert report.anchor_type == "none"
+    assert report.anchor_type == "ed25519-operator"
+    # Signed packet, no --public-key: exactly the no_key downgrade.
+    assert report.signature_status == "no_key"
+    # The signature is an operator's, not an external authority's: the
+    # honest disclaimer must survive the anchor upgrade.
     assert "NOT EXTERNALLY ANCHORED" in report.to_text()
 
 
@@ -760,6 +769,156 @@ def test_tampered_manifest_fails_chain_check_but_not_internal_checks(client, tmp
     text = report.to_text()
     assert "manifest_json_sha256 (packet vs audit chain): MISMATCH" in text
     assert "chain cross-check FAILED" in text
+
+
+# --- MUST-2: release-packet signatures (end to end) ----------------------------
+
+
+def _bundle_packet(client, doc, job):
+    bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{job['id']}/bundle")
+    assert bundle.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(bundle.content))
+    return bundle, json.loads(zf.read("release_packet.json"))
+
+
+def _load_verifier():
+    tools_dir = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    import counselclear_verify_release_packet as verifier
+
+    return verifier
+
+
+def test_job_bundle_signs_packet_and_offline_verifier_accepts(client, tmp_path):
+    """MUST-2 end to end: the real job_bundle route signs the real
+    packet with the deployment's auto-provisioned key; the real offline
+    verifier, given the real public key from the real route, says
+    VERIFIED. This is the exact dance a recipient performs."""
+    doc, job = _run_done_sanitize(client)
+    bundle, packet = _bundle_packet(client, doc, job)
+
+    sig = packet["signature"]
+    assert sig["algorithm"] == "ed25519"
+    assert sig["signed_fields"] == "release_packet.v1.canonical"
+    assert sig["key_id"] == packet["anchor"]["reference"]
+    assert packet["anchor"]["type"] == "ed25519-operator"
+
+    # The public key travels over its own unauthenticated route...
+    pk = client.get("/v1/custody-public-key").json()
+    assert pk["algorithm"] == "ed25519"
+    assert pk["key_id"] == sig["key_id"]
+    key_file = tmp_path / "pub.pem"
+    key_file.write_text(pk["public_key_pem"])
+
+    # ...and the verifier confirms the signature over the real packet.
+    zip_path = tmp_path / "packet.zip"
+    zip_path.write_bytes(bundle.content)
+    verifier = _load_verifier()
+    keys = verifier._load_public_keys([key_file])
+    report = verifier.verify_release_packet(zip_path, public_keys=keys)
+    assert report.valid, report.to_text()
+    assert report.signature_status == "verified", report.to_text()
+
+
+def test_bundle_packet_tampered_metadata_fails_offline_verification(client, tmp_path):
+    """THE MUST-2 tamper simulation, through the real stack: pull a real
+    signed packet, flip one byte of metadata (matter_id) in
+    release_packet.json, and the offline verifier -- with the correct
+    public key -- must fail the signature. Nothing else in the packet is
+    touched: every sibling file still hash-checks clean, which is
+    precisely why the signature is the only net that catches this."""
+    doc, job = _run_done_sanitize(client)
+    bundle, packet = _bundle_packet(client, doc, job)
+    pk = client.get("/v1/custody-public-key").json()
+    key_file = tmp_path / "pub.pem"
+    key_file.write_text(pk["public_key_pem"])
+
+    # Rebuild the zip with the tampered release_packet.json: same bytes
+    # everywhere except the one flipped metadata field.
+    packet["matter_id"] = "TAMPERED-MATTER"
+    src = zipfile.ZipFile(io.BytesIO(bundle.content))
+    tampered_zip = tmp_path / "tampered.zip"
+    with zipfile.ZipFile(tampered_zip, "w") as out:
+        for name in src.namelist():
+            data = src.read(name)
+            if name == "release_packet.json":
+                data = json.dumps(packet, indent=2, sort_keys=True).encode()
+            out.writestr(name, data)
+
+    verifier = _load_verifier()
+    keys = verifier._load_public_keys([key_file])
+    report = verifier.verify_release_packet(tampered_zip, public_keys=keys)
+    assert not report.valid
+    assert report.signature_status == "mismatch"
+    # and the rest of the packet still hash-checks clean -- the tamper
+    # is isolated to the metadata the signature binds
+    assert all(fc.status == "match" for fc in report.file_checks)
+    text = report.to_text()
+    assert "MISMATCH" in text
+    assert "signature check FAILED" in text
+
+
+def test_custody_signing_key_is_provisioned_0600_and_idempotent(client, tmp_path):
+    """Key lifecycle: first use auto-provisions the key file at 0600
+    (private key never world/group-readable), and a second read returns
+    the SAME key (existing file wins -- no silent rotation on boot, so
+    old packets never stop verifying without a deliberate act). The key
+    is provisioned lazily, when a packet is first signed -- not at app
+    boot -- so a deployment that never issues a packet never writes a
+    key it doesn't use."""
+    key_file = tmp_path / "data" / "auth" / "custody_signing_key.pem"
+    assert not key_file.exists()
+
+    # sanitize alone doesn't sign anything -- the bundle download does
+    doc, job = _run_done_sanitize(client)
+    assert not key_file.exists()
+    bundle, _packet = _bundle_packet(client, doc, job)
+    assert bundle.status_code == 200
+
+    assert key_file.is_file()
+    assert (key_file.stat().st_mode & 0o777) == 0o600
+
+    first = key_file.read_bytes()
+    doc2, job2 = _run_done_sanitize(client, filename="spa.txt")
+    _bundle_packet(client, doc2, job2)
+    assert key_file.read_bytes() == first, "existing key file must win on reboot"
+
+
+def test_release_result_carries_signature_ref(client):
+    """The lighter artifact carries a REFERENCE to the signing key (not
+    its own signature -- it has no derivative to protect), so a
+    recipient holding release_result.json alone knows which key's
+    signature to demand on the packet it summarizes."""
+    doc = _upload(client, "spa.docx")
+    r = client.post(
+        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/releases",
+        json={"profile_id": "counterparty_deal_room", "recipient_type": "opposing_counsel",
+              "recipient_name": "X", "purpose": "prod"},
+    )
+    assert r.status_code == 200
+    result = r.json()["release_result"]
+    ref = result["signature_ref"]
+    assert ref["algorithm"] == "ed25519"
+    assert ref["signed_fields"] == "release_packet.v1.canonical"
+    pk = client.get("/v1/custody-public-key").json()
+    assert ref["key_id"] == pk["key_id"]
+
+
+def test_custody_public_key_route_is_unauthenticated_and_stable(tmp_path, monkeypatch):
+    """The public half is public by definition: an unauthenticated GET
+    returns it, and two calls return the same key (the route must never
+    rotate the key as a side effect of serving)."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    c = TestClient(create_app(tmp_path / "d"))
+    r1 = c.get("/v1/custody-public-key")
+    assert r1.status_code == 200
+    body = r1.json()
+    assert body["public_key_pem"].startswith("-----BEGIN PUBLIC KEY-----")
+    assert len(body["key_id"]) == 16
+    r2 = c.get("/v1/custody-public-key")
+    assert r2.json() == body
+    c.close()
 
 
 def test_include_original_denied_by_default(client):

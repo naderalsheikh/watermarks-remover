@@ -58,11 +58,13 @@ from .security import (
     LOCAL_SUBJECT,
     LoginThrottle,
     consume_attestation,
+    custody_key_id,
     ensure_local_password,
     issue_attestation,
     issue_session,
     revoke_all_sessions,
     session_subject,
+    sign_release_packet,
     verify_attestation,
     verify_password,
 )
@@ -1309,6 +1311,29 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             raise HTTPException(503, "database unavailable") from None
         return {"ok": True}
 
+    @app.get("/v1/custody-public-key")
+    def custody_public_key():
+        """The public half of this deployment's release-packet signing
+        keypair, plus its key_id. Deliberately unauthenticated: the value
+        is public by definition, is meant to travel to packet recipients
+        (opposing counsel's expert verifying offline), and its trust root
+        is the operator's out-of-band transmittal, not this HTTP response
+        -- a recipient who got the key over this route and nothing else
+        has verified nothing about WHOSE key it is. Copying the key out
+        of band alongside the packet remains the load-bearing path; this
+        route exists so the Airlock CLI/UI can hand it over conveniently.
+
+        Unauthenticated, never listed as evidence of identity: compare
+        /v1/auth/config, which is unauthenticated for the same reason
+        (the client needs it before it could authenticate at all)."""
+        from cryptography.hazmat.primitives import serialization
+
+        key = cfg.ensure_custody_signing_key().public_key()
+        pem = key.public_bytes(
+            encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode("utf-8")
+        return {"key_id": custody_key_id(cfg), "algorithm": "ed25519", "public_key_pem": pem}
+
     @app.get("/v1")
     def api_root():
         """`/v1` itself carries no resource -- unauthenticated by design
@@ -1985,8 +2010,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "limitations": limitations,
             "certificate_html_sha256": hashlib.sha256(cert_html.encode("utf-8")).hexdigest(),
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            # Same honest "none" as release_packet.json's own anchor field
-            # (job_bundle, below) -- not yet implemented, not omitted.
+            # MUST-2: this light artifact is deliberately NOT signed
+            # itself (it has no derivative to protect and would create a
+            # second tampering surface over overlapping facts) -- it
+            # carries a reference to the signing key whose signature on
+            # the full release packet binds these same facts. The
+            # verifier's combined mode checks the reference agrees with
+            # the packet it sits next to.
+            "signature_ref": {
+                "algorithm": "ed25519",
+                "key_id": custody_key_id(cfg),
+                "signed_fields": "release_packet.v1.canonical",
+            },
+            # Honest anchor, same discipline as the packet's: the
+            # signature lives on the full release packet, and only
+            # content the packet binds is signature-protected. "none"
+            # remains the truthful claim for THIS artifact's own bytes.
             "anchor": {"type": "none", "digest": None, "reference": None},
         }
 
@@ -2963,11 +3002,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "  certificate.html -- the custody certificate; open in a browser for a\n"
             "                     human-readable summary, including any limitations\n"
             "  release_packet.json -- machine-readable manifest: content hashes of every\n"
-            "                     file in this packet, audit references, and whether this\n"
-            "                     packet is externally anchored (not yet -- see that file's\n"
-            "                     own \"anchor\" field). Check it with\n"
+            "                     file in this packet, audit references, an Ed25519\n"
+            "                     signature over the whole packet's metadata+hashes\n"
+            "                     (see its \"signature\" field), and the anchoring\n"
+            "                     status (see its own \"anchor\" field). Check it with\n"
             "                     tools/counselclear_verify_release_packet.py.\n"
             "  README.txt      -- this file\n\n"
+            "The packet's signature is made by this CounselClear deployment's\n"
+            "custody signing key (key_id below). Keep the public key the operator\n"
+            "sent you alongside this packet: without it the signature cannot be\n"
+            "verified, and the operator's copy is the only source -- a lost public\n"
+            "key makes every packet issued under it unverifiable.\n"
+            f"  Signing key_id: {custody_key_id(cfg)}\n"
+            "  Verify offline: counselclear_verify_release_packet.py --public-key\n"
+            "                   <key.pem> <packet.zip>\n\n"
             "certificate.html is the same certificate available on its own at\n"
             f"/v1/matters/{matter.id}/jobs/{job.id}/certificate -- read it before\n"
             "relying on this packet: it discloses anything kept without review,\n"
@@ -3057,12 +3105,30 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "limitations": limitations,
             "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "generated_by": user,
-            # Not yet implemented -- see docs/release-packet-verification-and-
-            # anchoring-proposal.md §5/§6. "none" is an honest statement, not
-            # an omission: this packet's timestamp and content are currently
-            # self-attested by this system only.
-            "anchor": {"type": "none", "digest": None, "reference": None},
         }
+        # MUST-2 (2026-08-29): the packet's metadata and hashes are
+        # Ed25519-signed by this deployment's custody signing key
+        # (Config.ensure_custody_signing_key, auto-provisioned 0600).
+        # The signature covers the WHOLE packet -- binding release_id/
+        # matter/job/policy/audit_refs/legal_justifications to the file
+        # hashes, not just the hashes to themselves -- so a recipient
+        # with only the public key can confirm nothing was altered after
+        # issuance and that the packet is the operator's, without ever
+        # being able to forge one. Ordering is load-bearing: the anchor
+        # is set BEFORE signing because it is part of the signed content,
+        # which makes anchor.digest unsatisfiable -- a digest of the
+        # signed bytes cannot appear inside those bytes -- so the
+        # binding digest stays None here and lives in the signature
+        # block's own digest field one key over; anchor.reference
+        # carries the key_id, which is a property of the key, not of
+        # the signature, and is therefore stable pre-signing. See
+        # docs/counselclear-release-packet-signing.md.
+        release_packet["anchor"] = {
+            "type": "ed25519-operator",
+            "digest": None,
+            "reference": custody_key_id(cfg),
+        }
+        release_packet["signature"] = sign_release_packet(cfg, release_packet)
         release_packet_bytes = json.dumps(release_packet, indent=2, sort_keys=True).encode("utf-8")
 
         buf = io.BytesIO()

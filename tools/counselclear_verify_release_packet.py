@@ -5,9 +5,9 @@ Offline, stdlib-only, no engine/app dependency: recomputes every content
 hash a manifest declares against the bytes actually present, checks
 required fields, cross-checks a few identifiers between JSON documents
 where practical, and reports plainly what it could and could not verify
--- most importantly, whether the release is externally anchored (it
-isn't, in this release; see the module docstring's "Anchor status"
-section below).
+-- most importantly, what binds a packet beyond its own claims: an
+exported audit chain (--audit-csv) and an Ed25519 custody signature
+(--public-key), both optional, both reported honestly when absent.
 
 Two artifact shapes, three entry points:
 
@@ -43,6 +43,19 @@ Usage::
 <path> is a release-packet .zip, a directory it was extracted into, a
 bare release_result.json file, or a directory containing one.
 
+Two optional cross-checks bind the packet to something beyond itself:
+
+- ``--audit-csv <export.csv>`` (MUST-1): a matter's exported audit chain
+  (GET /v1/matters/{id}/audit/export). Every chain row's hash is
+  independently recomputed and the declared manifest/derivative hashes
+  are checked against the chain-committed values -- so a manifest
+  altered before packet assembly fails instead of re-hashing clean.
+- ``--public-key <key.pem>`` (MUST-2, repeatable): the deployment's
+  custody public key (GET /v1/custody-public-key, or 64-char hex).
+  Verifies the packet's Ed25519 signature over its canonical bytes.
+  ``--verify-signature`` escalates signature downgrades (unsigned, no
+  key, unknown key) to failures, for when a signature is required.
+
 Exit code 0: every check that could run, passed (still prints the
 "NOT EXTERNALLY ANCHORED" notice -- that's not a failure, it's an honest
 statement about what this release does not yet do). Exit code 1: at
@@ -67,16 +80,22 @@ doesn't already prove more strongly). release_packet.json /
 release_result.json are the authoritative source of facts; certificate.html
 is verified for integrity, not re-parsed for meaning.
 
-Anchor status: as of this release, every packet/result ships with
-`anchor.type: "none"` -- there is no external timestamp authority,
-transparency log, or customer-held WORM copy backing any release's
-timestamp or content yet (docs/release-packet-verification-and-
-anchoring-proposal.md §5/§6 surveys the options; none are implemented).
-This tool will never print "verified", "unforgeable", "independently
-timestamped", "court-proof", or "unimpeachable" -- see that proposal's
-§7. The only claim it makes is the narrower one that's actually true:
-internal hash consistency, recomputed independently of the system that
-produced it, using only the bytes handed to it.
+Anchor status: a packet's anchor.type is "none" only for legacy packets
+(pre-PR 57); new packets carry "ed25519-operator" -- the deployment's
+custody key's signature over the packet's canonical bytes, checkable
+offline with --public-key. That is an OPERATOR signature (the producing
+system vouching for its own output), not an external timestamp
+authority, transparency log, or customer-held WORM copy -- those remain
+unimplemented (docs/release-packet-verification-and-anchoring-
+proposal.md §5/§6 surveys the options). This tool will never print
+"unforgeable", "independently timestamped", "court-proof", or
+"unimpeachable", and never the bare word "VALID" for a Release-aware
+artifact -- see that proposal's §7. The only claims it makes are the
+narrower ones that are actually true: internal hash consistency,
+recomputed independently of the system that produced it, plus -- with
+--public-key -- that the packet's Ed25519 signature checks out under
+the key the operator handed you, which authenticates the packet's
+ORIGIN, not its timestamp.
 """
 
 from __future__ import annotations
@@ -190,6 +209,22 @@ def _anchor_note(anchor_type: str | None, *, artifact: str) -> str:
     """Shared by both report types' to_text() -- the exact same honest
     disclaimer either way, never duplicated with a subtle wording drift
     between the packet verifier and the result verifier."""
+    if anchor_type == "ed25519-operator":
+        # PR 57 (MUST-2): an operator signature binds the packet's bytes
+        # to the deployment's key, but it is the producing system
+        # vouching for its own output -- the same self-attestation, one
+        # cryptographically stronger, and still no independent party
+        # confirming the content existed at the claimed time. The
+        # disclaimer must survive the anchor upgrade or the tool starts
+        # overstating what an operator signature proves.
+        return (
+            f"  NOT EXTERNALLY ANCHORED. The Ed25519 signature on this {artifact} is\n"
+            "  an OPERATOR signature -- the producing system vouching for its own\n"
+            "  output. No independent party has confirmed this content existed at\n"
+            f"  the claimed time. The checks above confirm internal hash consistency\n"
+            f"  (and, with --public-key, the operator signature); neither makes this\n"
+            "  externally timestamped or unforgeable by the operator's own key."
+        )
     if anchor_type in (None, "none"):
         return (
             f"  NOT EXTERNALLY ANCHORED. This {artifact}'s timestamp and content are\n"
@@ -218,6 +253,15 @@ _AUDIT_REFS_NOTE = (
 )
 
 
+_SIGNATURE_MARKERS = {
+    "verified": "VERIFIED",
+    "unsigned": "UNSIGNED (packet predates signatures)",
+    "no_key": "NOT VERIFIED (no --public-key given)",
+    "unknown_key": "NOT VERIFIED (key not provided)",
+    "mismatch": "MISMATCH",
+}
+
+
 @dataclass
 class VerificationReport:
     valid: bool
@@ -232,6 +276,12 @@ class VerificationReport:
     # block and the comparisons render as ordinary cross-checks.
     audit_chain: AuditChainCheck | None = None
     chain_hash_checks: list[CrossCheck] = field(default_factory=list)
+    # MUST-2: the packet-signature verdict -- its own field, not a
+    # cross_check, because the signature is a claim about the packet's
+    # ORIGIN (which operator's key vouches for it), not an agreement
+    # between two in-packet fields.
+    signature_status: str | None = None
+    signature_detail: str = ""
 
     def to_text(self) -> str:
         lines: list[str] = []
@@ -258,8 +308,30 @@ class VerificationReport:
             for cc in self.cross_checks:
                 marker = {"match": "ok", "mismatch": "MISMATCH", "unavailable": "not checkable"}[cc.status]
                 lines.append(f"  {cc.name}: {marker}" + (f" -- {cc.detail}" if cc.detail else ""))
+        # MUST-2: the signature verdict gets its own line, never folded
+        # into the file checks -- the signature is a claim about the
+        # packet's origin (which custody key vouches for it), not a
+        # member of the packet agreeing with itself. "VERIFIED" only for
+        # a checked-out signature; never the word "VALID" for the same
+        # honesty reasons as the top line (see module docstring).
+        if self.signature_status is not None:
+            lines.append("")
+            lines.append("Signature:")
+            marker = _SIGNATURE_MARKERS[self.signature_status]
+            lines.append(f"  {marker}" + (f" -- {self.signature_detail}" if self.signature_detail else ""))
+            if self.signature_status == "mismatch":
+                lines.append(
+                    "  signature check FAILED: the packet does not verify under the"
+                    " key it names -- treat as tampered, not as a signing-key glitch."
+                )
         lines.append("")
-        lines.append(f"Externally anchored: {'no' if self.anchor_type in (None, 'none') else self.anchor_type}")
+        # "no" for every self-attestation form: an operator signature
+        # (ed25519-operator) is the producing system vouching for its
+        # own output -- stronger self-attestation, not external
+        # anchoring. A future genuinely external anchor type gets the
+        # "yes" rendering; none exists yet.
+        _external = self.anchor_type not in (None, "none", "ed25519-operator")
+        lines.append(f"Externally anchored: {'yes (' + self.anchor_type + ')' if _external else 'no'}")
         lines.append(_anchor_note(self.anchor_type, artifact="packet"))
         if self.audit_chain is not None:
             lines.append(self.audit_chain.to_text())
@@ -315,7 +387,10 @@ class ReleaseResultReport:
             }[fc.status]
             lines.append(f"  {fc.name}: {marker}" + (f" -- {fc.detail}" if fc.detail else ""))
         lines.append("")
-        lines.append(f"Externally anchored: {'no' if self.anchor_type in (None, 'none') else self.anchor_type}")
+        # Same rendering rule as VerificationReport above: an operator
+        # signature is not external anchoring.
+        _external = self.anchor_type not in (None, "none", "ed25519-operator")
+        lines.append(f"Externally anchored: {'yes (' + self.anchor_type + ')' if _external else 'no'}")
         lines.append(_anchor_note(self.anchor_type, artifact="release result"))
         lines.append(_AUDIT_REFS_NOTE)
         if self.errors:
@@ -346,6 +421,183 @@ def _load_packet_files(path: Path) -> dict[str, bytes]:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+# --- Ed25519 packet-signature verification (MUST-2, 2026-08-29) ---------------
+#
+# The server signs release_packet.json with an Ed25519 keypair
+# (service/app/security.py::sign_release_packet); this section verifies
+# those signatures offline. The verifier stays stdlib-only by design
+# (tests/test_release_packet_verifier.py pins its import surface), so
+# Ed25519 verification is implemented here directly per RFC 8032 §5.1 --
+# the same reference construction the RFC itself publishes. The
+# app-side sign path uses the cryptography library; this verify path
+# was cross-checked against it live (valid/tampered/wrong-key vectors)
+# during development, and test_signature_cross_checks_against_cryptography
+# keeps that pinned in CI where the library is importable.
+
+_ED_P = 2**255 - 19
+_ED_D = -121665 * pow(121666, _ED_P - 2, _ED_P) % _ED_P
+_ED_Q = 2**252 + 27742317777372353535851937790883648493
+_ED_BASE_Y = 4 * pow(5, _ED_P - 2, _ED_P) % _ED_P
+
+
+def _ed_inv(x: int) -> int:
+    return pow(x, _ED_P - 2, _ED_P)
+
+
+def _ed_recover_x(y: int, sign: int) -> int | None:
+    xx = (y * y - 1) * _ed_inv(_ED_D * y * y + 1) % _ED_P
+    x = pow(xx, (_ED_P + 3) // 8, _ED_P)
+    if (x * x - xx) % _ED_P != 0:
+        x = x * pow(2, (_ED_P - 1) // 4, _ED_P) % _ED_P
+    if (x * x - xx) % _ED_P != 0:
+        return None
+    if (x & 1) != sign:
+        x = _ED_P - x
+    return x
+
+
+_ED_BASE_X = _ed_recover_x(_ED_BASE_Y, 0) or 0
+
+
+def _ed_point_add(P, Q):
+    (x1, y1, z1, t1), (x2, y2, z2, t2) = P, Q
+    a = (y1 - x1) * (y2 - x2) % _ED_P
+    b = (y1 + x1) * (y2 + x2) % _ED_P
+    c = 2 * t1 * t2 * _ED_D % _ED_P
+    d = 2 * z1 * z2 % _ED_P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _ED_P, g * h % _ED_P, f * g % _ED_P, e * h % _ED_P)
+
+
+def _ed_scalarmult(s: int, P):
+    Q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            Q = _ed_point_add(Q, P)
+        P = _ed_point_add(P, P)
+        s >>= 1
+    return Q
+
+
+def _ed_decodeint(s: bytes) -> int:
+    return int.from_bytes(s, "little")
+
+
+def _ed_decodepoint(s: bytes):
+    y = int.from_bytes(s[:32], "little") & ((1 << 255) - 1)
+    x = _ed_recover_x(y, s[31] >> 7)
+    if x is None:
+        return None
+    return (x, y, 1, x * y % _ED_P)
+
+
+_ED_BASE = (_ED_BASE_X, _ED_BASE_Y, 1, _ED_BASE_X * _ED_BASE_Y % _ED_P)
+
+
+def ed25519_verify(public: bytes, msg: bytes, signature: bytes) -> bool:
+    """RFC 8032 §5.1 reference verification. Returns False for any
+    malformed input, wrong key, or altered message/signature -- never
+    raises, so a hostile packet's garbage produces a deterministic
+    'signature does not verify' verdict instead of a traceback."""
+    if len(public) != 32 or len(signature) != 64:
+        return False
+    A = _ed_decodepoint(public)
+    if A is None:
+        return False
+    R = _ed_decodepoint(signature[:32])
+    if R is None:
+        return False
+    S = _ed_decodeint(signature[32:])
+    if S >= _ED_Q:
+        return False
+    h = _ed_decodeint(hashlib.sha512(signature[:32] + public + msg).digest()) % _ED_Q
+    left = _ed_scalarmult(S, _ED_BASE)
+    right = _ed_point_add(R, _ed_scalarmult(h, A))
+    return (
+        (left[0] * right[2] - right[0] * left[2]) % _ED_P == 0
+        and (left[1] * right[2] - right[1] * left[2]) % _ED_P == 0
+    )
+
+
+def _parse_public_key_pem(pem_text: str) -> bytes:
+    """Accept either a raw 32-byte hex string (the compact bundle form)
+    or a SubjectPublicKeyInfo PEM (what GET /v1/custody-public-key and
+    the operator's key file carry). Returns the 32 raw bytes Ed25519
+    keys verify against. Raises ValueError on anything it can't parse
+    -- a bad key is an operator error the CLI should report, not a
+    packet verdict."""
+    pem_text = pem_text.strip()
+    if len(pem_text) == 64:
+        try:
+            return bytes.fromhex(pem_text)
+        except ValueError as e:
+            raise ValueError(f"not a 64-char hex public key: {e}") from e
+    # Minimal SubjectPublicKeyInfo extraction: base64-decode the body,
+    # take the last 32 bytes -- the standard SPKI encoding of an Ed25519
+    # public key ends in exactly the 32 raw key bytes (12-byte prefix).
+    import base64
+    import re
+
+    m = re.search(
+        r"-----BEGIN PUBLIC KEY-----\s*(.*?)\s*-----END PUBLIC KEY-----", pem_text, re.DOTALL
+    )
+    if not m:
+        raise ValueError("public key is neither 64-char hex nor a PUBLIC KEY PEM")
+    der = base64.b64decode(m.group(1))
+    if len(der) < 32:
+        raise ValueError("PEM body too short for an Ed25519 public key")
+    return der[-32:]
+
+
+def _packet_canonical_bytes(packet: dict) -> bytes:
+    """The canonical bytes the server's signature covers: the packet
+    minus its own signature block, sort_keys, compact separators,
+    ensure_ascii. Mirrors service/app/security.py::
+    packet_canonical_bytes byte-for-byte;
+    test_packet_canonical_bytes_matches_app_construction pins that sync.
+    """
+    content = {k: v for k, v in packet.items() if k != "signature"}
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+
+def check_packet_signature(packet: dict, public_keys: dict[str, bytes]) -> tuple[str, str]:
+    """Returns (status, detail) where status is one of:
+      "verified"   -- the signature checks out under the key the packet names
+      "unsigned"   -- this packet predates signatures (a downgrade line, not
+                      a failure: old packets must keep verifying)
+      "no_key"     -- signature present but --public-key wasn't given
+      "unknown_key"-- signature names a key_id not in the provided keys
+      "mismatch"   -- the signature does not verify (tampered packet, wrong
+                      key, or canonicalization drift -- all fail identically
+                      and deterministically)
+    """
+    sig = packet.get("signature")
+    if not isinstance(sig, dict) or "value" not in sig:
+        return "unsigned", "packet predates signatures (no signature block)"
+    key_id = sig.get("key_id")
+    if not public_keys:
+        return "no_key", "signature present but no --public-key given"
+    if key_id not in public_keys:
+        return "unknown_key", f"signature names key_id {key_id!r} which was not provided"
+    try:
+        pub = public_keys[key_id]
+        value = bytes.fromhex(sig.get("value", ""))
+        canonical = _packet_canonical_bytes(packet)
+        ok = ed25519_verify(pub, canonical, value)
+    except (ValueError, TypeError):
+        return "mismatch", "signature block malformed"
+    if not ok:
+        return "mismatch", "Ed25519 signature does not verify over the packet's canonical bytes"
+    # Belt and suspenders: the signed digest must also match our own
+    # recomputation, so canonicalization drift surfaces distinctly from
+    # an opaque Ed25519 failure.
+    declared = sig.get("digest", "")
+    recomputed = "sha256:" + hashlib.sha256(canonical).hexdigest()
+    if declared != recomputed:
+        return "mismatch", f"signed digest {declared!r} != recomputed {recomputed!r}"
+    return "verified", f"Ed25519 signature verified under key_id {key_id} (digest {recomputed})"
 
 
 # --- audit-chain cross-check (MUST-1, 2026-08-29) -----------------------------
@@ -515,12 +767,19 @@ def cross_check_audit_chain(csv_path: Path, packet_manifest: dict) -> AuditChain
     return check
 
 
-def verify_release_packet(path: Path, audit_csv: Path | None = None) -> VerificationReport:
+def verify_release_packet(
+    path: Path, audit_csv: Path | None = None, public_keys: dict[str, bytes] | None = None
+) -> VerificationReport:
     """The whole check, factored out of main() so tests (and a future
     static-web verifier reimplementing this in JS) can drive it directly.
     audit_csv: optional path to a GET /v1/matters/{id}/audit/export CSV
     -- when given, the packet's declared manifest/derivative hashes are
-    also checked against the chain-committed values (MUST-1)."""
+    also checked against the chain-committed values (MUST-1).
+    public_keys: optional {key_id: 32 raw public bytes} -- when given,
+    the packet's Ed25519 signature is verified (MUST-2). A signature
+    mismatch fails the packet; a missing key or an unsigned legacy
+    packet downgrades to an explicit "NOT VERIFIED" line without
+    failing the rest of the (still meaningful) hash checks."""
     try:
         files = _load_packet_files(path)
     except PacketLoadError as e:
@@ -718,12 +977,23 @@ def verify_release_packet(path: Path, audit_csv: Path | None = None) -> Verifica
                     )
                 )
 
+    # MUST-2: signature check -- only meaningful when the packet parsed
+    # and carries the required fields (a malformed packet fails on
+    # schema/hashes anyway; signing garbage adds no signal). Kept out of
+    # the errors list so a downgrade (unsigned/no key) reads as its own
+    # line, while a "mismatch" feeds valid=False below.
+    signature_status: str | None = None
+    signature_detail = ""
+    if schema_ok:
+        signature_status, signature_detail = check_packet_signature(manifest, public_keys or {})
+
     valid = (
         schema_ok
         and not errors
         and all(fc.status == "match" for fc in file_checks)
         and all(cc.status != "mismatch" for cc in cross_checks)
         and all(cc.status != "mismatch" for cc in chain_hash_checks)
+        and signature_status != "mismatch"
         and not chain_failed
     )
     return VerificationReport(
@@ -736,6 +1006,8 @@ def verify_release_packet(path: Path, audit_csv: Path | None = None) -> Verifica
         errors=errors,
         audit_chain=audit_chain,
         chain_hash_checks=chain_hash_checks,
+        signature_status=signature_status,
+        signature_detail=signature_detail,
     )
 
 
@@ -854,7 +1126,9 @@ class CombinedReport:
         return "\n".join(lines)
 
 
-def verify_release_packet_and_result(path: Path, audit_csv: Path | None = None) -> CombinedReport:
+def verify_release_packet_and_result(
+    path: Path, audit_csv: Path | None = None, public_keys: dict[str, bytes] | None = None
+) -> CombinedReport:
     """When a directory contains BOTH release_packet.json and
     release_result.json (e.g. the Airlock CLI's own output for a done
     release since PR 43), verify each independently and assert they
@@ -863,8 +1137,9 @@ def verify_release_packet_and_result(path: Path, audit_csv: Path | None = None) 
     ignores the other; a disagreement fails loudly (valid=False), not
     quietly. *path* must be a directory -- a bare release_packet.json
     .zip can never also contain a release_result.json alongside it.
-    audit_csv threads through to the packet verifier's chain check."""
-    packet_report = verify_release_packet(path, audit_csv=audit_csv)
+    audit_csv threads through to the packet verifier's chain check;
+    public_keys threads through to its signature check (MUST-2)."""
+    packet_report = verify_release_packet(path, audit_csv=audit_csv, public_keys=public_keys)
     result_report = verify_release_result(path)
 
     agreement: list[CrossCheck] = []
@@ -916,12 +1191,55 @@ def verify_release_packet_and_result(path: Path, audit_csv: Path | None = None) 
             CrossCheck("profile_id (packet vs result)", "unavailable", "not present in both artifacts")
         )
 
+    # MUST-2: the result's signature_ref names the key that signed the
+    # packet next to it -- when both artifacts carry the claim, they must
+    # agree. A disagreement means the two artifacts were not produced by
+    # the same issuance, which is exactly what the combined mode exists
+    # to catch. "unavailable" (legacy result, no ref) is not a failure.
+    packet_sig_key = (packet_manifest.get("signature") or {}).get("key_id")
+    result_ref_key = (result_manifest.get("signature_ref") or {}).get("key_id")
+    if packet_sig_key is not None and result_ref_key is not None:
+        status = "match" if packet_sig_key == result_ref_key else "mismatch"
+        detail = "" if status == "match" else f"packet={packet_sig_key!r} result_ref={result_ref_key!r}"
+        agreement.append(CrossCheck("signing key_id (packet signature vs result signature_ref)", status, detail))
+    else:
+        agreement.append(
+            CrossCheck(
+                "signing key_id (packet signature vs result signature_ref)",
+                "unavailable",
+                "not present in both artifacts",
+            )
+        )
+
     valid = (
         packet_report.valid
         and result_report.valid
         and all(cc.status != "mismatch" for cc in agreement)
     )
     return CombinedReport(valid=valid, packet=packet_report, result=result_report, agreement=agreement)
+
+
+def _public_key_id(raw_public: bytes) -> str:
+    """key_id the same way the server computes it (service/app/security
+    .py::custody_key_id): sha256 of the raw public bytes, truncated --
+    so an operator's key file identifies itself under the same id the
+    packets it signed carry, and no separate key-id mapping is needed."""
+    return hashlib.sha256(raw_public).hexdigest()[:16]
+
+
+def _load_public_keys(paths: list[Path]) -> dict[str, bytes]:
+    """--public-key can be given more than once (a bundle of keys
+    covering multiple rotations). Returns {key_id: raw bytes} -- raises
+    SystemExit on an unparseable file, since a bad key path is an
+    operator error to fix, not a packet verdict."""
+    keys: dict[str, bytes] = {}
+    for p in paths:
+        try:
+            raw = _parse_public_key_pem(p.read_text())
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"--public-key {p}: {e}") from e
+        keys[_public_key_id(raw)] = raw
+    return keys
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -938,6 +1256,22 @@ def main(argv: list[str] | None = None) -> int:
              " chain-committed values, so a manifest altered before packet"
              " assembly fails instead of re-hashing clean",
     )
+    ap.add_argument(
+        "--public-key", type=Path, default=None, action="append", dest="public_key_paths",
+        help="optional (repeatable): the deployment's custody public key (PEM from"
+             " GET /v1/custody-public-key, or a 64-char hex string) -- verifies the"
+             " packet's Ed25519 signature. Without it a signed packet reports"
+             " 'NOT VERIFIED (no key)' but still hash-checks",
+    )
+    ap.add_argument(
+        "--verify-signature", action="store_true", default=False,
+        help="strict signature mode: escalate signature downgrades to FAILURES --"
+             " a packet that is unsigned, has no key available, or names an unknown"
+             " key exits non-zero instead of passing with a 'NOT VERIFIED' line."
+             " Use this when a signature is REQUIRED (e.g. checking your own"
+             " deployment's output); the default stays lenient so legacy packets"
+             " and key-less hash checks keep working. Needs --public-key too",
+    )
     args = ap.parse_args(argv)
 
     # Auto-detect, in priority order:
@@ -948,16 +1282,41 @@ def main(argv: list[str] | None = None) -> int:
     #      packet at all) -> the smaller result verifier alone.
     #   3. otherwise -> the full packet verifier alone.
     path = args.path
+    public_keys = _load_public_keys(args.public_key_paths) if args.public_key_paths else None
     has_both = path.is_dir() and (path / "release_packet.json").is_file() and (path / "release_result.json").is_file()
     is_result = path.name == "release_result.json" or (
         path.is_dir() and (path / "release_result.json").is_file() and not (path / "release_packet.json").is_file()
     )
     if has_both:
-        report = verify_release_packet_and_result(path, audit_csv=args.audit_csv)
+        report = verify_release_packet_and_result(path, audit_csv=args.audit_csv, public_keys=public_keys)
     elif is_result:
         report = verify_release_result(path)
     else:
-        report = verify_release_packet(path, audit_csv=args.audit_csv)
+        report = verify_release_packet(path, audit_csv=args.audit_csv, public_keys=public_keys)
+    if args.verify_signature:
+        # Strict mode can only be satisfied by the packet verifier -- a
+        # bare release_result.json is never signed (signature_ref only
+        # names the key), so asking for strict signature checking on one
+        # is an operator error, reported as such rather than silently
+        # passing. The combined report escalates via its packet half.
+        if is_result and not has_both:
+            print(
+                "--verify-signature applies to release packets, not a bare"
+                " release_result.json (results carry only a signature_ref, the"
+                " signature lives on the packet). Pass the packet's directory or zip."
+            )
+            return 2
+        packet_half = report.packet if isinstance(report, CombinedReport) else report
+        if packet_half.signature_status != "verified":
+            packet_half.valid = False
+            if packet_half.signature_status == "mismatch":
+                pass  # already a failure by construction
+            else:
+                packet_half.signature_detail += (
+                    " [--verify-signature: unsigned or unkeyed packets fail in strict mode]"
+                )
+            if isinstance(report, CombinedReport):
+                report.valid = False
     print(report.to_text())
     return 0 if report.valid else 1
 

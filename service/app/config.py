@@ -53,6 +53,15 @@ class Config:
             "COUNSELCLEAR_WATERMARK_TOOLS", ""
         ).strip().lower() in ("1", "true", "yes", "on")
         self.attest_secret_file = self.auth_dir / "attest.secret"
+        # MUST-2 (custody review 2026-08-29): the Ed25519 keypair whose
+        # private half signs release packets and whose PUBLIC half travels
+        # with them for offline, third-party verification. File-based like
+        # cookie.secret/attest.secret on purpose (not DB: a key readable
+        # by the same DB owner/backup path as the chain it witnesses is
+        # no separation at all), PEM format because Ed25519 keys are
+        # generated/loaded via the cryptography library, and an existing
+        # file always wins so rotation is a deliberate operator act.
+        self.custody_signing_key_file = self.auth_dir / "custody_signing_key.pem"
         raw_timeout = os.environ.get("COUNSELCLEAR_WORKER_TIMEOUT_S", "600")
         try:
             self.worker_timeout_s = max(1, int(raw_timeout))
@@ -159,6 +168,43 @@ class Config:
             self.attest_secret_file.write_bytes(secrets.token_bytes(32))
             self.attest_secret_file.chmod(0o600)
         return self.attest_secret_file.read_bytes()
+
+    def ensure_custody_signing_key(self):
+        """The Ed25519 private key that signs release packets (MUST-2).
+
+        Provisioned idempotently like the cookie/attest secrets above:
+        auto-generated 0600 on first boot, existing file always wins (so
+        operator rotation is a deliberate act of replacing the file --
+        same doctrine as the local password hash). Asymmetric on purpose:
+        the packet's PUBLIC half is handed to recipients (opposing
+        counsel's expert) for offline verification without ever giving
+        them the ability to forge a packet, which a symmetric HMAC
+        secret fundamentally cannot offer.
+        """
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        self.ensure_dirs()
+        if not self.custody_signing_key_file.exists():
+            key = Ed25519PrivateKey.generate()
+            pem = key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            fd, tmp_name = tempfile.mkstemp(dir=self.auth_dir, prefix=".custody_signing_key.")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(pem)
+                os.chmod(tmp_name, 0o600)
+                os.replace(tmp_name, self.custody_signing_key_file)
+            except BaseException:
+                with suppress(FileNotFoundError):
+                    os.unlink(tmp_name)
+                raise
+        return serialization.load_pem_private_key(
+            self.custody_signing_key_file.read_bytes(), password=None
+        )
 
     def rotate_cookie_secret(self) -> bytes:
         """Replace the cookie secret with a fresh one, atomically.

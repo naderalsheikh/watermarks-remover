@@ -96,6 +96,19 @@
     "limitations": { "type": "array", "items": { "type": "string" } },
     "generated_at": { "type": "string", "minLength": 1 },
     "generated_by": { "type": "string", "minLength": 1 },
+    "signature": {
+      "type": "object",
+      "required": ["algorithm", "key_id", "signed_fields", "digest", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "key_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "signed_fields": { "const": "release_packet.v1.canonical" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "value": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+      },
+      "_comment_optional": "not in required -- packets issued before PR 57 carry no signature and must keep validating"
+    },
     "anchor": {
       "type": "object",
       "required": ["type", "digest", "reference"],

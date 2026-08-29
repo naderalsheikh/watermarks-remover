@@ -77,6 +77,82 @@ def sign_hmac_sha256(secret: bytes, payload: bytes) -> str:
 _sign = sign_hmac_sha256
 
 
+# --- MUST-2: release-packet signatures (2026-08-29) ---------------------------
+#
+# Ed25519, not the HMAC above: the HMAC secrets are fine for server-side
+# tokens (only this server ever needed to verify them), but a release
+# packet's signature is checked OFFLINE by a recipient — opposing
+# counsel's expert — who must be able to verify without being able to
+# forge. Symmetric HMAC hands every verifier the signing key itself;
+# asymmetric Ed25519 ships only the public half. See
+# docs/counselclear-release-packet-signing.md for the full decision.
+
+PACKET_SIGNATURE_SIGNED_FIELDS = "release_packet.v1.canonical"
+
+
+def packet_canonical_bytes(packet: dict) -> bytes:
+    """The exact bytes the signature covers: the packet dict minus its
+    own ``signature`` block, re-serialized with a fixed canonical form.
+    The packet FILE is written indent=2/sort_keys for humans; the
+    signature deliberately does not cover that formatting — only the
+    parsed content — so the verifier can reproduce these bytes from any
+    parse of the file regardless of how it was pretty-printed.
+
+    Stability: the packet schema carries strings, ints, nulls, booleans
+    and nested dicts/lists only (no floats), so json.dumps with
+    sort_keys + compact separators + ensure_ascii is byte-stable across
+    Python versions for everything that can appear here.
+    test_packet_canonical_bytes_roundtrip_stability pins that claim
+    against a payload exercising every field type.
+    """
+    content = {k: v for k, v in packet.items() if k != "signature"}
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+
+def custody_key_id(cfg: Config) -> str:
+    """Stable identifier for the current signing key: sha256 of the
+    public half, truncated. Lived in every signature block so a rotated
+    key never invalidates old packets — the verifier selects the right
+    public key from a bundle by this id."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    key = cfg.ensure_custody_signing_key()
+    if not isinstance(key, Ed25519PrivateKey):
+        raise RuntimeError("custody signing key is not an Ed25519 private key")
+    raw = key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
+    )
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def sign_release_packet(cfg: Config, packet: dict) -> dict:
+    """Sign *packet* (which must not yet carry a ``signature`` block)
+    and return that block: algorithm/key_id/signed_fields/digest/value.
+
+    The digest is the sha256 of the canonical bytes (belt-and-suspenders
+    alongside the raw Ed25519 value — a verifier can confirm the signed
+    digest matches its own recomputation before the signature check, so
+    a canonicalization drift surfaces as a digest mismatch rather than
+    an opaque Ed25519 failure).
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    canonical = packet_canonical_bytes(packet)
+    digest = hashlib.sha256(canonical).hexdigest()
+    key = cfg.ensure_custody_signing_key()
+    if not isinstance(key, Ed25519PrivateKey):
+        raise RuntimeError("custody signing key is not an Ed25519 private key")
+    value = key.sign(canonical).hex()
+    return {
+        "algorithm": "ed25519",
+        "key_id": custody_key_id(cfg),
+        "signed_fields": PACKET_SIGNATURE_SIGNED_FIELDS,
+        "digest": f"sha256:{digest}",
+        "value": value,
+    }
+
+
 def issue_session(cfg: Config, subject: str = LOCAL_SUBJECT) -> str:
     if not valid_subject(subject):
         raise ValueError(f"invalid session subject: {subject!r}")

@@ -879,3 +879,343 @@ def test_event_hash_matches_app_construction():
     payload = {"job_id": "J1", "status": "done", "manifest_sha256": "a" * 64, "n": [1, {"x": None}]}
     assert verifier._event_row_hash("0" * 64, 3, "operator", "job.sanitize", payload) == \
         event_hash("0" * 64, 3, "operator", "job.sanitize", payload)
+
+
+# --- MUST-2: packet signatures (--public-key) ----------------------------------
+
+
+def _ed25519():
+    """The signing half the server uses (service/app/security.py) -- only
+    imported here for test fixtures; the verifier itself stays stdlib."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    return Ed25519PrivateKey.generate()
+
+
+def _pub_raw(key) -> bytes:
+    from cryptography.hazmat.primitives import serialization
+
+    return key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+
+
+def _sign_packet_files(files: dict[str, bytes], key) -> tuple[dict[str, bytes], dict[str, bytes]]:
+    """Sign the fixture packet exactly the way job_bundle does (see
+    service/app/main.py: anchor set first, then sign the canonical bytes
+    of the packet-minus-signature). Returns the signed files dict plus
+    the {key_id: raw public bytes} mapping the verifier expects."""
+    from cryptography.hazmat.primitives import serialization
+
+    packet = json.loads(files["release_packet.json"])
+    pub_raw = key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    key_id = hashlib.sha256(pub_raw).hexdigest()[:16]
+    # job_bundle sets the anchor BEFORE signing (it's signed content);
+    # reference = key_id, digest = None (a digest of signed bytes can't
+    # live inside them -- see main.py's comment).
+    packet["anchor"] = {"type": "ed25519-operator", "digest": None, "reference": key_id}
+    canonical = verifier._packet_canonical_bytes(packet)
+    packet["signature"] = {
+        "algorithm": "ed25519",
+        "key_id": key_id,
+        "signed_fields": "release_packet.v1.canonical",
+        "digest": "sha256:" + _sha256(canonical),
+        "value": key.sign(canonical).hex(),
+    }
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+    return files, {key_id: pub_raw}
+
+
+def _public_key_pem(key) -> bytes:
+    from cryptography.hazmat.primitives import serialization
+
+    return key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+
+def test_signed_packet_verifies_with_public_key(tmp_path):
+    """Happy path: a packet signed the way job_bundle signs it verifies
+    under --public-key, with a distinct VERIFIED signature line."""
+    key = _ed25519()
+    files, keys = _sign_packet_files(_packet_files(release_id="REL1"), key)
+    report = verifier.verify_release_packet(_write_dir(tmp_path, files), public_keys=keys)
+    assert report.valid, report.to_text()
+    assert report.signature_status == "verified"
+    text = report.to_text()
+    assert "Signature:" in text
+    assert "VERIFIED" in text
+    # And never the forbidden bare-VALID claim for a Release-aware packet
+    assert text.splitlines()[0] == "INTERNALLY CONSISTENT"
+
+
+def test_signed_packet_tampered_metadata_fails_signature(tmp_path):
+    """THE MUST-2 tamper simulation: flip ONE byte of packet METADATA
+    (matter_id) after signing -- the file-level hash checks all still
+    pass (they cover the sibling files, not release_packet.json's own
+    bytes), so without the signature there is nothing internal that
+    could catch this. The signature must."""
+    key = _ed25519()
+    files, keys = _sign_packet_files(_packet_files(release_id="REL1"), key)
+    packet = json.loads(files["release_packet.json"])
+    packet["matter_id"] = "DIFFERENT-MATTER"
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+
+    report = verifier.verify_release_packet(_write_dir(tmp_path, files), public_keys=keys)
+    assert not report.valid
+    assert report.signature_status == "mismatch"
+    text = report.to_text()
+    assert "MISMATCH" in text
+    assert "signature check FAILED" in text
+    # The rest of the packet is untouched: every file check still passes,
+    # isolating the failure to the signature.
+    assert all(fc.status == "match" for fc in report.file_checks)
+
+
+def test_signed_packet_tampered_manifest_fails_hash_not_signature(tmp_path):
+    """Complementary tamper: mutate manifest.json's BYTES. The declared
+    hash no longer matches (file check fails) while the signature STAYS
+    VERIFIED -- the signature covers release_packet.json's own declared
+    content, not the sibling file's bytes; the file checks and the
+    signature are two independent nets, deliberately so (either one
+    failing catches the tamper). Asserting the exact division of labor
+    pins that neither net silently grows to cover the other's job."""
+    key = _ed25519()
+    files, keys = _sign_packet_files(_packet_files(release_id="REL1"), key)
+    files["manifest.json"] = files["manifest.json"] + b"tampered"
+
+    report = verifier.verify_release_packet(_write_dir(tmp_path, files), public_keys=keys)
+    assert not report.valid
+    manifest_check = next(fc for fc in report.file_checks if fc.name == "manifest.json")
+    assert manifest_check.status == "mismatch"
+    assert report.signature_status == "verified"
+
+
+def test_signed_packet_wrong_key_reports_not_verified(tmp_path):
+    """A packet signed under key A checked with key B: the packet's
+    key_id doesn't match any provided key, reported as unknown_key --
+    a downgrade line, not a failure, because the operator supplied the
+    wrong key FILE (an operator error, not evidence of tampering; the
+    honest verdict is 'not verified', not 'tampered'). The hash checks
+    still decide validity on their own."""
+    key = _ed25519()
+    files, _ = _sign_packet_files(_packet_files(release_id="REL1"), key)
+    other = _ed25519()
+    other_keys = {hashlib.sha256(_pub_raw(other)).hexdigest()[:16]: _pub_raw(other)}
+
+    report = verifier.verify_release_packet(_write_dir(tmp_path, files), public_keys=other_keys)
+    assert report.valid, report.to_text()  # internal checks all pass; signature just not checkable
+    assert report.signature_status == "unknown_key"
+    text = report.to_text()
+    assert "NOT VERIFIED (key not provided)" in text
+
+
+def test_signed_packet_without_key_downgrades_to_not_verified(tmp_path):
+    """No --public-key: a signed packet reports 'NOT VERIFIED (no
+    key)' but the hash checks still decide validity on their own -- the
+    tool stays usable for a recipient who only wants hash consistency."""
+    key = _ed25519()
+    files, _ = _sign_packet_files(_packet_files(release_id="REL1"), key)
+
+    report = verifier.verify_release_packet(_write_dir(tmp_path, files))
+    assert report.valid, report.to_text()  # hashes all match; nothing to fail
+    assert report.signature_status == "no_key"
+    assert "NOT VERIFIED" in report.to_text()
+    assert "no --public-key" in report.to_text()
+
+
+def test_unsigned_legacy_packet_reports_unsigned_and_stays_valid(tmp_path):
+    """A packet issued before PR 57 (no signature block at all) must keep
+    verifying exactly as before -- 'UNSIGNED' is a downgrade line, not
+    a failure, or every historical packet would break on upgrade."""
+    dir_path = _write_dir(tmp_path, _packet_files(release_id="REL1"))
+    report = verifier.verify_release_packet(dir_path)
+    assert report.valid, report.to_text()
+    assert report.signature_status == "unsigned"
+    assert "UNSIGNED" in report.to_text()
+    assert "predates signatures" in report.to_text()
+
+
+def test_strict_mode_escalates_unsigned_to_failure(tmp_path):
+    """--verify-signature: an unsigned packet that would pass lenient
+    mode (valid, with an UNSIGNED downgrade line) exits non-zero when
+    the operator demands a signature."""
+    dir_path = _write_dir(tmp_path, _packet_files(release_id="REL1"))
+    rc = verifier.main([str(dir_path), "--verify-signature"])
+    assert rc == 1
+
+
+def test_strict_mode_escalates_no_key_to_failure(tmp_path):
+    """Same escalation for a signed packet checked without a key: in
+    strict mode 'NOT VERIFIED (no key)' is a failure, because the
+    operator asked for signature checking and didn't supply the key."""
+    key = _ed25519()
+    files, _ = _sign_packet_files(_packet_files(release_id="REL1"), key)
+    out = _write_dir(tmp_path, files)
+    rc = verifier.main([str(out), "--verify-signature"])
+    assert rc == 1
+
+
+def test_strict_mode_passes_fully_signed_packet(tmp_path):
+    key = _ed25519()
+    files, _ = _sign_packet_files(_packet_files(release_id="REL1"), key)
+    key_file = tmp_path / "pub.pem"
+    key_file.write_bytes(_public_key_pem(key))
+    out = _write_dir(tmp_path / "p", files)
+    rc = verifier.main([str(out), "--public-key", str(key_file), "--verify-signature"])
+    assert rc == 0
+
+
+def test_public_key_cli_accepts_pem_and_hex_forms(tmp_path):
+    """--public-key accepts both the PEM the /v1/custody-public-key
+    route serves and the compact hex form, and both must produce the
+    SAME key_id (sha256 of the raw bytes) the packet's signature
+    names."""
+    key = _ed25519()
+    files, keys = _sign_packet_files(_packet_files(release_id="REL1"), key)
+
+    pem_file = tmp_path / "pub.pem"
+    pem_file.write_bytes(_public_key_pem(key))
+    hex_file = tmp_path / "pub.hex"
+    hex_file.write_text(next(iter(keys.values())).hex())
+
+    for kf in (pem_file, hex_file):
+        loaded = verifier._load_public_keys([kf])
+        assert list(loaded) == list(keys), f"{kf.name} must load as key_id {next(iter(keys))}"
+        report = verifier.verify_release_packet(_write_dir(tmp_path / kf.stem, files),
+                                                public_keys=loaded)
+        assert report.signature_status == "verified", f"{kf.name} form failed"
+
+
+def test_signature_cross_checks_against_cryptography(tmp_path):
+    """The stdlib Ed25519 verify must agree with the cryptography
+    library on both a valid signature and every failure mode -- this is
+    the pin that keeps the verifier's hand-rolled RFC 8032 code honest
+    against the library that signs in production."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    key = _ed25519()
+    pub_raw = _pub_raw(key)
+    msg = b"the canonical packet bytes"
+    sig = key.sign(msg)
+    lib_pub = Ed25519PublicKey.from_public_bytes(pub_raw)
+
+    # valid case: both accept
+    assert verifier.ed25519_verify(pub_raw, msg, sig) is True
+    lib_pub.verify(sig, msg)  # raises if invalid -- must not raise
+
+    # tampered message: both reject
+    assert verifier.ed25519_verify(pub_raw, msg + b"x", sig) is False
+    try:
+        lib_pub.verify(sig, msg + b"x")
+        raise AssertionError("cryptography must reject a tampered message")
+    except InvalidSignature:
+        pass
+
+    # tampered signature: both reject
+    bad_sig = bytearray(sig)
+    bad_sig[0] ^= 1
+    assert verifier.ed25519_verify(pub_raw, msg, bytes(bad_sig)) is False
+    try:
+        lib_pub.verify(bytes(bad_sig), msg)
+        raise AssertionError("cryptography must reject a tampered signature")
+    except InvalidSignature:
+        pass
+
+    # wrong public key: both reject
+    assert verifier.ed25519_verify(_pub_raw(_ed25519()), msg, sig) is False
+
+
+def test_ed25519_verify_never_raises_on_garbage():
+    """A hostile packet can put arbitrary garbage in the signature
+    block; the verifier must produce a deterministic False, never a
+    traceback."""
+    pub_raw = _pub_raw(_ed25519())
+    for garbage in (b"", b"x" * 63, b"x" * 65, b"\xff" * 64, b"\xff" * 128):
+        assert verifier.ed25519_verify(pub_raw, b"msg", garbage) is False
+    assert verifier.ed25519_verify(b"\xff" * 32, b"msg", b"x" * 64) is False
+
+
+def test_packet_canonical_bytes_matches_app_construction():
+    """The verifier's canonicalization must match the server's
+    byte-for-byte (service/app/security.py::packet_canonical_bytes), or
+    every signature ever made would fail offline verification."""
+    sys.path.insert(0, str(REPO / "service"))
+    from app.security import packet_canonical_bytes
+
+    # A payload exercising every field type the packet schema allows:
+    # strings, ints, nulls, booleans, nested dicts/lists. (No floats --
+    # excluded by schema for exactly this byte-stability reason.)
+    packet = {
+        "spec_version": "1.0",
+        "packet_id": "pk1",
+        "release_id": None,
+        "release": {"profile_id": "p", "recipient_type": "r", "recipient_name": "n",
+                    "purpose": "u", "intended_external": True},
+        "policy": {"id": None, "version": None, "digest": None},
+        "hashes": {"derivative": {"filename": "f.docx", "sha256": "a" * 64},
+                   "manifest_json_sha256": "b" * 64},
+        "audit_refs": {"bundle_download_seq": 3, "certificate_issued_seq": 4},
+        "legal_justifications": [{"subtype": "s", "action": "keep",
+                                  "legal_justification": {"basis": "privilege", "note": "x"}}],
+        "limitations": ["l1"],
+        "anchor": {"type": "ed25519-operator", "digest": None, "reference": "c" * 16},
+        "signature": {"algorithm": "ed25519", "key_id": "c" * 16,
+                      "signed_fields": "release_packet.v1.canonical",
+                      "digest": "sha256:" + "d" * 64, "value": "e" * 128},
+        "unicode": "café — invariant under ensure_ascii?",
+        "escaped": "quote\" backslash\\ newline\n",
+    }
+    assert verifier._packet_canonical_bytes(packet) == packet_canonical_bytes(packet)
+
+
+def test_combined_mode_checks_signature_ref_agreement(tmp_path):
+    """release_result.json's signature_ref names the key that signed
+    the packet it travels with; combined mode must fail when they
+    disagree (two artifacts from different issuances mixed together)."""
+    key = _ed25519()
+    files, keys = _sign_packet_files(_packet_files(release_id="REL1", status="done"), key)
+    out = _write_dir(tmp_path, files)
+    packet = json.loads((out / "release_packet.json").read_text())
+    result = _matching_result_for(packet, files)
+    result["signature_ref"] = {
+        "algorithm": "ed25519",
+        "key_id": packet["signature"]["key_id"],
+        "signed_fields": "release_packet.v1.canonical",
+    }
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    report = verifier.verify_release_packet_and_result(out, public_keys=keys)
+    assert report.valid, report.to_text()
+    ref_check = next(cc for cc in report.agreement
+                     if cc.name == "signing key_id (packet signature vs result signature_ref)")
+    assert ref_check.status == "match"
+
+    # Now the disagreement: a result from a DIFFERENT deployment (different key).
+    result["signature_ref"]["key_id"] = "f" * 16
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    report = verifier.verify_release_packet_and_result(out, public_keys=keys)
+    assert not report.valid
+    ref_check = next(cc for cc in report.agreement
+                     if cc.name == "signing key_id (packet signature vs result signature_ref)")
+    assert ref_check.status == "mismatch"
+
+
+def test_combined_mode_signature_ref_unavailable_for_legacy_pair(tmp_path):
+    """A legacy result with no signature_ref next to a signed packet:
+    'unavailable', not a failure -- mixed-era artifacts are legitimate
+    (the result may predate PR 57 while the packet was re-pulled later)."""
+    key = _ed25519()
+    files, keys = _sign_packet_files(_packet_files(release_id="REL1", status="done"), key)
+    out = _write_dir(tmp_path, files)
+    packet = json.loads((out / "release_packet.json").read_text())
+    result = _matching_result_for(packet, files)
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+
+    report = verifier.verify_release_packet_and_result(out, public_keys=keys)
+    assert report.valid, report.to_text()
+    ref_check = next(cc for cc in report.agreement
+                     if cc.name == "signing key_id (packet signature vs result signature_ref)")
+    assert ref_check.status == "unavailable"
