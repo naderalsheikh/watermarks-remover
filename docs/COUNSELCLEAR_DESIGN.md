@@ -2146,3 +2146,13 @@ Implements the minimum enforcement pass implied by PR 50, without deleting resea
 - **Operator docs/config made CounselClear-first**: the top of `README.md` now names the repository's two surfaces, puts CounselClear first, and gives `docker compose up --build -d` plus the local `uvicorn`/`npm run dev` path as the product-default startup instructions. The README's published-image table now treats the CounselClear image as the active publish target, marks `markllm` and `markdiffusion` as not part of the CounselClear publish path, and updates the release-workflow sentence accordingly. `.env.example` is reworded to distinguish the default CounselClear control plane from the optional upstream/research utility paths.
 
 Verification stayed scoped to the files actually changed: `git diff --check` clean, `bash -n compose-check.sh` clean, and `compose.yaml` parsed successfully through `yaml.safe_load()`. Full app/test suites were not re-run because no Python product logic, frontend code, or test files changed in this pass; Docker itself was unavailable in the environment, so `docker compose config` was not runnable.
+
+### PR 52 -- README split sharpened: product stop-point before legacy utility docs -- implemented (2026-08-29)
+
+Tightens the operator-facing top-level docs after PR 51's CounselClear-first packaging pass. No build, compose, or runtime behavior changed; this is a README-only coherence refinement.
+
+- **Real stop-point added near the top of `README.md`**: a short "Start here" section now points directly to the CounselClear quickstart, eval runbook, Airlock CLI, and offline verifier, and explicitly states that everything below the legacy boundary is retained source history / research infrastructure rather than the default product path.
+- **CounselClear quickstart separated from the upstream utility narrative**: the default Docker and local-dev startup instructions are now grouped under a dedicated `CounselClear quickstart` subsection before the old utility content starts.
+- **Legacy boundary made explicit**: `## Upstream utility and research surfaces` is renamed to `## Legacy upstream utility and research surfaces`, and the section now says plainly that readers not intentionally working on watermark-removal research, detector harnesses, or `wr-core` can stop there.
+
+Verification stayed scoped to the changed file: `git diff --check README.md` clean.

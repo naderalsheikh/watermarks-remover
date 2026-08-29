@@ -20,6 +20,17 @@ This repository currently contains **two distinct surfaces**:
 
 If you are evaluating or deploying the current product direction, start with **CounselClear**, not the upstream utility.
 
+## Start here
+
+If your goal is the current product, use only these surfaces:
+
+- [CounselClear quickstart](#counselclear-default-path)
+- [`docs/counselclear-eval-runbook.md`](docs/counselclear-eval-runbook.md)
+- [`tools/counselclear_airlock.py`](tools/counselclear_airlock.py)
+- [`tools/counselclear_verify_release_packet.py`](tools/counselclear_verify_release_packet.py)
+
+Everything after [Legacy upstream utility and research surfaces](#legacy-upstream-utility-and-research-surfaces) is retained source history and research infrastructure, not the default product path.
+
 ## CounselClear default path
 
 Primary surfaces:
@@ -52,9 +63,40 @@ Then open `http://localhost:3000`.
 
 The current product walkthrough is in [`docs/counselclear-eval-runbook.md`](docs/counselclear-eval-runbook.md).
 
-## Upstream utility and research surfaces
+### CounselClear quickstart
+
+Docker:
+
+```bash
+docker compose up --build -d
+```
+
+Local dev:
+
+```bash
+COUNSELCLEAR_LOCAL_PASSWORD=evalpass123 \
+uvicorn app_launcher:app --app-dir service --host 127.0.0.1 --port 8443
+
+cd web
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+Release workflow surfaces:
+
+- Web UI: `web/`
+- API/control plane: `service/app/`
+- Airlock CLI: `tools/counselclear_airlock.py`
+- Offline verifier: `tools/counselclear_verify_release_packet.py`
+
+---
+
+## Legacy upstream utility and research surfaces
 
 The rest of this README describes the upstream `watermarks-remover` utility and its optional research harnesses. Those surfaces remain in the repo, but they are **not** the default CounselClear product path.
+
+If you are not intentionally working on watermark-removal research, detector harnesses, or the original `wr-core` utility, you can stop reading here.
 
 Agent skill + stdlib Python service to strip **multi-vendor AI provenance marks** from text and files — for privacy and hygiene on content **you own**. The skill is a thin client: it drives the machinery over HTTP, so the agent host needs no Python.
 
