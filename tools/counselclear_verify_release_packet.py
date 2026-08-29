@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import zipfile
 from dataclasses import dataclass, field
@@ -226,6 +227,11 @@ class VerificationReport:
     anchor_type: str | None = None
     release_id: str | None = None
     errors: list[str] = field(default_factory=list)
+    # MUST-1: the audit-chain cross-check's own outcome + the two
+    # hash comparisons against it, so the chain section renders one
+    # block and the comparisons render as ordinary cross-checks.
+    audit_chain: AuditChainCheck | None = None
+    chain_hash_checks: list[CrossCheck] = field(default_factory=list)
 
     def to_text(self) -> str:
         lines: list[str] = []
@@ -255,7 +261,22 @@ class VerificationReport:
         lines.append("")
         lines.append(f"Externally anchored: {'no' if self.anchor_type in (None, 'none') else self.anchor_type}")
         lines.append(_anchor_note(self.anchor_type, artifact="packet"))
-        lines.append(_AUDIT_REFS_NOTE)
+        if self.audit_chain is not None:
+            lines.append(self.audit_chain.to_text())
+            for cc in self.chain_hash_checks:
+                marker = {"match": "ok", "mismatch": "MISMATCH", "unavailable": "not checkable"}[cc.status]
+                lines.append(f"  {cc.name}: {marker}" + (f" -- {cc.detail}" if cc.detail else ""))
+            if self.audit_chain.provided and (
+                not self.audit_chain.chain_ok or any(cc.status == "mismatch" for cc in self.chain_hash_checks)
+            ):
+                lines.append(
+                    "  chain cross-check FAILED: the packet disagrees with the"
+                    " chain-committed hashes (or the chain itself failed"
+                    " verification) -- treat this packet as tampered, not as"
+                    " an internally-consistent release."
+                )
+        else:
+            lines.append(_AUDIT_REFS_NOTE)
         if self.errors:
             lines.append("")
             lines.append("Errors:")
@@ -327,9 +348,179 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def verify_release_packet(path: Path) -> VerificationReport:
+# --- audit-chain cross-check (MUST-1, 2026-08-29) -----------------------------
+#
+# Every hash inside release_packet.json is declared by the packet itself
+# and recomputed by this tool against the sibling files -- including
+# manifest_json_sha256, which job_bundle computes at download time from
+# whatever bytes sat on disk. Nothing about that check alone can detect
+# a manifest altered before the packet was pulled: the packet would
+# faithfully declare the tampered file's hash. The server-side fix
+# chain-commits manifest_sha256/derivative_sha256 into the job.sanitize
+# audit event at job-terminal time (service/app/audit.py::
+# _terminal_hash_facts); this section consumes the other half -- an
+# exported audit chain (GET /v1/matters/{id}/audit/export) -- so the
+# declared hashes can be checked against something that is NOT the
+# packet itself.
+#
+# The chain check is deliberately stronger than trusting the CSV's own
+# claims: every row's row_hash is independently recomputed here
+# (sha256(prev_hash|seq|actor_id|action|canonical_payload), the same
+# construction as service/app/audit.py::event_hash), and the chain is
+# walked for prev-hash linkage. A row edited after the fact -- or a
+# middle row deleted -- fails the recheck exactly as it would live.
+
+
+def _event_row_hash(prev_hash: str, seq: int, actor_id: str, action: str, payload: dict) -> str:
+    """The audit chain's row-hash construction, reimplemented here so the
+    offline check never depends on importing app code (the verifier stays
+    stdlib-only and engine/app-free). Must match service/app/audit.py::
+    event_hash byte-for-byte; test_event_hash_matches_app_construction
+    pins that sync."""
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    material = f"{prev_hash}|{seq}|{actor_id}|{action}|{canonical}".encode()
+    return hashlib.sha256(material).hexdigest()
+
+
+@dataclass
+class AuditChainCheck:
+    """Outcome of the --audit-csv cross-check, reported as its own
+    section rather than folded into valid -- the packet's internal
+    consistency verdict stays meaningful even when no chain is
+    provided, and a chain mismatch is a custody failure, not a hash
+    typo."""
+
+    provided: bool
+    chain_ok: bool = False
+    chain_detail: str = ""
+    event_found: bool = False
+    job_id: str | None = None
+    manifest_sha256: str | None = None
+    derivative_sha256: str | None = None
+    errors: list[str] = field(default_factory=list)
+
+    def to_text(self) -> str:
+        if not self.provided:
+            return (
+                "Audit-chain cross-check: not performed (no --audit-csv given).\n"
+                "  The packet's hashes were checked only against the packet itself;"
+                " a manifest altered before this packet was assembled would still\n"
+                "  verify. Provide the matter's exported audit chain\n"
+                "  (GET /v1/matters/{id}/audit/export) to check the declared\n"
+                "  manifest/derivative hashes against the chain-committed values."
+            )
+        lines = ["Audit-chain cross-check:"]
+        lines.append(f"  chain row hashes recomputed: {'ok' if self.chain_ok else 'FAILED'}"
+                     + (f" -- {self.chain_detail}" if self.chain_detail else ""))
+        if self.event_found:
+            lines.append(f"  job.sanitize event for job {self.job_id}: found")
+            if self.manifest_sha256:
+                lines.append(f"  chain-committed manifest_sha256: {self.manifest_sha256}")
+            else:
+                lines.append("  chain-committed manifest_sha256: absent from the event"
+                             " (packet issued before MUST-1, or bundle unreadable at terminal time)")
+            if self.derivative_sha256:
+                lines.append(f"  chain-committed derivative_sha256: {self.derivative_sha256}")
+        else:
+            lines.append(f"  job.sanitize event for job {self.job_id}: NOT FOUND in the exported chain")
+        for e in self.errors:
+            lines.append(f"  - {e}")
+        return "\n".join(lines)
+
+
+def _load_audit_chain(csv_path: Path) -> tuple[list[dict], str]:
+    """Parse the audit-export CSV (columns: seq, at, action, actor_id,
+    payload_json, prev_hash, row_hash) and recompute every row's hash.
+    Returns (rows, fatal_error) -- rows are still returned on a chain
+    mismatch so the caller can report which seq broke, but an unreadable
+    or malformed CSV is fatal to the check."""
+    import csv as _csv
+
+    try:
+        text = csv_path.read_text(encoding="utf-8")
+    except OSError as e:
+        return [], f"unreadable audit CSV: {e}"
+    reader = _csv.DictReader(io.StringIO(text))
+    rows: list[dict] = []
+    for raw in reader:
+        try:
+            rows.append(
+                {
+                    "seq": int(raw["seq"]),
+                    "action": raw["action"],
+                    "actor_id": raw["actor_id"],
+                    "payload": json.loads(raw["payload_json"]),
+                    "prev_hash": raw["prev_hash"],
+                    "row_hash": raw["row_hash"],
+                }
+            )
+        except (KeyError, ValueError, json.JSONDecodeError) as e:
+            return [], f"malformed audit CSV row {reader.line_num}: {e}"
+    if not rows:
+        return [], "audit CSV contains no events"
+    return rows, ""
+
+
+def _verify_audit_chain_rows(rows: list[dict]) -> tuple[bool, str]:
+    """Recompute every row's row_hash and walk the prev-hash linkage --
+    the same check as service/app/audit.py::verify_chain, minus trusting
+    the server that ran it. seq must be contiguous from 0, so a deleted
+    middle row fails here (a gap breaks both the seq walk and the
+    prev-hash linkage)."""
+    expected_prev = "0" * 64
+    for i, row in enumerate(rows):
+        if row["seq"] != i:
+            return False, f"chain gap at seq {row['seq']} (expected {i})"
+        if row["prev_hash"] != expected_prev:
+            return False, f"chain break at seq {row['seq']}"
+        if _event_row_hash(row["prev_hash"], row["seq"], row["actor_id"], row["action"], row["payload"]) \
+                != row["row_hash"]:
+            return False, f"hash mismatch at seq {row['seq']}"
+        expected_prev = row["row_hash"]
+    return True, f"{len(rows)} events intact"
+
+
+def cross_check_audit_chain(csv_path: Path, packet_manifest: dict) -> AuditChainCheck:
+    """The --audit-csv check proper: verify the exported chain
+    independently, find THIS job's job.sanitize event, and pull the
+    chain-committed hashes out of it. The comparison against the
+    packet's declared hashes happens in verify_release_packet, which
+    owns the packet's file_checks/cross_checks so the two sides render
+    in one report."""
+    job_id = packet_manifest.get("job_id")
+    check = AuditChainCheck(provided=True, job_id=job_id)
+    rows, fatal = _load_audit_chain(csv_path)
+    if fatal:
+        check.errors.append(fatal)
+        return check
+    check.chain_ok, check.chain_detail = _verify_audit_chain_rows(rows)
+    if not check.chain_ok:
+        check.errors.append(
+            "exported audit chain failed independent verification -- every row below is untrusted"
+        )
+    events = [
+        r for r in rows
+        if r["action"] == "job.sanitize" and (r["payload"] or {}).get("job_id") == job_id
+    ]
+    if not events:
+        check.errors.append(
+            "no job.sanitize event for this packet's job_id in the exported chain"
+            " -- the packet cannot be checked against a chain that never saw it"
+        )
+        return check
+    check.event_found = True
+    payload = events[-1]["payload"]
+    check.manifest_sha256 = payload.get("manifest_sha256")
+    check.derivative_sha256 = payload.get("derivative_sha256")
+    return check
+
+
+def verify_release_packet(path: Path, audit_csv: Path | None = None) -> VerificationReport:
     """The whole check, factored out of main() so tests (and a future
-    static-web verifier reimplementing this in JS) can drive it directly."""
+    static-web verifier reimplementing this in JS) can drive it directly.
+    audit_csv: optional path to a GET /v1/matters/{id}/audit/export CSV
+    -- when given, the packet's declared manifest/derivative hashes are
+    also checked against the chain-committed values (MUST-1)."""
     try:
         files = _load_packet_files(path)
     except PacketLoadError as e:
@@ -480,11 +671,60 @@ def verify_release_packet(path: Path) -> VerificationReport:
             )
         )
 
+    # MUST-1: when an exported audit chain is provided, the packet's
+    # declared manifest/derivative hashes are checked against the
+    # chain-committed values -- the only check in this tool that is NOT
+    # the packet agreeing with itself. A chain that fails independent
+    # verification fails the packet too: a tampered chain is not a
+    # better witness than no chain.
+    audit_chain: AuditChainCheck | None = None
+    chain_hash_checks: list[CrossCheck] = []
+    chain_failed = False
+    if audit_csv is not None:
+        audit_chain = cross_check_audit_chain(audit_csv, manifest)
+        if not audit_chain.chain_ok or not audit_chain.event_found:
+            chain_failed = True
+        elif audit_chain.event_found:
+            declared_manifest_sha = (manifest.get("hashes") or {}).get("manifest_json_sha256")
+            if audit_chain.manifest_sha256 and declared_manifest_sha:
+                status = "match" if audit_chain.manifest_sha256 == declared_manifest_sha else "mismatch"
+                chain_hash_checks.append(
+                    CrossCheck("manifest_json_sha256 (packet vs audit chain)", status)
+                )
+            else:
+                chain_hash_checks.append(
+                    CrossCheck(
+                        "manifest_json_sha256 (packet vs audit chain)",
+                        "unavailable",
+                        "chain event carries no manifest_sha256 (pre-MUST-1 event)"
+                        if audit_chain.event_found and not audit_chain.manifest_sha256
+                        else "packet declares no manifest hash",
+                    )
+                )
+            declared_deriv_sha = ((manifest.get("hashes") or {}).get("derivative") or {}).get("sha256")
+            if audit_chain.derivative_sha256 and declared_deriv_sha:
+                status = "match" if audit_chain.derivative_sha256 == declared_deriv_sha else "mismatch"
+                chain_hash_checks.append(
+                    CrossCheck("derivative sha256 (packet vs audit chain)", status)
+                )
+            else:
+                chain_hash_checks.append(
+                    CrossCheck(
+                        "derivative sha256 (packet vs audit chain)",
+                        "unavailable",
+                        "chain event carries no derivative_sha256 (pre-MUST-1 event)"
+                        if audit_chain.event_found and not audit_chain.derivative_sha256
+                        else "packet declares no derivative hash",
+                    )
+                )
+
     valid = (
         schema_ok
         and not errors
         and all(fc.status == "match" for fc in file_checks)
         and all(cc.status != "mismatch" for cc in cross_checks)
+        and all(cc.status != "mismatch" for cc in chain_hash_checks)
+        and not chain_failed
     )
     return VerificationReport(
         valid=valid,
@@ -494,6 +734,8 @@ def verify_release_packet(path: Path) -> VerificationReport:
         anchor_type=(manifest.get("anchor") or {}).get("type") if schema_ok else None,
         release_id=manifest.get("release_id") if schema_ok else None,
         errors=errors,
+        audit_chain=audit_chain,
+        chain_hash_checks=chain_hash_checks,
     )
 
 
@@ -612,7 +854,7 @@ class CombinedReport:
         return "\n".join(lines)
 
 
-def verify_release_packet_and_result(path: Path) -> CombinedReport:
+def verify_release_packet_and_result(path: Path, audit_csv: Path | None = None) -> CombinedReport:
     """When a directory contains BOTH release_packet.json and
     release_result.json (e.g. the Airlock CLI's own output for a done
     release since PR 43), verify each independently and assert they
@@ -620,8 +862,9 @@ def verify_release_packet_and_result(path: Path) -> CombinedReport:
     profile/original_sha256/limitations. Never silently picks one and
     ignores the other; a disagreement fails loudly (valid=False), not
     quietly. *path* must be a directory -- a bare release_packet.json
-    .zip can never also contain a release_result.json alongside it."""
-    packet_report = verify_release_packet(path)
+    .zip can never also contain a release_result.json alongside it.
+    audit_csv threads through to the packet verifier's chain check."""
+    packet_report = verify_release_packet(path, audit_csv=audit_csv)
     result_report = verify_release_result(path)
 
     agreement: list[CrossCheck] = []
@@ -687,6 +930,14 @@ def main(argv: list[str] | None = None) -> int:
         "path", type=Path,
         help="release packet .zip/directory, or a release_result.json file/directory",
     )
+    ap.add_argument(
+        "--audit-csv", type=Path, default=None,
+        help="optional: a matter's exported audit chain (GET /v1/matters/{id}/audit/export)"
+             " -- independently recomputes every chain row hash and checks the"
+             " packet's declared manifest/derivative hashes against the"
+             " chain-committed values, so a manifest altered before packet"
+             " assembly fails instead of re-hashing clean",
+    )
     args = ap.parse_args(argv)
 
     # Auto-detect, in priority order:
@@ -702,11 +953,11 @@ def main(argv: list[str] | None = None) -> int:
         path.is_dir() and (path / "release_result.json").is_file() and not (path / "release_packet.json").is_file()
     )
     if has_both:
-        report = verify_release_packet_and_result(path)
+        report = verify_release_packet_and_result(path, audit_csv=args.audit_csv)
     elif is_result:
         report = verify_release_result(path)
     else:
-        report = verify_release_packet(path)
+        report = verify_release_packet(path, audit_csv=args.audit_csv)
     print(report.to_text())
     return 0 if report.valid else 1
 

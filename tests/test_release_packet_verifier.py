@@ -710,3 +710,172 @@ def test_verifier_never_imports_the_engine_or_app_internals():
         "import requests", "import urllib", "import socket", "import http.client",
     ):
         assert banned not in code, f"counselclear_verify_release_packet.py must not reference {banned}"
+
+
+# --- MUST-1: audit-chain cross-check (--audit-csv) ----------------------------
+
+
+def _chain_csv(events: list[dict], tmp_path: Path, name: str = "audit.csv") -> Path:
+    """A synthetic exported chain, built with the verifier's own
+    row-hash construction (which test_event_hash_matches_app_construction
+    pins to app/audit.py's) -- valid by construction unless a test
+    deliberately corrupts a row."""
+    import csv
+    import io as _io
+
+    prev = "0" * 64
+    for ev in events:
+        ev.setdefault("seq", 0)
+        ev["prev_hash"] = prev
+        ev["row_hash"] = verifier._event_row_hash(prev, ev["seq"], ev["actor_id"], ev["action"], ev["payload"])
+        prev = ev["row_hash"]
+    for i, ev in enumerate(events):
+        ev["seq"] = i
+    # rebuild after seq renumber (row_hash covers seq)
+    prev = "0" * 64
+    for ev in events:
+        ev["prev_hash"] = prev
+        ev["row_hash"] = verifier._event_row_hash(prev, ev["seq"], ev["actor_id"], ev["action"], ev["payload"])
+        prev = ev["row_hash"]
+    buf = _io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["seq", "at", "action", "actor_id", "payload_json", "prev_hash", "row_hash"])
+    for ev in events:
+        w.writerow([ev["seq"], "2026-08-29T00:00:00+00:00", ev["action"], ev["actor_id"],
+                    json.dumps(ev["payload"]), ev["prev_hash"], ev["row_hash"]])
+    p = tmp_path / name
+    p.write_text(buf.getvalue())
+    return p
+
+
+def _chain_events_for_packet(packet_files: dict[bytes], manifest_sha: str, deriv_sha: str,
+                            job_id: str = "JOB1") -> list[dict]:
+    return [
+        {"action": "document.upload", "actor_id": "operator",
+         "payload": {"document_id": "DOC1"}},
+        {"action": "job.sanitize", "actor_id": "operator",
+         "payload": {"job_id": job_id, "document_id": "DOC1", "policy_id": "external_sharing",
+                     "status": "done", "verification_pass": True, "no_decision_count": 0,
+                     "manifest_sha256": manifest_sha, "derivative_sha256": deriv_sha}},
+    ]
+
+
+def test_audit_chain_cross_check_match(tmp_path):
+    """The happy path: a packet whose declared manifest/derivative hashes
+    equal the chain-committed ones verifies, and the chain section says
+    the row hashes were recomputed ok."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    chain = _chain_csv(
+        _chain_events_for_packet(
+            files, packet["hashes"]["manifest_json_sha256"],
+            packet["hashes"]["derivative"]["sha256"],
+        ),
+        tmp_path,
+    )
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert report.valid, report.to_text()
+    assert report.audit_chain is not None and report.audit_chain.chain_ok
+    assert report.audit_chain.event_found
+    text = report.to_text()
+    assert "chain row hashes recomputed: ok" in text
+    assert "manifest_json_sha256 (packet vs audit chain): ok" in text
+    assert "derivative sha256 (packet vs audit chain): ok" in text
+
+
+def test_audit_chain_detects_tampered_manifest(tmp_path):
+    """THE tamper simulation for MUST-1: a manifest altered between job
+    completion and packet assembly. The packet is internally consistent
+    (it re-hashes the tampered file honestly), but the chain-committed
+    hash disagrees -- exactly what the download-time hash alone could
+    never catch."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    # The chain committed the ORIGINAL manifest hash; the packet declares
+    # the tampered one.
+    tampered = bytearray(files["manifest.json"])
+    tampered[10] ^= 1
+    files["manifest.json"] = bytes(tampered)
+    files["release_packet.json"] = json.dumps(
+        {**packet, "hashes": {**packet["hashes"],
+                              "manifest_json_sha256": _sha256(files["manifest.json"])}},
+        indent=2, sort_keys=True,
+    ).encode()
+    chain = _chain_csv(
+        _chain_events_for_packet(
+            files, packet["hashes"]["manifest_json_sha256"],  # the honest, original hash
+            packet["hashes"]["derivative"]["sha256"],
+        ),
+        tmp_path,
+    )
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert not report.valid
+    text = report.to_text()
+    assert "chain cross-check FAILED" in text
+    assert "manifest_json_sha256 (packet vs audit chain): MISMATCH" in text
+
+
+def test_audit_chain_detects_a_tampered_chain_row(tmp_path):
+    """A chain edited after the fact fails its own row-hash recheck --
+    recomputed here, not trusted from the CSV -- and the packet fails
+    with it: a tampered chain is not a better witness than no chain."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    events = _chain_events_for_packet(
+        files, packet["hashes"]["manifest_json_sha256"], packet["hashes"]["derivative"]["sha256"]
+    )
+    chain = _chain_csv(events, tmp_path)
+    # Corrupt the stored row_hash of the job.sanitize row without
+    # recomputing anything: the verifier must recompute and mismatch.
+    lines = chain.read_text().splitlines()
+    seq_i = next(i for i, line in enumerate(lines) if "job.sanitize" in line)
+    parts = lines[seq_i].split(",")
+    parts[-1] = "f" * 64  # forged row_hash
+    lines[seq_i] = ",".join(parts)
+    chain.write_text("\n".join(lines) + "\n")
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert not report.valid
+    assert report.audit_chain is not None and not report.audit_chain.chain_ok
+    assert "hash mismatch at seq 1" in report.audit_chain.chain_detail
+    assert "chain row hashes recomputed: FAILED" in report.to_text()
+
+
+def test_audit_chain_missing_event_is_reported_not_crashed(tmp_path):
+    """A chain that never saw this job (wrong matter export) reports the
+    absence explicitly and fails -- the packet cannot be checked against
+    a chain that never recorded it."""
+    files = _packet_files()
+    chain = _chain_csv(
+        [{"action": "document.upload", "actor_id": "operator", "payload": {"document_id": "OTHER"}}],
+        tmp_path,
+    )
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert not report.valid
+    assert report.audit_chain is not None
+    assert not report.audit_chain.event_found
+    assert "NOT FOUND in the exported chain" in report.to_text()
+
+
+def test_no_audit_csv_keeps_the_old_disclaimer(tmp_path):
+    """Without --audit-csv the tool behaves exactly as before: the honest
+    audit_refs disclaimer, not the new chain section, and the packet's
+    internal checks still decide validity."""
+    files = _packet_files()
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files))
+    assert report.valid
+    assert report.audit_chain is None
+    text = report.to_text()
+    assert "declared" in text and "not verified" in text
+    assert "Audit-chain cross-check" not in text
+
+
+def test_event_hash_matches_app_construction():
+    """The verifier's reimplemented row-hash must match the app's real
+    construction byte-for-byte, or the whole cross-check silently checks
+    against the wrong values."""
+    sys.path.insert(0, str(REPO / "service"))
+    from app.audit import event_hash
+
+    payload = {"job_id": "J1", "status": "done", "manifest_sha256": "a" * 64, "n": [1, {"x": None}]}
+    assert verifier._event_row_hash("0" * 64, 3, "operator", "job.sanitize", payload) == \
+        event_hash("0" * 64, 3, "operator", "job.sanitize", payload)

@@ -33,7 +33,7 @@ from . import oidc as oidc_mod
 # inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
 # isolated worker processes (see app.runner). A test enforces the ban.
 from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, perms_of, revoke
-from .audit import append_event, event_hash, verify_chain
+from .audit import _terminal_hash_facts, append_event, event_hash, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
 from .dispatcher import BatchDispatcher, sync_release
@@ -1865,6 +1865,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "status": finished.status,
                 "verification_pass": result.get("verification_pass"),
                 "no_decision_count": no_decision_count,
+                # MUST-1: chain-commit the artifact hashes the release
+                # packet will later declare, so a tampered manifest can't
+                # re-hash "clean" (see _terminal_hash_facts).
+                **_terminal_hash_facts(finished),
             },
         )
         return _job_dict(finished)
@@ -2111,6 +2115,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "status": finished.status,
                 "verification_pass": result.get("verification_pass"),
                 "no_decision_count": no_decision_count,
+                # MUST-1: same chain commitment as the raw sanitize route
+                # and batch children -- one shape everywhere (see
+                # _terminal_hash_facts).
+                **_terminal_hash_facts(finished),
             },
         )
 

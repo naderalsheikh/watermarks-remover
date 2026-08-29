@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
-from .audit import append_event
+from .audit import _terminal_hash_facts, append_event
 from .config import Config
 from .models import Batch, Job, Release, _now
 from .runner import run_job, sync_job
@@ -246,6 +246,13 @@ class BatchDispatcher:
                     "status": job.status,
                     "verification_pass": result.get("verification_pass"),
                     "no_decision_count": no_decision_count,
+                    # MUST-1: batch children chain-commit the same artifact
+                    # hashes as the single-document routes. The helper lives
+                    # in main.py; import it lazily so the dispatcher keeps
+                    # importing only the control-plane modules it already
+                    # needed -- and so the batch payload shape can never
+                    # drift from the route payloads.
+                    **_terminal_hash_facts(job),
                 },
             )
         else:

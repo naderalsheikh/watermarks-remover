@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -644,6 +645,121 @@ def test_bundle_filename_sanitizes_a_hostile_document_name(client):
     assert disposition.count('filename="') == 1
     assert '"' not in disposition[len('attachment; filename="') : -1]
     assert disposition.endswith(f'-release-packet-{job["id"]}.zip"')
+
+
+def _run_done_sanitize(client, filename="spa.docx", policy_id=None):
+    doc = _upload(client, filename)
+    body = {"policy_id": policy_id} if policy_id else {}
+    r = client.post(f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs", json=body)
+    job = r.json()
+    assert job["status"] == "done", job.get("error")
+    return doc, job
+
+
+def test_job_sanitize_event_chain_commits_artifact_hashes(client, tmp_path):
+    """MUST-1 end to end: the job.sanitize audit event carries the
+    manifest/derivative hashes at job-terminal time, the packet later
+    declares the SAME manifest hash, and the exported chain verifies --
+    the three-way agreement the offline --audit-csv check consumes."""
+    doc, job = _run_done_sanitize(client)
+
+    events = client.get(f"/v1/matters/{doc['_matter']}/audit?limit=100").json()
+    assert events["chain_ok"] is True
+    sanitize = next(e for e in events["events"] if e["action"] == "job.sanitize")
+    assert sanitize["payload"]["manifest_sha256"], "chain event must carry manifest_sha256"
+    assert sanitize["payload"]["derivative_sha256"], "chain event must carry derivative_sha256"
+
+    bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{job['id']}/bundle")
+    packet = json.loads(
+        zipfile.ZipFile(io.BytesIO(bundle.content)).read("release_packet.json")
+    )
+    assert packet["hashes"]["manifest_json_sha256"] == sanitize["payload"]["manifest_sha256"]
+    assert packet["hashes"]["derivative"]["sha256"] == sanitize["payload"]["derivative_sha256"]
+
+    # The real exported chain + the real downloaded packet through the
+    # real verifier with --audit-csv: everything the operator would do.
+    csv_path = tmp_path / "audit.csv"
+    csv_path.write_bytes(
+        client.get(f"/v1/matters/{doc['_matter']}/audit/export").content
+    )
+    zip_path = tmp_path / "packet.zip"
+    zip_path.write_bytes(bundle.content)
+    tools_dir = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    import counselclear_verify_release_packet as verifier
+
+    report = verifier.verify_release_packet(zip_path, audit_csv=csv_path)
+    assert report.valid, report.to_text()
+    assert report.audit_chain.chain_ok and report.audit_chain.event_found
+    text = report.to_text()
+    assert "manifest_json_sha256 (packet vs audit chain): ok" in text
+
+
+def test_refused_job_event_carries_no_hash_keys(client):
+    """MUST-1 edge rule: a refused job produces no manifest, so its
+    job.sanitize event omits the keys entirely -- absent, not nulled, so
+    'no bundle produced' stays distinguishable from 'hash unknown'."""
+    doc = _upload(client, "macro.docm") if (Path(__file__).parent / "fixtures" / "legal" / "macro.docm").exists() \
+        else _upload(client, "signed.pdf")
+    r = client.post(
+        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
+        json={"policy_id": "external_sharing"},
+    )
+    assert r.json()["status"] == "refused"
+    events = client.get(f"/v1/matters/{doc['_matter']}/audit?limit=100").json()
+    sanitize = [e for e in events["events"] if e["action"] == "job.sanitize"]
+    assert sanitize, "refused job still audited"
+    assert "manifest_sha256" not in sanitize[-1]["payload"]
+    assert "derivative_sha256" not in sanitize[-1]["payload"]
+
+
+def test_tampered_manifest_fails_chain_check_but_not_internal_checks(client, tmp_path):
+    """THE MUST-1 tamper simulation, through the real stack: alter the
+    on-disk manifest after job completion, pull a fresh packet (which
+    honestly re-hashes the tampered bytes -- internally consistent), and
+    the --audit-csv check catches what the internal checks cannot."""
+    doc, job = _run_done_sanitize(client)
+
+    # The bundle layout is a stable product fact (runner.py's job dirs):
+    # data/matters/{matter}/jobs/{job}/output/bundle/manifest.json.
+    manifest_path = (
+        tmp_path / "data" / "matters" / doc["_matter"] / "jobs" / job["id"] / "output" / "bundle" / "manifest.json"
+    )
+    assert manifest_path.is_file(), f"expected bundle at {manifest_path}"
+    original = manifest_path.read_bytes()
+    tampered = bytearray(original)
+    tampered[42] ^= 1
+    manifest_path.chmod(0o644)
+    manifest_path.write_bytes(bytes(tampered))
+    try:
+        bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{job['id']}/bundle")
+        assert bundle.status_code == 200
+    finally:
+        manifest_path.write_bytes(original)
+        manifest_path.chmod(0o444)
+
+    packet = json.loads(zipfile.ZipFile(io.BytesIO(bundle.content)).read("release_packet.json"))
+    # The packet honestly declares the TAMPERED manifest's hash...
+    assert packet["hashes"]["manifest_json_sha256"] == hashlib.sha256(bytes(tampered)).hexdigest()
+
+    csv_path = tmp_path / "audit.csv"
+    csv_path.write_bytes(client.get(f"/v1/matters/{doc['_matter']}/audit/export").content)
+    zip_path = tmp_path / "packet.zip"
+    zip_path.write_bytes(bundle.content)
+    tools_dir = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    import counselclear_verify_release_packet as verifier
+
+    report = verifier.verify_release_packet(zip_path, audit_csv=csv_path)
+    # Internally the tampered packet is consistent (every file matches
+    # its declared hash -- the gap MUST-1 exists to close); against the
+    # chain it is a mismatch.
+    assert not report.valid
+    text = report.to_text()
+    assert "manifest_json_sha256 (packet vs audit chain): MISMATCH" in text
+    assert "chain cross-check FAILED" in text
 
 
 def test_include_original_denied_by_default(client):

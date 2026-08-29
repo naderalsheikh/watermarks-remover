@@ -26,12 +26,13 @@ import hashlib
 import json
 import threading
 import uuid
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .models import AuditEvent
+from .models import AuditEvent, Job
 
 GENESIS = "0" * 64
 
@@ -116,6 +117,49 @@ def append_event(
                 s.commit()
                 return ev
         raise RuntimeError(f"audit append kept colliding on seq for matter {matter_id}")
+
+
+def _terminal_hash_facts(job: Job) -> dict[str, str]:
+    """Chain-commitment facts for a finished sanitize job's audit event.
+
+    MUST-1 (custody review 2026-08-29): the release packet's
+    manifest_json_sha256 was previously computed at download time from
+    whatever bytes sat on disk -- nothing earlier and immutable bound the
+    manifest to the audit chain, so a tampered manifest re-hashed
+    "clean". This helper re-hashes the bundle's manifest.json bytes at
+    job-terminal time so every job.sanitize event carries the hashes the
+    offline verifier can later cross-check the packet against.
+
+    Returns {} when there is nothing to commit -- refused/failed jobs
+    produce no manifest, and keys are omitted entirely (not nulled) so
+    "no bundle produced" stays distinguishable from "hash unknown".
+    The manifest hash comes from the disk bytes, never from
+    result_json's embedded manifest dict: the dict is semantically equal
+    but not byte-equal to the file (custody.write_manifest's indent/sort
+    formatting), so a dict-derived hash would disagree with the packet's
+    download-time hash on every packet. The derivative hash, by contrast,
+    is a plain string inside the manifest dict and is taken from there.
+
+    Never raises: a bundle read failure must not take down the terminal
+    path (dispatcher._append_child_audit calls this inside a try/except
+    that would otherwise silently drop the whole audit event).
+    """
+    if job.status != "done" or not job.bundle_dir:
+        return {}
+    result = job.result_json or {}
+    manifest_sha = None
+    try:
+        manifest_bytes = (Path(job.bundle_dir) / "manifest.json").read_bytes()
+        manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    except OSError:
+        manifest_sha = None
+    deriv_sha = (result.get("manifest") or {}).get("derivative", {}).get("sha256")
+    facts: dict[str, str] = {}
+    if manifest_sha:
+        facts["manifest_sha256"] = manifest_sha
+    if deriv_sha:
+        facts["derivative_sha256"] = deriv_sha
+    return facts
 
 
 def verify_chain(events: list[AuditEvent]) -> tuple[bool, str]:
