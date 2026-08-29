@@ -2166,3 +2166,14 @@ Continues the README tightening from PR 51-52 without changing any build or runt
 - **Link hygiene preserved in the extracted doc**: relative links inside the extracted upstream material were rewritten to resolve from `docs/UPSTREAM_UTILITY_LEGACY.md` rather than the repository root, so the document remains usable as engineering reference instead of becoming archival dead text.
 
 Verification stayed scoped to the changed files: `git diff --check README.md docs/UPSTREAM_UTILITY_LEGACY.md docs/COUNSELCLEAR_DESIGN.md` clean, plus a targeted grep confirming no unresolved root-relative markdown links remained in `docs/UPSTREAM_UTILITY_LEGACY.md`.
+
+### PR 54 -- Versioned schemas for release artifacts -- implemented (2026-08-29)
+
+Closes the concrete schema gap identified in the legal/IP triage: `finding.schema.json`, `policy.schema.json`, and `verify_result.schema.json` already existed, but the generated release artifacts that outside reviewers actually handle (`manifest.json`, `report.json`, `release_packet.json`, and `release_result.json`) had no published JSON Schema contract.
+
+- **Four artifact schemas added under `service/scripts/schemas/`**: `manifest.schema.json`, `report.schema.json`, `release_packet.schema.json`, and `release_result.schema.json`, each with a versioned `$id` (`*.v1.schema.json`). These schemas formalize the outer contract while leaving intentionally variable nested verification/tool payloads flexible.
+- **`report.json` now carries `report_version: 1`**: the other artifacts already had `manifest_version` or `spec_version`; the packet's report summary was the lone machine artifact with no version field.
+- **Verifier required-field checks now track the published schemas**: `tools/counselclear_verify_release_packet.py` remains stdlib-only, but reads the `required` lists from `release_packet.schema.json` and `release_result.schema.json` when available, falling back to its built-in tuples if the schema files are unavailable.
+- **No `engine/schemas/` duplication**: these are release/output artifacts emitted by the CounselClear control plane and custody layer, not engine finding/policy contracts. Keeping them in `service/scripts/schemas/` avoids expanding the existing duplicated engine/service schema pattern.
+
+New tests in `tests/test_artifact_schemas.py`: every new schema validates as Draft 2020-12; `emit_manifest()` output validates against `manifest.schema.json`; a real app-created release validates its downloaded `manifest.json`, `report.json`, `release_packet.json`, and `release_result.json`; and the verifier's required-field constants are asserted to match the schema files.

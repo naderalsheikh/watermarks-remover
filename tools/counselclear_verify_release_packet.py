@@ -88,7 +88,9 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-REQUIRED_MANIFEST_FIELDS = (
+SCHEMA_DIR = Path(__file__).resolve().parents[1] / "service" / "scripts" / "schemas"
+
+_FALLBACK_RELEASE_PACKET_FIELDS = (
     "spec_version",
     "packet_id",
     "matter_id",
@@ -115,7 +117,7 @@ REQUIRED_SIBLING_FILES = ("manifest.json", "report.json", "certificate.html", "R
 # PR 39: release_result.json's own required fields -- a much smaller,
 # derivative-free artifact than release_packet.json, produced for EVERY
 # terminal release (done, refused, or failed), not just a successful one.
-REQUIRED_RELEASE_RESULT_FIELDS = (
+_FALLBACK_RELEASE_RESULT_FIELDS = (
     "spec_version",
     "release_id",
     "job_id",
@@ -132,6 +134,27 @@ REQUIRED_RELEASE_RESULT_FIELDS = (
     "certificate_html_sha256",
     "generated_at",
     "anchor",
+)
+
+
+def _required_fields_from_schema(schema_name: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
+    """The verifier stays stdlib-only, but its required-field check should
+    track the published schema files when they are available."""
+    try:
+        schema = json.loads((SCHEMA_DIR / schema_name).read_text())
+    except (OSError, json.JSONDecodeError):
+        return fallback
+    required = schema.get("required")
+    if not isinstance(required, list) or not all(isinstance(x, str) for x in required):
+        return fallback
+    return tuple(required)
+
+
+REQUIRED_MANIFEST_FIELDS = _required_fields_from_schema(
+    "release_packet.schema.json", _FALLBACK_RELEASE_PACKET_FIELDS
+)
+REQUIRED_RELEASE_RESULT_FIELDS = _required_fields_from_schema(
+    "release_result.schema.json", _FALLBACK_RELEASE_RESULT_FIELDS
 )
 
 

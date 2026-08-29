@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://counselclear.local/schemas/manifest.v1.schema.json",
+  "title": "CounselClear Manifest v1",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "product",
+    "original",
+    "derivative",
+    "policy",
+    "processor",
+    "actions",
+    "findings_before",
+    "verification",
+    "timestamps",
+    "attestation_kind"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "manifest_version": { "const": 1 },
+    "product": { "const": "counselclear" },
+    "original": {
+      "type": "object",
+      "required": ["filename", "sha256", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "filename": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "derivative": {
+      "type": "object",
+      "required": ["filename", "sha256", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "filename": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "required": ["id", "version"],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "processor": { "type": "object" },
+    "actions": { "type": "array", "items": { "type": "string" } },
+    "findings_before": { "type": "array", "items": { "type": "string" } },
+    "verification": { "type": "object" },
+    "timestamps": {
+      "type": "object",
+      "required": ["created_utc"],
+      "additionalProperties": true,
+      "properties": {
+        "created_utc": { "type": "string", "minLength": 1 }
+      }
+    },
+    "attestation_kind": { "type": "string", "minLength": 1 },
+    "operator": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "matter": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "layer_b": { "type": "object" }
+  }
+}

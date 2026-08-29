@@ -2869,6 +2869,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         deriv_names = [p.name for p in sorted(deriv_dir.iterdir())]
         deriv_bytes_by_name = {name: (deriv_dir / name).read_bytes() for name in deriv_names}
         report = {
+            "report_version": 1,
             "verification": (job.result_json or {}).get("manifest", {}).get("verification"),
             "findings_before": (job.result_json or {}).get("manifest", {}).get("findings_before"),
         }

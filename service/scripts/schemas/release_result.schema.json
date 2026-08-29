@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://counselclear.local/schemas/release_result.v1.schema.json",
+  "title": "CounselClear Release Result v1",
+  "type": "object",
+  "required": [
+    "spec_version",
+    "release_id",
+    "job_id",
+    "document_id",
+    "matter_id",
+    "status",
+    "policy_id",
+    "profile_id",
+    "recipient_type",
+    "recipient_name",
+    "purpose",
+    "intended_external",
+    "reason",
+    "original_sha256",
+    "created_at",
+    "finished_at",
+    "audit_refs",
+    "limitations",
+    "certificate_html_sha256",
+    "generated_at",
+    "anchor"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": { "const": "1.0" },
+    "release_id": { "type": "string", "minLength": 1 },
+    "job_id": { "type": "string", "minLength": 1 },
+    "document_id": { "type": "string", "minLength": 1 },
+    "matter_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["done", "refused", "failed"] },
+    "policy_id": { "type": "string", "minLength": 1 },
+    "profile_id": { "type": "string", "minLength": 1 },
+    "recipient_type": { "type": "string", "minLength": 1 },
+    "recipient_name": { "type": "string" },
+    "purpose": { "type": "string" },
+    "intended_external": { "type": "boolean" },
+    "reason": { "type": "string" },
+    "original_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "created_at": { "type": "string", "minLength": 1 },
+    "finished_at": { "type": ["string", "null"] },
+    "audit_refs": {
+      "type": "object",
+      "required": ["release_created_seq", "release_terminal_seq"],
+      "additionalProperties": true,
+      "properties": {
+        "release_created_seq": { "type": "integer", "minimum": 1 },
+        "release_terminal_seq": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "certificate_html_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "generated_at": { "type": "string", "minLength": 1 },
+    "anchor": {
+      "type": "object",
+      "required": ["type", "digest", "reference"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string" },
+        "digest": { "type": ["string", "null"] },
+        "reference": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
