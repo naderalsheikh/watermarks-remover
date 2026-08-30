@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func, update
@@ -38,6 +39,20 @@ from .models import Batch, Job, Release, _now
 from .runner import run_job, sync_job
 
 log = logging.getLogger("counselclear")
+
+# Bounded retry for the per-child terminal finalizer below (audit append +
+# Release sync). Seconds at most, not minutes: this runs on the dispatcher's
+# own worker threads, which occupy the bounded-concurrency pool slots, so an
+# exponential schedule that reached minutes would hold a slot (and delay the
+# batch's remaining children) for longer than any in-process transient is
+# worth. A persistent failure is not solved by waiting: it falls through to
+# the degraded-append below after these few fast attempts.
+_FINALIZE_ATTEMPTS = 3
+_FINALIZE_BACKOFF_S = 0.2
+
+
+def _degraded_reason(e: BaseException) -> str:
+    return f"{type(e).__name__}: {e}"[:500]
 
 
 def sync_release(s: Session, job: Job) -> None:
@@ -213,18 +228,186 @@ class BatchDispatcher:
                     job.error = f"internal dispatcher error: {type(e).__name__}: {e}"[:1000]
                     job.finished_utc = _now()
                     s2.commit()
-            finished = s2.get(Job, job_id)
-            batch = s2.get(Batch, batch_id)
+            # Finalization below re-gets Job/Batch itself, per attempt, off
+            # committed rows: any rollback an attempt performs expires
+            # whatever was loaded here.
             try:
-                self._append_child_audit(s2, finished, batch)
-                sync_release(s2, finished)
-            except Exception:
-                log.exception("batch dispatcher: job %s finalization raised unexpectedly", job_id)
-                s2.rollback()
+                # Audit first, release-second (below): the job.* event is the
+                # custody-critical artifact, so it must not be endangered by
+                # anything that comes after it. Both share the same bounded
+                # retry because both are short writes on one connection --
+                # but they are retried independently, so a release failure
+                # can never trigger the degraded-audit path for an event
+                # that already committed.
+                self._finalize_child_audit(s2, job_id, batch_id)
+                self._finalize_child_release(s2, job_id)
             finally:
                 self.check_batch_completion(s2, batch_id)
         finally:
             s2.close()
+
+    def _finalize_child_audit(self, s: Session, job_id: str, batch_id: str | None) -> None:
+        """The child's job.sanitize/job.inspect audit event, retried to a
+        degraded fallback -- never silently dropped.
+
+        A terminal child that lost its audit event lost the custody record
+        of an act that demonstrably happened (its result_json/manifest are
+        on disk) -- evidence integrity, not a cosmetic gap. A transient
+        append failure gets a few fast retries; a persistent one still
+        gets an event, but degraded: same action name, the facts the
+        dispatcher still knows, an explicit finalization_degraded marker,
+        and the reason -- and through the same append_event hash-chain
+        path as every other event (never a raw INSERT; a custody record
+        outside the chain verifies as nothing at all).
+
+        The session may be in a failed state on entry (the caller's
+        run_job/sync_job backstop above leaves the transaction open, and
+        any attempt's rollback expires loaded instances); each attempt
+        therefore rolls back first and re-gets Job/Batch -- whatever state
+        the previous attempt left, the next one starts from committed
+        rows. append_event itself has no per-matter retry to hit twice:
+        its SAVEPOINT loop is a (matter_id, seq) collision retry that
+        raises RuntimeError once exhausted, which is just another attempt
+        failure here.
+        """
+        reason = ""
+        for attempt in range(1, _FINALIZE_ATTEMPTS + 1):
+            try:
+                s.rollback()
+                finished = s.get(Job, job_id)
+                batch = s.get(Batch, batch_id) if batch_id is not None else None
+                if finished is None:
+                    # Vanishingly unlikely (unique-FK row the dispatcher is
+                    # finalizing), and no facts left to record as degraded.
+                    log.error("batch dispatcher: job %s vanished before its audit finalization", job_id)
+                    return
+                self._append_child_audit(s, finished, batch)
+                return
+            except Exception as e:
+                reason = _degraded_reason(e)
+                log.exception(
+                    "batch dispatcher: job %s audit finalization attempt %d/%d failed",
+                    job_id,
+                    attempt,
+                    _FINALIZE_ATTEMPTS,
+                )
+                if attempt < _FINALIZE_ATTEMPTS:
+                    time.sleep(_FINALIZE_BACKOFF_S * (2 ** (attempt - 1)))
+        # All attempts failed: degraded, but durable -- the event this job
+        # would have had, rebuilt from the facts the dispatcher still
+        # knows. The last attempt's rollback just expired `finished`, and
+        # that failure may itself have been the load, so the re-get is
+        # guarded and the payload is built purely from plain attributes,
+        # never from a chain that can raise.
+        try:
+            s.rollback()
+            finished = s.get(Job, job_id)
+            if finished is None:
+                log.error(
+                    "batch dispatcher: job %s vanished before its degraded audit finalization",
+                    job_id,
+                )
+                return
+            # Same principal the normal event would carry (_append_child_audit
+            # uses batch.requested_by), re-got off the same committed row --
+            # a matter id is not an actor, and inventing a machine-actor here
+            # would make the degraded event's custody semantics differ from
+            # every other event in the chain for the same act. Job has no
+            # requested_by of its own, so a vanished Batch row (defensive
+            # only -- it's the FK this child was created under) leaves no
+            # principal to attribute: name the dispatcher itself, never a
+            # matter id, so the wrong-actor failure mode stays readable.
+            batch = s.get(Batch, finished.batch_id) if finished.batch_id else None
+            actor_id = batch.requested_by if batch is not None else "batch-dispatcher"
+            result = finished.result_json or {}
+            payload: dict = {
+                "job_id": finished.id,
+                "document_id": finished.document_id,
+                "batch_id": finished.batch_id,
+                "status": finished.status,
+                "verification_pass": result.get("verification_pass"),
+                "finalization_degraded": True,
+                "degraded_reason": reason,
+                # MUST-1 hash facts for the same reason the normal event
+                # carries them: the offline verifier cross-checks packet
+                # hashes against this event, degraded or not, and
+                # _terminal_hash_facts is built to never raise (it swallows
+                # its own OSError and returns {} for nothing-to-commit).
+                **_terminal_hash_facts(finished),
+            }
+            append_event(
+                s,
+                matter_id=finished.matter_id,
+                actor_id=actor_id,
+                action="job.sanitize" if finished.kind == "sanitize" else "job.inspect",
+                payload=payload,
+            )
+            log.error(
+                "batch dispatcher: job %s audit finalization failed %d times; wrote degraded "
+                "audit event (finalization_degraded=true, reason=%s)",
+                job_id,
+                _FINALIZE_ATTEMPTS,
+                reason,
+            )
+        except Exception:
+            # The doubly-failed path: the event itself is what failed, so
+            # there is nothing left to persist it with -- the log line is
+            # the only surviving record. This catch exists only to keep
+            # check_batch_completion running.
+            log.exception(
+                "batch dispatcher: job %s degraded audit append also failed; "
+                "no audit event could be written",
+                job_id,
+            )
+            try:
+                s.rollback()
+            except Exception:
+                log.exception("batch dispatcher: job %s rollback after failed degraded append", job_id)
+
+    def _finalize_child_release(self, s: Session, job_id: str) -> None:
+        """Release sync, single retry, log-only on persistent failure.
+
+        Not an audit event: it syncs the sibling Release row to the Job's
+        own already-committed terminal status and appends release.terminal
+        from job.status, not from any state this path owns -- every input
+        is durable in the database before this runs. A sync stuck here
+        self-heals without this retry too: boot-time reconciliation
+        (_sweep_orphaned_jobs and _reconcile_stale_releases in main.py)
+        independently finds any Release whose status disagrees with its
+        terminal Job and syncs it, so this is an opportunistic fast path
+        over a recovery path that exists, not the only chance the Release
+        has. Batch children mostly have no sibling Release anyway (most
+        sanitize paths never go through the Release-wrapping route), which
+        makes sync_release the frequent no-op branch of finalization --
+        and the wrong thing to spend the pool slot's time retrying
+        aggressively, or to ever route down the degraded-audit path that
+        exists for the event that has no other writer.
+
+        Separate from the audit loop on purpose: by the time this runs the
+        job.* event has already committed, so a failure here must not
+        cost the audit anything, and it must not be able to wedge the
+        batch -- hence the self-contained rollback on the way out.
+        """
+        for attempt in (1, 2):
+            try:
+                s.rollback()
+                finished = s.get(Job, job_id)
+                if finished is None:
+                    return
+                sync_release(s, finished)
+                return
+            except Exception:
+                log.exception(
+                    "batch dispatcher: job %s release sync attempt %d/2 failed",
+                    job_id,
+                    attempt,
+                )
+                if attempt == 1:
+                    time.sleep(_FINALIZE_BACKOFF_S)
+        try:
+            s.rollback()
+        except Exception:
+            log.exception("batch dispatcher: job %s rollback after failed release sync", job_id)
 
     def _append_child_audit(self, s: Session, job: Job, batch: Batch | None) -> None:
         if batch is None:  # defensive -- batch_id is a real FK, should never be missing

@@ -630,6 +630,98 @@ def test_dispatcher_finalization_exception_does_not_wedge_batch(env, monkeypatch
     assert completed[0]["payload"]["done"] == 1
 
 
+def test_finalization_exception_still_leaves_child_audit_event(env, monkeypatch):
+    """A terminal batch child that loses its audit event loses the custody
+    record of an act that demonstrably happened (its result_json is already
+    committed) -- evidence integrity, not a cosmetic gap. If the append
+    fails on every attempt, the fix degrades instead of going silent: the
+    same job.inspect action, rebuilt from the facts the dispatcher still
+    knows, with an explicit finalization_degraded marker and the reason.
+    The event still goes through append_event, so the chain stays intact.
+    """
+
+    def _boom(self, s, job, batch):
+        raise RuntimeError("simulated persistent audit finalization failure")
+
+    monkeypatch.setattr("app.dispatcher.BatchDispatcher._append_child_audit", _boom)
+    c, _, _ = env
+    mid = _matter(c)
+    d = _upload(c, mid, "spa.txt")
+
+    r = _create_batch(c, mid, [d], "inspect")
+    assert r.status_code == 200, r.text
+    final = _wait_batch_done(c, mid, r.json()["id"])
+    job_id = final["results"][0]["job_id"]
+    assert final["summary"]["done"] == 1  # degraded finalization still completes the batch
+
+    inspect_events = [e for e in _audit_actions(c, mid) if e["action"] == "job.inspect"]
+    # With this monkeypatch the normal append can never succeed -- the
+    # degraded fallback is the event the fix must have written for THIS
+    # job (keyed on job_id, not list position, so a second child could
+    # never be miscounted).
+    matching = [e for e in inspect_events if e["payload"]["job_id"] == job_id]
+    assert matching, "child job's audit event vanished when finalization kept failing"
+    degraded = matching[0]["payload"]
+    assert degraded["finalization_degraded"] is True
+    assert degraded["status"] == "done"
+    assert degraded["document_id"] == d
+    assert degraded["batch_id"] == r.json()["id"]
+    assert degraded["verification_pass"] is None
+    assert "simulated persistent audit finalization failure" in degraded["degraded_reason"]
+    # The degraded event must carry the same principal the normal event
+    # would have (batch.requested_by -- "operator" for this local-password
+    # test client): a matter id is not an actor, and a machine-actor here
+    # would make its custody semantics differ from every other event for
+    # the same act.
+    assert matching[0]["actor_id"] == "operator"
+    # Degraded is still a chain event: it must not have broken verification.
+    assert c.get(f"/v1/matters/{mid}/audit").json()["chain_ok"] is True
+
+
+def test_finalization_retry_succeeds_leaves_normal_audit_event(env, monkeypatch):
+    """A transient finalization failure (first attempt raises, retry
+    succeeds) must yield the normal, non-degraded job.inspect event -- the
+    retry exists so the degraded fallback is reached only by a persistent
+    failure, not any single hiccup. Counter-based _boom: raises exactly
+    once, then delegates to the real implementation.
+    """
+    from app.dispatcher import BatchDispatcher
+
+    real = BatchDispatcher._append_child_audit
+    calls = {"n": 0}
+
+    def _flaky(self, s, job, batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated transient audit finalization failure")
+        return real(self, s, job, batch)
+
+    monkeypatch.setattr("app.dispatcher.BatchDispatcher._append_child_audit", _flaky)
+    c, _, _ = env
+    mid = _matter(c)
+    d = _upload(c, mid, "spa.txt")
+
+    r = _create_batch(c, mid, [d], "inspect")
+    assert r.status_code == 200, r.text
+    final = _wait_batch_done(c, mid, r.json()["id"])
+    job_id = final["results"][0]["job_id"]
+    assert final["summary"]["done"] == 1
+
+    matching = [
+        e
+        for e in _audit_actions(c, mid)
+        if e["action"] == "job.inspect" and e["payload"]["job_id"] == job_id
+    ]
+    assert matching, "child job never got its audit event after a transient finalization failure"
+    payload = matching[0]["payload"]
+    # First attempt raised, retry succeeded -- the event is the normal one.
+    assert calls["n"] == 2
+    assert "finalization_degraded" not in payload
+    assert payload["status"] == "done"
+    assert payload["document_id"] == d
+    assert payload["findings_count"] == 1  # spa.txt's single finding, via the real engine
+
+
 # --- ported from the retired tests/test_bulk_jobs.py (PR 31 commit 3) -----------
 #
 # The synchronous /bulk-jobs endpoint (PR 23) was retired once the frontend
