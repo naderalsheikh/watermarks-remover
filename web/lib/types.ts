@@ -318,3 +318,33 @@ export const KNOWN_PERMS = [
   "download_original",
   "admin",
 ] as const;
+
+// The controlled legal-basis vocabulary the backend accepts for findings
+// that survive a derivative (LEGAL_JUSTIFICATION_BASES in service/scripts/
+// policies.py, mirrored by finding.schema.json and release_packet.schema.
+// json). A deliberate second literal, same rule as the backend's own
+// RECIPIENT_TYPE_LABEL copy in main.py: web/ and the backend share
+// vocabularies by duplication, never by import, so neither can break the
+// other at build time. The backend rejects values outside this list (a
+// failed job), so a UI update lagging a backend vocabulary change shows
+// up as a visible job failure, not silent drift.
+export const LEGAL_BASIS_VALUES = [
+  "unspecified",
+  "privilege",
+  "work_product",
+  "pii_confidentiality",
+  "relevance",
+  "court_order",
+  "client_instruction",
+  "litigation_hold",
+  "gdpr_access",
+  "other",
+] as const;
+
+export type LegalBasis = (typeof LEGAL_BASIS_VALUES)[number];
+
+// {subtype: {basis, note}} -- the exact request shape ReleaseBody takes
+// for legal_justifications (service/app/main.py). A subtype key with no
+// entry means nothing was supplied for it, which the backend records as
+// basis "unspecified" on surviving findings -- never a release gate.
+export type LegalJustifications = Record<string, { basis: LegalBasis; note: string }>;

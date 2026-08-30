@@ -11,6 +11,13 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { hasMatterPerm, permissionGate } from "@/lib/matterPermissions";
 import { BULK_MAX_DOCUMENTS, bulkCapOverflow, isOverBulkCap } from "@/lib/bulkCap";
 import { isCancelledResult } from "@/lib/batchCancel";
+import {
+  buildLegalJustifications,
+  FALLBACK_LEGAL_BASIS_DISCLOSURE,
+  KNOWN_LEGAL_BASES,
+  LEGAL_BASIS_LABEL,
+} from "@/lib/legalBasis";
+import type { SubtypeBasisState } from "@/lib/legalBasis";
 import type {
   BatchReleaseResponse,
   BatchResponse,
@@ -91,6 +98,11 @@ function ReleasePanel({
   const [attest, setAttest] = useState(false);
   const [noDecisionAck, setNoDecisionAck] = useState(false);
   const [decisions, setDecisions] = useState<Record<string, "approve" | "keep">>({});
+  // Per-kept-subtype legal basis + note (the PR 55/58 chain reaching the
+  // operator): filled in for a row only when its decision is "keep" --
+  // a basis is the evidentiary ground for content that SURVIVES the
+  // derivative, and an approved (stripped) finding has none.
+  const [bases, setBases] = useState<Record<string, SubtypeBasisState>>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const selectedProfile = releaseProfiles.find((p) => p.id === profileId);
@@ -124,6 +136,11 @@ function ReleasePanel({
         hasPerFindingReview && approveSubtypes.length > 0
           ? Object.fromEntries(approveSubtypes.map((st) => [st, decisions[st] ?? "keep"]))
           : undefined;
+      // legal_justifications from the per-row basis picks: kept subtypes
+      // with a real basis only -- see buildLegalJustifications. undefined
+      // (nothing picked) omits the field entirely: a release with no
+      // supplied basis is fully valid, never gated.
+      const legal_justifications = buildLegalJustifications(decisions, bases);
       await api.post<ReleaseCreateResponse>(`/v1/matters/${matterId}/documents/${docId}/releases`, {
         profile_id: profileId,
         recipient_type: recipientType,
@@ -138,6 +155,7 @@ function ReleasePanel({
         intended_external: intendedExternal,
         signature_break_attestation: attest,
         ...(finding_decisions ? { finding_decisions } : {}),
+        ...(legal_justifications ? { legal_justifications } : {}),
       });
       onDone();
       onClose();
@@ -224,6 +242,10 @@ function ReleasePanel({
               ? "Retry loading findings, or proceed only once you accept that below."
               : "Run Inspect first to review findings individually instead."}
           </p>
+          {/* Same honesty rule the certificate renders on the other side: kept
+              findings with no supplied basis read as "unspecified" there, so
+              the pre-submit state says it too -- never a silent downgrade. */}
+          <p className="mt-1">{FALLBACK_LEGAL_BASIS_DISCLOSURE}</p>
           <label className="mt-2 flex items-center gap-2">
             <input
               type="checkbox"
@@ -244,24 +266,67 @@ function ReleasePanel({
             {approveSubtypes.map((st) => {
               const count = approveSubtypeCounts.get(st) ?? 0;
               const value = decisions[st] ?? "keep";
+              const basis = bases[st]?.basis ?? "unspecified";
+              const note = bases[st]?.note ?? "";
               return (
-                <li key={st} className="flex items-center justify-between gap-3">
-                  <span>
-                    {subtypeLabel(st)}{" "}
-                    <span className="text-muted">
-                      ({count} finding{count === 1 ? "" : "s"})
+                <li key={st} className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>
+                      {subtypeLabel(st)}{" "}
+                      <span className="text-muted">
+                        ({count} finding{count === 1 ? "" : "s"})
+                      </span>
                     </span>
-                  </span>
-                  <select
-                    value={value}
-                    onChange={(e) =>
-                      setDecisions((d) => ({ ...d, [st]: e.target.value as "approve" | "keep" }))
-                    }
-                    className="rounded border border-border bg-transparent px-1.5 py-1 text-xs outline-none focus:border-accent"
-                  >
-                    <option value="keep">Keep</option>
-                    <option value="approve">Approve (strip)</option>
-                  </select>
+                    <select
+                      value={value}
+                      onChange={(e) =>
+                        setDecisions((d) => ({ ...d, [st]: e.target.value as "approve" | "keep" }))
+                      }
+                      className="rounded border border-border bg-transparent px-1.5 py-1 text-xs outline-none focus:border-accent"
+                    >
+                      <option value="keep">Keep</option>
+                      <option value="approve">Approve (strip)</option>
+                    </select>
+                  </div>
+                  {value === "keep" && (
+                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-2">
+                      {/* Legal basis for RETAINED content only: this row is
+                          being kept, so the operator can state the
+                          evidentiary ground the certificate will disclose.
+                          Defaults to unspecified and is never required --
+                          an unselected basis is recorded honestly as
+                          unspecified, never blocking the release. */}
+                      <select
+                        value={basis}
+                        onChange={(e) =>
+                          setBases((b) => ({
+                            ...b,
+                            [st]: { basis: e.target.value as SubtypeBasisState["basis"], note },
+                          }))
+                        }
+                        aria-label={`Legal basis for kept ${subtypeLabel(st)}`}
+                        className="rounded border border-border bg-transparent px-1.5 py-1 text-xs outline-none focus:border-accent"
+                      >
+                        {KNOWN_LEGAL_BASES.map((v) => (
+                          <option key={v} value={v}>
+                            Basis: {LEGAL_BASIS_LABEL[v] ?? v}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        value={note}
+                        onChange={(e) =>
+                          setBases((b) => ({
+                            ...b,
+                            [st]: { basis, note: e.target.value },
+                          }))
+                        }
+                        placeholder="Basis note (optional)"
+                        aria-label={`Basis note for kept ${subtypeLabel(st)}`}
+                        className="rounded border border-border bg-transparent px-1.5 py-1 text-xs outline-none focus:border-accent"
+                      />
+                    </div>
+                  )}
                 </li>
               );
             })}
