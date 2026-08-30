@@ -319,6 +319,7 @@ def _render_job_certificate_html(
     generated_at: str,
     generated_by: str,
     release_context: dict | None = None,
+    legal_justifications: list[dict] | None = None,
 ) -> str:
     """Self-contained per-job custody/transaction certificate (PR 33).
 
@@ -382,6 +383,53 @@ def _render_job_certificate_html(
             f"(<code>{esc(release_context['profile_id'])}</code>).<br>"
             f"{recipient_line}{purpose_line}<br>"
             f"{esc(intent_line)}.</p>"
+        )
+
+    # legal_justifications is absent entirely (None/empty) unless this
+    # sanitize job actually kept findings -- the same pattern as
+    # policy_html/release_html above: no section, not an empty one.
+    # Items come from the manifest's own action_records via
+    # _legal_justifications_from_manifest (the packet builder's helper),
+    # never re-derived from the job row, so the certificate and
+    # release_packet.json/release_result.json can never disagree.
+    legal_justifications_html = ""
+    if legal_justifications:
+        items_html = "".join(
+            f"<li><code>{esc(entry.get('subtype', ''))}</code> ({esc(entry.get('action', ''))}): "
+            f"{esc((entry.get('legal_justification') or {}).get('basis', 'unspecified'))}"
+            + (
+                f" — {esc((entry.get('legal_justification') or {}).get('note', ''))}"
+                if (entry.get("legal_justification") or {}).get("note")
+                else ""
+            )
+            + "</li>"
+            for entry in legal_justifications
+        )
+        # Honesty rule: the engine writes basis "unspecified" when the
+        # operator supplied nothing for a surviving finding. The list is
+        # rendered either way (it is the recorded truth), but when every
+        # basis is the fallback the section must say so rather than let
+        # the section heading read as legal review that never happened.
+        # Same register as the disclaimer: a statement about what was
+        # recorded, never a legal determination.
+        all_unspecified = all(
+            (entry.get("legal_justification") or {}).get("basis", "unspecified") == "unspecified"
+            for entry in legal_justifications
+        )
+        caveat_html = (
+            "<p>No operator-supplied legal basis was recorded for the entries below — they "
+            "carry the engine's <code>unspecified</code> fallback, not a legal determination "
+            "by CounselClear or its operator.</p>"
+            if all_unspecified
+            else ""
+        )
+        legal_justifications_html = (
+            "<h2>Legal basis for retained content</h2>"
+            "<p>For findings kept in the derivative, the legal basis recorded for each is "
+            "listed below. This is a record of what was entered at job creation — it is "
+            "<strong>not</strong> a legal opinion.</p>"
+            f"{caveat_html}"
+            f"<ul>{items_html}</ul>"
         )
 
     hashes_html = f"<p>Original SHA-256: <code>{esc(original_sha256)}</code>"
@@ -490,6 +538,8 @@ Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
 
 <h2>Manifest actions</h2>
 {actions_html}
+
+{legal_justifications_html}
 
 <h2>Findings before sanitization</h2>
 {findings_before_html}
@@ -2854,6 +2904,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "intended_external": release.intended_external,
             }
 
+        # PR 55 gap (SHOULD-3): the kept findings' operator-supplied legal
+        # bases must reach the certificate, sourced from the manifest's
+        # own action_records through the same _legal_justifications_
+        # from_manifest helper the release-packet/result builders use --
+        # one projection, so certificate.html inside a packet matches
+        # release_packet.json's legal_justifications byte for meaning.
+        # Inspect jobs have no action_records: empty list -> section
+        # absent, same as policy_html is absent for an inspect job.
+        legal_justifications = (
+            _legal_justifications_from_manifest(manifest) if job.kind == "sanitize" else []
+        )
+
         body = _render_job_certificate_html(
             matter_id=matter.id,
             matter_name=matter.name,
@@ -2880,6 +2942,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
             generated_by=generated_by,
             release_context=release_context,
+            legal_justifications=legal_justifications,
         )
         return body, policy_id, limitations
 

@@ -11,7 +11,9 @@ hash-recomputed) rather than the matter's full audit chain.
 
 from __future__ import annotations
 
+import io
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -399,6 +401,141 @@ def test_certificate_escapes_dynamic_values(env):
     assert "&lt;script&gt;" in body
     assert "<img src=x onerror=alert(2)>" not in body
     assert "&lt;img" in body
+
+
+# --- legal basis for retained content (PR 55, SHOULD-3) -----------------------------
+
+
+def test_certificate_shows_legal_basis_for_a_release_with_supplied_justifications(env):
+    """PR 55 threaded operator-supplied legal bases into the manifest and
+    the packet, but not the certificate -- the one artifact a lawyer
+    actually prints. spa.docx has two approve-default subtypes present
+    (comments_and_notes, tracked_changes); keeping one with a supplied
+    basis and approving the other exercises the surviving-finding path
+    end to end through the real API."""
+    c, _, _ = env
+    mid = _matter(c, "Legal Basis Matter")
+    doc = _upload(c, mid, "spa.docx")
+    r = c.post(
+        f"/v1/matters/{mid}/documents/{doc}/releases",
+        json={
+            "profile_id": "ediscovery_production",
+            "recipient_type": "opposing_counsel",
+            "finding_decisions": {
+                "comments_and_notes": "keep",
+                "tracked_changes": "approve",
+            },
+            "legal_justifications": {
+                "comments_and_notes": {
+                    "basis": "privilege",
+                    "note": "Attorney-client negotiation comments withheld.",
+                }
+            },
+        },
+    )
+    assert r.status_code == 200, r.text
+    job = r.json()["job"]
+    assert job["status"] == "done", job["error"]
+
+    body = _certificate(c, mid, job["id"]).text
+    assert "<h2>Legal basis for retained content</h2>" in body
+    assert "privilege" in body
+    assert "Attorney-client negotiation comments withheld." in body
+    # The unspecified fallback was never written for this subtype: no
+    # operator supplied nothing here, so the caveat must not fire.
+    assert "No operator-supplied legal basis was recorded" not in body
+
+
+def test_certificate_marks_all_unspecified_bases_as_not_a_determination(env):
+    """No legal_justifications supplied -> the engine records basis
+    "unspecified" for every surviving finding. The section must still
+    render (it is the recorded truth) but must not read as legal review
+    that never happened: the all-unspecified caveat is mandatory then."""
+    c, _, _ = env
+    mid = _matter(c)
+    doc = _upload(c, mid, "spa.docx")
+    job = _sanitize(
+        c, mid, doc,
+        policy_id="production",
+        finding_decisions={"comments_and_notes": "keep", "tracked_changes": "keep"},
+    )
+    assert job["status"] == "done", job["error"]
+
+    body = _certificate(c, mid, job["id"]).text
+    assert "<h2>Legal basis for retained content</h2>" in body
+    assert "No operator-supplied legal basis was recorded" in body
+    assert "unspecified" in body
+    assert "not a legal determination" in body
+
+
+def test_certificate_has_no_legal_basis_section_when_nothing_was_kept(env):
+    """external_sharing strips or accepts every spa.docx finding (no keep/
+    flag/inspect_only outcome) -- the manifest has action_records without
+    legal_justification, so the section is absent entirely, same as the
+    Release section for a legacy job."""
+    c, _, _ = env
+    mid = _matter(c)
+    doc = _upload(c, mid, "spa.docx")
+    job = _sanitize(c, mid, doc, policy_id="external_sharing")
+    assert job["status"] == "done", job["error"]
+
+    body = _certificate(c, mid, job["id"]).text
+    assert "Legal basis for retained content" not in body
+
+
+def test_certificate_legal_basis_note_is_html_escaped(env):
+    """The note is arbitrary operator text -- the one free-text field in
+    the section -- so it must go through esc() like every other dynamic
+    value in this certificate, not into raw HTML."""
+    c, _, _ = env
+    mid = _matter(c)
+    doc = _upload(c, mid, "spa.docx")
+    job = _sanitize(
+        c, mid, doc,
+        policy_id="production",
+        finding_decisions={"comments_and_notes": "keep", "tracked_changes": "approve"},
+        legal_justifications={
+            "comments_and_notes": {
+                "basis": "client_instruction",
+                "note": "<script>alert('xss')</script> per counsel",
+            }
+        },
+    )
+    assert job["status"] == "done", job["error"]
+
+    body = _certificate(c, mid, job["id"]).text
+    section = body.split("<h2>Legal basis for retained content</h2>")[1]
+    assert "<script>alert('xss')</script>" not in body
+    assert "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;" in section
+    assert "client_instruction" in section
+
+
+def test_certificate_legal_basis_reaches_the_bundle_embedded_certificate(env):
+    """job_bundle embeds the same certificate bytes as the standalone
+    route (one _build_certificate_html for both); the legal basis must be
+    present in certificate.html inside the packet too, so a recipient
+    reading the packet and one pulling the certificate standalone can
+    never read different facts."""
+    c, _, _ = env
+    mid = _matter(c)
+    doc = _upload(c, mid, "spa.docx")
+    job = _sanitize(
+        c, mid, doc,
+        policy_id="production",
+        finding_decisions={"comments_and_notes": "keep", "tracked_changes": "approve"},
+        legal_justifications={
+            "comments_and_notes": {"basis": "work_product", "note": "memo draft kept in full."}
+        },
+    )
+    assert job["status"] == "done", job["error"]
+
+    bundle = c.get(f"/v1/matters/{mid}/jobs/{job['id']}/bundle")
+    assert bundle.status_code == 200, bundle.text
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as zf:
+        cert = zf.read("certificate.html").decode()
+    assert "<h2>Legal basis for retained content</h2>" in cert
+    assert "work_product" in cert
+    assert "memo draft kept in full." in cert
 
 
 # --- certificate.issued on every pull, including repeats ---------------------------
