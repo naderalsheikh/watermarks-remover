@@ -2,12 +2,27 @@
 
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { formatTimestamp } from "@/lib/format";
 import { useApiData } from "@/lib/useApi";
-import { hasMatterPerm } from "@/lib/matterPermissions";
-import type { Finding, Job, Manifest, Matter, Release } from "@/lib/types";
+import { hasMatterPerm, releaseGate } from "@/lib/matterPermissions";
+import {
+  buildRerunPayload,
+  initialRerunState,
+  isAttestationRefusalHint,
+  type RerunState,
+} from "@/lib/rerunRelease";
+import type {
+  Finding,
+  Job,
+  Manifest,
+  Matter,
+  Release,
+  ReleaseCreateResponse,
+  ReleaseProfile,
+  ReleaseProfilesResponse,
+} from "@/lib/types";
 import { Header } from "@/components/Header";
 import { StatusBadge } from "@/components/StatusBadge";
 
@@ -424,6 +439,207 @@ function JobSkeleton() {
   );
 }
 
+// The re-run control for a refused/failed job (2026-08-29 UX pass). The
+// dashboard's refused-attention item tells the operator to "Open the job
+// to see why, then re-run with a different policy or attestation" -- but
+// until this panel, the page it deep-links to dead-ended at certificate
+// and release-result links: the promise had no control to land on.
+//
+// Rendered as a collapsed <details> BELOW the refusal/failure callout on
+// purpose: the callout is the primary signal (what happened and why);
+// this is only the offered next action, and it must stay secondary so a
+// first-time reader sees the verdict before they see a way to spend
+// another job on it. Collapsed by default for the same reason --
+// re-running is a real custody event (a NEW Release and Job row), not a
+// "try again" button, and shouldn't sit open under the refusal like the
+// obvious thing to do.
+//
+// Always the RELEASE route (POST .../documents/{id}/releases), even for
+// a legacy refused job with no release_id: the release flow is the only
+// user-facing path (PR 40 policy). A legacy job's policy_id maps to the
+// release profile that resolves to that same policy (see rerunRelease.ts)
+// -- the same regulation re-run through the supported route, not a
+// silent policy change.
+function RerunPanel({
+  matterId,
+  job,
+  release,
+  releaseProfiles,
+  recipientTypes,
+  perms,
+  onRerun,
+}: {
+  matterId: string;
+  job: Job;
+  release: Release | null;
+  releaseProfiles: ReleaseProfile[];
+  recipientTypes: string[];
+  perms: string[] | undefined;
+  onRerun: (newJobId: string) => void;
+}) {
+  const [state, setState] = useState<RerunState>(() =>
+    initialRerunState(job, release, releaseProfiles),
+  );
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  // The same release-preparation gate the matter page's "Prepare Release
+  // Packet" button uses: POST .../releases is sanitize-gated server-side,
+  // so the button is disabled with the tooltip that names both the
+  // action and the grant to ask for (see matterPermissions.ts). perms is
+  // undefined while matterQ resolves -- releaseGate treats that as
+  // "no permission" (the safe default), so the button is disabled until
+  // the grant is actually confirmed.
+  const gate = releaseGate(perms);
+
+  async function submit() {
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      // Synchronous like every other job-starting route in this app: the
+      // POST returns once the job has actually finished (service/app/
+      // main.py's _execute_job), so the response's job.id is the NEW
+      // terminal-or-not job row, not a queued promise.
+      const resp = await api.post<ReleaseCreateResponse>(
+        `/v1/matters/${matterId}/documents/${job.document_id}/releases`,
+        buildRerunPayload(state),
+      );
+      onRerun(resp.job.id);
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Re-run failed to start");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <details className="mt-3 rounded-md border border-border bg-black/[0.02] px-4 py-3 dark:bg-white/[0.02]">
+      <summary className="cursor-pointer select-none text-sm font-medium text-foreground">
+        Re-run this release
+      </summary>
+      {/* Honest scope, stated before the operator opens anything else:
+          re-running CREATES -- a new Release and a new Job -- it never
+          overwrites. The refused job stays in history as the record of
+          the refusal, which is the whole custodial value of a refusal.
+          No "retry will succeed" implication: same choices will refuse
+          identically, and only the refusal callout above can say why. */}
+      <p className="mt-2 text-xs text-muted">
+        Run again with the same or adjusted choices — this creates a new job; the previous
+        refusal stays on the record, and re-running never overwrites custody history. Same
+        choices will produce the same result.
+      </p>
+      <div className="mt-3 space-y-3">
+        <div>
+          <label className="mb-1 block text-xs font-medium">Release profile</label>
+          <select
+            value={state.profileId}
+            onChange={(e) => setState((s) => ({ ...s, profileId: e.target.value }))}
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+          >
+            {releaseProfiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          {/* For a legacy job the prefill is a policy->profile mapping
+              (pickPrefilledProfile) -- when that mapping had to fall back
+              to the first profile because the original policy has no
+              user-facing destination, say so, rather than presenting the
+              substituted profile as if it were the original's. */}
+          {job.release_id === null &&
+            !releaseProfiles.some((p) => p.id === state.profileId && p.policy_id === job.policy_id) &&
+            state.profileId === (releaseProfiles[0]?.id ?? "") && (
+              <p className="mt-1 text-xs text-muted">
+                The original job&apos;s policy ({job.policy_id}) has no release profile that
+                resolves to it — the first profile is preselected; adjust if that&apos;s not
+                the right destination.
+              </p>
+            )}
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium">Recipient</label>
+          <select
+            value={state.recipientType}
+            onChange={(e) => setState((s) => ({ ...s, recipientType: e.target.value }))}
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+          >
+            {recipientTypes.map((rt) => (
+              <option key={rt} value={rt}>
+                {recipientTypeLabel(rt)}
+              </option>
+            ))}
+          </select>
+        </div>
+        {/* Prefilled from the original Release and POSTed verbatim with the
+            re-run (buildRerunPayload) -- so they must be VISIBLE and
+            editable, exactly the matter page's own inputs: a re-run that
+            silently carried the original's recipient name/purpose the
+            operator never saw would put unreviewed values on a custody
+            record. */}
+        <div>
+          <label className="mb-1 block text-xs font-medium">Recipient name (optional)</label>
+          <input
+            value={state.recipientName}
+            onChange={(e) => setState((s) => ({ ...s, recipientName: e.target.value }))}
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium">Purpose / reason (optional)</label>
+          <input
+            value={state.purpose}
+            onChange={(e) => setState((s) => ({ ...s, purpose: e.target.value }))}
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+          />
+        </div>
+        <label className="flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={state.intendedExternal}
+            onChange={(e) => setState((s) => ({ ...s, intendedExternal: e.target.checked }))}
+          />
+          This release is intended to leave the organization
+        </label>
+        <label className="flex items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={state.attestation}
+            onChange={(e) => setState((s) => ({ ...s, attestation: e.target.checked }))}
+          />
+          {/* Same label wording as ReleasePanel's attestation checkbox
+              (web/app/matters/view/page.tsx) -- one vocabulary for the
+              one legally-loaded input in the product, no drift. */}
+          I attest to breaking a digital signature, if this document has one
+        </label>
+        {/* The one case where a specific re-run choice is the whole
+            point: the original was refused precisely for a missing
+            signature-break attestation (see the refusal callout above),
+            and the checkbox -- prefilled to the original's value -- is
+            still unchecked. Without this hint the single change that
+            would make this run differ is the easiest thing to miss. */}
+        {isAttestationRefusalHint(job.error, state.attestation) && (
+          <p className="text-xs text-amber-700 dark:text-amber-400">
+            This job was refused because the signature-break attestation was not given —
+            checking the box above is the change a re-run needs, if you can make that
+            attestation.
+          </p>
+        )}
+        {submitError && <p className="text-xs text-red-600">{submitError}</p>}
+        <button
+          onClick={submit}
+          disabled={
+            submitting || !state.profileId || releaseProfiles.length === 0 || !gate.allowed
+          }
+          title={gate.title}
+          className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {submitting ? "Submitting…" : "Re-run release"}
+        </button>
+      </div>
+    </details>
+  );
+}
+
 function JobView({
   matterId,
   jobId,
@@ -433,6 +649,7 @@ function JobView({
   jobId: string;
   highlight: string | null;
 }) {
+  const router = useRouter();
   const { data: job, error, loading, reload } = useApiData(
     () => api.get<Job>(`/v1/matters/${matterId}/jobs/${jobId}`),
     `job:${matterId}:${jobId}`,
@@ -446,6 +663,7 @@ function JobView({
   );
   const perms = matterQ.data?.perms;
   const isPending = job?.status === "queued" || job?.status === "running";
+  const isTerminalNoDerivative = job?.status === "refused" || job?.status === "failed";
   // Job execution is synchronous within the request that starts it (see
   // service/app/main.py's _execute_job), so "running" is rarely observed
   // from the tab that clicked Inspect/Sanitize — it shows up when a
@@ -475,6 +693,18 @@ function JobView({
         ? api.get<Release>(`/v1/matters/${matterId}/releases/${job.release_id}`)
         : Promise.resolve(null),
     `release:${matterId}:${job?.release_id ?? ""}`,
+  );
+  // Release profiles + recipient slugs for the re-run panel: same fetch
+  // the matter view page makes, keyed identically, so navigating between
+  // the two reuses the cached response. Only fetched once a terminal
+  // refused/failed job is actually on screen -- a done/pending job page
+  // never needs it.
+  const profilesQ = useApiData(
+    () =>
+      isTerminalNoDerivative
+        ? api.get<ReleaseProfilesResponse>("/v1/release-profiles")
+        : Promise.resolve(null),
+    `release-profiles:${isTerminalNoDerivative}`,
   );
   const [includeOriginal, setIncludeOriginal] = useState(false);
   // Dashboard "unreviewed findings" deep link (?highlight=unreviewed):
@@ -691,6 +921,46 @@ function JobView({
                   automatically every few seconds.
                 </div>
               )}
+              {/* The dashboard's refused/failed attention items promise
+                  "re-run with a different policy or attestation" — this
+                  panel is that promise, kept secondary to the refusal
+                  callout above it (which stays the primary signal). Only
+                  for the terminal, no-derivative outcomes; a done job has
+                  its packet, a pending one has nothing to re-run yet.
+                  The panel's useState initializer reads the Release row
+                  and the profiles list, so it must MOUNT only once both
+                  have actually resolved (the same gated-fetch pattern as
+                  manifest above) — otherwise the prefill would freeze to
+                  defaults and never adopt the original's choices. A
+                  legacy job has no Release to wait for; it mounts once
+                  the job and the profiles are loaded. A profiles-fetch
+                  error surfaces as an inline message instead — a re-run
+                  control that silently never appeared would read as
+                  "refused jobs can't be re-run," which is exactly the
+                  dead-end promise this panel exists to keep. */}
+              {isTerminalNoDerivative &&
+                (!job.release_id || release) &&
+                (profilesQ.error ? (
+                  <p className="mt-3 rounded-md border border-red-600/30 bg-red-600/5 px-3 py-2 text-sm text-red-600">
+                    Re-run isn&apos;t available right now — the release profiles couldn&apos;t be
+                    loaded ({profilesQ.error}).
+                  </p>
+                ) : (
+                  profilesQ.data && (
+                    <RerunPanel
+                      key={`${jobId}:${job.release_id ?? "legacy"}`}
+                      matterId={matterId}
+                      job={job}
+                      release={release}
+                      releaseProfiles={profilesQ.data.release_profiles}
+                      recipientTypes={profilesQ.data.recipient_types}
+                      perms={perms}
+                      onRerun={(newJobId) =>
+                        router.push(`/matters/job?matter=${matterId}&job=${newJobId}`)
+                      }
+                    />
+                  )
+                ))}
               {job.result?.verification_pass !== undefined && (
                 <p className="mt-3 text-sm">
                   Verification:{" "}
