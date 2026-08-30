@@ -123,7 +123,12 @@ def emit_manifest(
     verification: dict[str, Any] | None = None,
     operator_id: str | None = None,
     matter_id: str | None = None,
-    attestation_kind: str = "checkbox",
+    # Controlled vocabulary: "none" (no attestation applied -- the
+    # ordinary case), "signature_break_attested" (the operator's
+    # signature-break attestation gated this job). NOT a free-text
+    # field: this is the custody record of a legal act, and a
+    # vocabulary keeps it aggregatable and schema-checkable.
+    attestation_kind: str = "none",
     layer_b: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the manifest dict. Downloaded manifests must omit matter names,

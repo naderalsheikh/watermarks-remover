@@ -942,6 +942,101 @@ def test_signed_pdf_refused_then_done_with_attestation(client):
     assert r2["status"] == "done", r2["error"]
 
 
+def _run_attested_done_sanitize(client) -> tuple[dict, dict]:
+    """A real signed.pdf release through POST .../releases with the
+    signature-break attestation -- the exact custody record Finding 5
+    (review 2026-08-30) exists to make honest: the operator consented to
+    breaking a digital signature, and every artifact must show it."""
+    doc = _upload(client, "signed.pdf")
+    r = client.post(
+        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/releases",
+        json={
+            "profile_id": "counterparty_deal_room",
+            "recipient_type": "opposing_counsel",
+            "recipient_name": "X",
+            "purpose": "prod",
+            "signature_break_attestation": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["job"]["status"] == "done", body["job"].get("error")
+    return doc, body
+
+
+def test_attested_release_is_distinguishable_in_every_artifact(client, tmp_path):
+    """SHOULD-5 (review 2026-08-30): a DONE release made under the
+    signature-break attestation must be distinguishable from a routine one
+    in the custody record -- at minimum the manifest (which previously
+    recorded the emit_manifest default "checkbox" regardless), and through
+    the same operator-attested-fact pattern PR 55 established, the
+    certificate, release_result.json and release_packet.json. Without
+    this, the artifact record of the single highest-liability act the
+    product performs (breaking a digital signature) is silent."""
+    doc, body = _run_attested_done_sanitize(client)
+    matter = doc["_matter"]
+    job_id = body["job"]["id"]
+
+    # Manifest: the direct artifact of the engine. The attestation was
+    # already threaded this far and dropped at the emit_manifest call.
+    manifest = client.get(f"/v1/matters/{matter}/jobs/{job_id}/manifest").json()
+    assert manifest["attestation_kind"] == "signature_break_attested"
+
+    # Routine release of an unsigned document: same field, DIFFERENT
+    # value -- the distinguishability is the finding, not the field's
+    # mere presence.
+    routine_doc = _upload(client, "spa.docx")
+    routine = client.post(
+        f"/v1/matters/{routine_doc['_matter']}/documents/{routine_doc['id']}/releases",
+        json={"profile_id": "counterparty_deal_room"},
+    ).json()
+    assert routine["job"]["status"] == "done", routine["job"].get("error")
+    routine_manifest = client.get(
+        f"/v1/matters/{routine_doc['_matter']}/jobs/{routine['job']['id']}/manifest"
+    ).json()
+    assert routine_manifest["attestation_kind"] == "none"
+
+    # release_result.json: the always-produced companion artifact.
+    result = body["release_result"]
+    assert result["attestation"] == "signature_break_attested"
+
+    # Certificate + release_packet.json: the recipient-facing record. The
+    # attestation rides the SIGNED canonical bytes (it is a custody fact
+    # the signature must cover, the same way legal_justifications does).
+    bundle, packet = _bundle_packet(client, doc, body["job"])
+    zf = zipfile.ZipFile(io.BytesIO(bundle.content))
+    cert_html = zf.read("certificate.html").decode()
+    assert "Signature-break attestation" in cert_html
+    assert packet["attestation"] == "signature_break_attested"
+    # The signature genuinely covers it: re-verify the real signed packet
+    # with the real offline verifier and the real public key.
+    pk = client.get("/v1/custody-public-key").json()
+    key_file = tmp_path / "pub.pem"
+    key_file.write_text(pk["public_key_pem"])
+    zip_path = tmp_path / "packet.zip"
+    zip_path.write_bytes(bundle.content)
+    verifier = _load_verifier()
+    report = verifier.verify_release_packet(
+        zip_path, public_keys=verifier._load_public_keys([key_file])
+    )
+    assert report.signature_status == "verified", report.to_text()
+
+
+def test_unattested_signed_pdf_stays_refused_and_records_none(client):
+    """The other half of SHOULD-5: the refusal path must keep refusing, and
+    a refused release's release_result.json must record attestation "none"
+    -- the operator's failure to attest is itself part of the custody
+    record, not an absence of data."""
+    doc = _upload(client, "signed.pdf")
+    r = client.post(
+        f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/releases",
+        json={"profile_id": "counterparty_deal_room"},
+    )
+    body = r.json()
+    assert body["job"]["status"] == "refused"
+    assert body["release_result"]["attestation"] == "none"
+
+
 def test_macro_docm_job_refuses(client):
     doc = _upload(client, "macro.docm")
     r = client.post(

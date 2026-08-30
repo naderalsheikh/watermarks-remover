@@ -63,7 +63,9 @@
         "created_utc": { "type": "string", "minLength": 1 }
       }
     },
-    "attestation_kind": { "type": "string", "minLength": 1 },
+    "attestation_kind": {
+      "enum": ["none", "signature_break_attested"]
+    },
     "operator": {
       "type": "object",
       "required": ["id"],

@@ -320,6 +320,12 @@ def _render_job_certificate_html(
     generated_by: str,
     release_context: dict | None = None,
     legal_justifications: list[dict] | None = None,
+    # "signature_break_attested" | "none" for a sanitize job, None for an
+    # inspect job (section absent). Same vocabulary manifest.json's
+    # attestation_kind and release_result.json's attestation carry, so a
+    # recipient reading the certificate inside a packet and the JSON
+    # artifacts next to it never sees two words for one fact.
+    attestation_kind: str | None = None,
 ) -> str:
     """Self-contained per-job custody/transaction certificate (PR 33).
 
@@ -432,6 +438,32 @@ def _render_job_certificate_html(
             f"<ul>{items_html}</ul>"
         )
 
+    # SHOULD-5 (review 2026-08-30): the one operator attestation the
+    # product records on its own (breaking a digital signature) must be
+    # visible on the certificate a recipient actually reads -- recording
+    # it only in the DB row made an attested release read as routine.
+    # None (inspect job) renders no section; every sanitize job gets an
+    # explicit line, "none" included, because the absence of the
+    # attestation is part of the record too.
+    attestation_html = ""
+    if attestation_kind is not None:
+        if attestation_kind == "signature_break_attested":
+            attestation_html = (
+                "<h2>Signature-break attestation</h2>"
+                "<p>The operator who created this job attested to breaking the document's "
+                "digital signature, if it had one, as part of producing the derivative. "
+                "The derivative is therefore <strong>not</strong> covered by the "
+                "original's signature; this certificate records the operator's recorded "
+                "consent to that act, not any claim about its legal sufficiency.</p>"
+            )
+        else:
+            attestation_html = (
+                "<h2>Signature-break attestation</h2>"
+                "<p>No signature-break attestation was recorded for this job. If the "
+                "original document carried a digital signature, the policy would have "
+                "refused rather than proceed unattested.</p>"
+            )
+
     hashes_html = f"<p>Original SHA-256: <code>{esc(original_sha256)}</code>"
     hashes_html += (
         f"<br>Derivative SHA-256: <code>{esc(derivative_sha256)}</code></p>"
@@ -534,6 +566,7 @@ Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
 
 {policy_html}
 {release_html}
+{attestation_html}
 {inspect_findings_html}
 
 <h2>Manifest actions</h2>
@@ -2052,6 +2085,15 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "purpose": release.purpose,
             "intended_external": release.intended_external,
             "reason": reason,
+            # SHOULD-5 (review 2026-08-30): the signature-break attestation
+            # reaches the custody artifacts, the same operator-attested-
+            # fact pattern legal_justifications follows. The Job row's own
+            # bool is the source of truth (set at creation, main.py's
+            # create_release/sanitize_job); the manifest carries the same
+            # fact as attestation_kind, so a recipient holding only
+            # release_result.json and one holding only manifest.json read
+            # the same vocabulary.
+            "attestation": "signature_break_attested" if job.attestation else "none",
             "original_sha256": doc.sha256,
             "created_at": release.created_utc,
             "finished_at": release.finished_utc,
@@ -2916,6 +2958,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             _legal_justifications_from_manifest(manifest) if job.kind == "sanitize" else []
         )
 
+        # SHOULD-5 (review 2026-08-30): a signature-break attestation is
+        # part of the certificate's custody record. Derived from the Job
+        # row's own bool (the manifest's attestation_kind carries the same
+        # fact in the same vocabulary, but the Job row is authoritative
+        # for a refused job, where no manifest exists at all). "none" is
+        # rendered for a sanitize job that made no attestation -- the
+        # absence of the legal basis is itself part of the record, never
+        # a reason to omit the section. Inspect jobs never attest (no
+        # derivative is produced): None -> section absent, same as
+        # policy_html.
+        attestation_kind = (
+            "signature_break_attested" if job.attestation else "none"
+        ) if job.kind == "sanitize" else None
+
         body = _render_job_certificate_html(
             matter_id=matter.id,
             matter_name=matter.name,
@@ -2943,6 +2999,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             generated_by=generated_by,
             release_context=release_context,
             legal_justifications=legal_justifications,
+            attestation_kind=attestation_kind,
         )
         return body, policy_id, limitations
 
@@ -3164,6 +3221,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "original_sha256": doc.sha256,
             "kind": job.kind,
             "status": job.status,
+            # SHOULD-5 (review 2026-08-30): the operator's signature-break
+            # attestation, in the same vocabulary as manifest.json's
+            # attestation_kind / release_result.json's attestation. It is
+            # part of the SIGNED canonical bytes -- a custody fact the
+            # signature must cover, the same way legal_justifications is.
+            # Derived from the Job row's own bool, never from the
+            # manifest: a legacy unwrapped job has the same claim to make.
+            "attestation": "signature_break_attested" if job.attestation else "none",
             "policy": {
                 "id": policy_id,
                 "version": policy_version if policy_id else None,

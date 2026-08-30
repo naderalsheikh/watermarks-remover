@@ -42,6 +42,10 @@
     "purpose": { "type": "string" },
     "intended_external": { "type": "boolean" },
     "reason": { "type": "string" },
+    "attestation": {
+      "enum": ["none", "signature_break_attested"],
+      "_comment_optional": "not in required -- results issued before 2026-08-30 carry no attestation field and must keep validating"
+    },
     "original_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "created_at": { "type": "string", "minLength": 1 },
     "finished_at": { "type": ["string", "null"] },

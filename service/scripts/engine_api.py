@@ -952,6 +952,14 @@ def clean_to_bundle(
         verification=verification,
         operator_id=operator_id,
         matter_id=matter_id,
+        # The attestation that gated this job reaches the custody record
+        # (review 2026-08-30, SHOULD-5): it was already threaded this far
+        # (plan_actions consumed it) but dropped at this call, so every
+        # manifest recorded emit_manifest's default regardless of what
+        # the operator actually attested.
+        attestation_kind=(
+            "signature_break_attested" if signature_break_attestation else "none"
+        ),
         layer_b=layer_b,
     )
     manifest_path, _m_created = custody_mod.write_manifest(out_dir, manifest)

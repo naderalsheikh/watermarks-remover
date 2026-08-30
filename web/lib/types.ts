@@ -313,6 +313,12 @@ export type ReleaseResult = {
   purpose: string;
   intended_external: boolean;
   reason: string;
+  // Same controlled vocabulary the manifest's attestation_kind and the
+  // release packet's attestation carry: "signature_break_attested" when
+  // the operator's signature-break attestation gated this job, "none"
+  // otherwise (a refused release records "none" -- the failure to attest
+  // is itself part of the custody record).
+  attestation: "none" | "signature_break_attested";
   original_sha256: string;
   created_at: string;
   finished_at: string | null;

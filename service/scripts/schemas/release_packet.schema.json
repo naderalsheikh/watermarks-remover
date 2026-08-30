@@ -44,6 +44,10 @@
     "original_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "kind": { "enum": ["sanitize"] },
     "status": { "enum": ["done", "refused", "failed"] },
+    "attestation": {
+      "enum": ["none", "signature_break_attested"],
+      "_comment_optional": "not in required -- packets issued before 2026-08-30 carry no attestation field and must keep validating"
+    },
     "policy": {
       "type": "object",
       "required": ["id", "version", "digest"],

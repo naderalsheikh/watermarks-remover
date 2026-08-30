@@ -153,7 +153,7 @@ def test_emit_manifest_shape():
     assert m["derivative"]["sha256"] == "b" * 64
     assert m["policy"] == {"id": "external_sharing", "version": 1}
     assert m["operator"]["id"] == "user_1" and m["matter"]["id"] == "m-42"
-    assert "timestamps" in m and m["attestation_kind"] == "checkbox"
+    assert "timestamps" in m and m["attestation_kind"] == "none"
 
     minimal = emit_manifest(
         original_name="x.txt",
