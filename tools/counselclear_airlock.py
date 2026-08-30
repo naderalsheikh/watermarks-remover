@@ -70,6 +70,24 @@ done. --policy is no longer a recognized argument, and Client.sanitize()
 -- the old caller-side wrapper for the legacy route -- is deleted (dead
 code: nothing in this repo ever called it), so this CLI now has no code
 path to the legacy sanitize-jobs route at all.
+
+Legal basis (the PR 55/58 chain reaching an operator): findings that
+SURVIVE a release (kept, flagged, inspect-only) can carry an operator-
+supplied legal basis, which the certificate, release packet, and
+release_result all then disclose. --legal-basis SUBTYPE=BASIS
+(repeatable) + --legal-basis-note supply it, e.g.::
+
+    --legal-basis comments_and_notes=privilege --legal-basis-note \\
+        "AC-2024 redaction protocol"
+
+BASIS is the controlled vocabulary (unspecified | privilege |
+work_product | pii_confidentiality | relevance | court_order |
+client_instruction | litigation_hold | gdpr_access | other); SUBTYPE is
+a policy-engine subtype. Both are validated at argument parsing (the
+backend would otherwise fail the whole job after the upload round
+trip). Omitting both is fully supported: surviving findings are then
+recorded as basis "unspecified" -- recorded honestly, never blocking
+the release.
 """
 
 from __future__ import annotations
@@ -104,6 +122,94 @@ SUPPORTED_PROFILES = ("counterparty_deal_room", "public_filing_anonymized")
 # the backend's own "other" default) so every release this tool prepares
 # forces a conscious recipient choice.
 RECIPIENT_TYPES = ("opposing_counsel", "court", "client", "regulator", "internal_reviewer", "other")
+
+# The controlled legal-basis vocabulary the backend accepts for findings
+# that survive a derivative (LEGAL_JUSTIFICATION_BASES in service/scripts/
+# policies.py, mirrored in finding.schema.json and release_packet.schema.
+# json). Same deliberate-literal rule as RECIPIENT_TYPES above: no
+# control-plane import. The backend rejects any value outside this list
+# (a failed job), so validating here means a typo surfaces at argument
+# parse, not after a full run.
+LEGAL_BASIS_VALUES = (
+    "unspecified",
+    "privilege",
+    "work_product",
+    "pii_confidentiality",
+    "relevance",
+    "court_order",
+    "client_instruction",
+    "litigation_hold",
+    "gdpr_access",
+    "other",
+)
+
+# Policy-engine subtypes a legal basis can be attached to (SUBTYPES in
+# service/scripts/policies.py), same literal-copy rule. The backend only
+# records a basis on findings that SURVIVE the derivative (keep/flag/
+# inspect_only action records) -- a basis on a stripped subtype is
+# silently unused, which is why --legal-basis takes the subtype
+# explicitly rather than guessing.
+LEGAL_BASIS_SUBTYPES = (
+    "authoring_props",
+    "jpeg_gps",
+    "comments_and_notes",
+    "headers_footers",
+    "hidden_structure",
+    "hidden_text",
+    "embeddings_ole",
+    "custom_xml",
+    "external_links",
+    "pdf_js_actions",
+    "pdf_acroform",
+    "pdf_attachments",
+    "pdf_annots",
+    "tracked_changes",
+    "pdf_incremental",
+    "c2pa",
+    "layer_a_body",
+    "layer_a_non_body",
+    "cms_or_xml_dsig",
+    "macros_vba",
+)
+
+
+def parse_legal_basis_flags(raw: list[str] | None, note: str) -> dict[str, dict[str, str]]:
+    """--legal-basis SUBTYPE=BASIS (repeatable) + one shared
+    --legal-basis-note, into the {subtype: {basis, note}} shape the
+    release API takes. Validated here, not just server-side: the
+    backend turns an unknown subtype or basis into a FAILED JOB after
+    the whole upload+release round trip, and a typo deserves to fail at
+    argument parsing instead. Returns {} when nothing was supplied --
+    legal basis stays purely additive, never a release requirement.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for item in raw or []:
+        subtype, sep, basis = item.partition("=")
+        if not sep or not subtype.strip() or not basis.strip():
+            raise AirlockError(
+                f"--legal-basis must be SUBTYPE=BASIS (e.g. "
+                f"comments_and_notes=privilege), got: {item!r}"
+            )
+        subtype = subtype.strip()
+        basis = basis.strip()
+        if subtype not in LEGAL_BASIS_SUBTYPES:
+            raise AirlockError(
+                f"--legal-basis subtype {subtype!r} is not a known subtype "
+                f"(known: {', '.join(LEGAL_BASIS_SUBTYPES)})"
+            )
+        if basis not in LEGAL_BASIS_VALUES:
+            raise AirlockError(
+                f"--legal-basis basis {basis!r} is not a known basis "
+                f"(known: {', '.join(LEGAL_BASIS_VALUES)})"
+            )
+        if subtype in out:
+            raise AirlockError(f"--legal-basis given twice for subtype {subtype!r}")
+        out[subtype] = {"basis": basis, "note": note[:1000]}
+    if note and not out:
+        # A note with no basis to attach it to would otherwise be
+        # silently dropped -- refuse it so the caller notices.
+        raise AirlockError("--legal-basis-note given without any --legal-basis")
+    return out
 
 DEFAULT_TIMEOUT_S = 120.0
 POLL_INTERVAL_S = 1.0
@@ -189,23 +295,31 @@ class Client:
         purpose: str,
         intended_external: bool,
         reason: str,
+        legal_justifications: dict[str, dict[str, str]] | None = None,
     ) -> dict:
         """POST .../releases (PR 39/43): returns {release, job,
         release_result} in one round trip -- release_result is the
         server's own precomputed release_result.json content (limitations
         included), so callers never need to hand-derive that from a raw
-        manifest the way this CLI once did."""
+        manifest the way this CLI once did. legal_justifications is the
+        operator-supplied legal basis for findings that survive the
+        derivative, {subtype: {basis, note}} -- {} / None (the default)
+        means none supplied, which the backend records as basis
+        "unspecified" on surviving findings; it never gates a release."""
+        payload: dict = {
+            "profile_id": profile_id,
+            "recipient_type": recipient_type,
+            "recipient_name": recipient_name,
+            "purpose": purpose,
+            "intended_external": intended_external,
+            "reason": reason,
+        }
+        if legal_justifications:
+            payload["legal_justifications"] = legal_justifications
         return self._json(
             "POST",
             f"/v1/matters/{matter_id}/documents/{doc_id}/releases",
-            payload={
-                "profile_id": profile_id,
-                "recipient_type": recipient_type,
-                "recipient_name": recipient_name,
-                "purpose": purpose,
-                "intended_external": intended_external,
-                "reason": reason,
-            },
+            payload=payload,
         )
 
     def get_job(self, matter_id: str, job_id: str) -> dict:
@@ -294,6 +408,7 @@ def run_airlock(
     reason: str,
     output_dir: Path,
     timeout_s: float,
+    legal_justifications: dict[str, dict[str, str]] | None = None,
 ) -> AirlockResult:
     """The whole workflow, factored out of main() so tests can drive it
     against a fake or real Client without going through argv/exit codes."""
@@ -317,6 +432,7 @@ def run_airlock(
         purpose=purpose,
         intended_external=intended_external,
         reason=reason,
+        legal_justifications=legal_justifications,
     )
     release_id = response["release"]["id"]
     release_result = response["release_result"]
@@ -489,6 +605,7 @@ def run_airlock_batch(
     reason: str,
     output_dir: Path,
     timeout_s: float,
+    legal_justifications: dict[str, dict[str, str]] | None = None,
 ) -> BatchResult:
     """Sequential per-file processing over run_airlock. One file's outcome
     -- including a hard AirlockError (a failed upload, a failed submit, or
@@ -532,6 +649,7 @@ def run_airlock_batch(
                 reason=reason,
                 output_dir=item_output_dir,
                 timeout_s=timeout_s,
+                legal_justifications=legal_justifications,
             )
             batch.items.append(
                 BatchItemResult(
@@ -590,12 +708,41 @@ def main(argv: list[str] | None = None) -> int:
         help="this release is not intended to leave the organization",
     )
     ap.add_argument("--reason", default="airlock CLI")
+    ap.add_argument(
+        "--legal-basis",
+        action="append",
+        default=None,
+        metavar="SUBTYPE=BASIS",
+        help=(
+            "legal basis for a finding that survives the release, as "
+            "SUBTYPE=BASIS (repeatable, e.g. --legal-basis "
+            "comments_and_notes=privilege). BASIS is the controlled "
+            f"vocabulary: {', '.join(LEGAL_BASIS_VALUES)}. Purely optional -- "
+            "surviving findings without a supplied basis are recorded as "
+            "'unspecified', never blocked"
+        ),
+    )
+    ap.add_argument(
+        "--legal-basis-note",
+        default="",
+        help=(
+            "one note attached to every --legal-basis entry (the API takes "
+            "a per-subtype note; with no per-entry flag this shared note is "
+            "the whole note, truncated to 1000 chars server-side)"
+        ),
+    )
     ap.add_argument("--output-dir", required=True, type=Path)
     ap.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S)
     args = ap.parse_args(argv)
 
     if not args.password:
         print("error: --password or COUNSELCLEAR_LOCAL_PASSWORD is required", file=sys.stderr)
+        return 1
+
+    try:
+        legal_justifications = parse_legal_basis_flags(args.legal_basis, args.legal_basis_note)
+    except AirlockError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 1
 
     if args.file is not None:
@@ -618,6 +765,7 @@ def main(argv: list[str] | None = None) -> int:
                 reason=args.reason,
                 output_dir=args.output_dir,
                 timeout_s=args.timeout_s,
+                legal_justifications=legal_justifications,
             )
         except AirlockError as e:
             print(f"error: {e}", file=sys.stderr)
@@ -663,6 +811,7 @@ def main(argv: list[str] | None = None) -> int:
             reason=args.reason,
             output_dir=args.output_dir,
             timeout_s=args.timeout_s,
+            legal_justifications=legal_justifications,
         )
     except AirlockError as e:
         print(f"error: {e}", file=sys.stderr)

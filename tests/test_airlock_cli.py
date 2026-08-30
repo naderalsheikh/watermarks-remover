@@ -96,6 +96,7 @@ class FakeClient:
         self.job_status = job_status
         self.job_error = job_error
         self.calls: list[str] = []
+        self.captured_legal_justifications: dict[str, dict[str, str]] | None = None
 
     def upload_document(self, matter_id: str, path: Path) -> dict:
         self.calls.append("upload_document")
@@ -112,8 +113,10 @@ class FakeClient:
         purpose: str,
         intended_external: bool,
         reason: str,
+        legal_justifications: dict[str, dict[str, str]] | None = None,
     ) -> dict:
         self.calls.append("release")
+        self.captured_legal_justifications = legal_justifications
         # A real POST .../releases is synchronous -- this fake models a
         # never-terminal response ("queued") only for the __timeout__
         # case, so wait_for_terminal's own poll-loop-timeout logic is
@@ -205,6 +208,7 @@ class FakeBatchClient:
         self.errors_by_filename = errors_by_filename or {}
         self.upload_failures = upload_failures or set()
         self.calls: list[str] = []
+        self.captured_legal_justifications: dict[str, dict[str, str]] | None = None
         self._job_counter = 0
         self._doc_to_filename: dict[str, str] = {}
         self._job_to_filename: dict[str, str] = {}
@@ -228,8 +232,10 @@ class FakeBatchClient:
         purpose: str,
         intended_external: bool,
         reason: str,
+        legal_justifications: dict[str, dict[str, str]] | None = None,
     ) -> dict:
         self.calls.append("release")
+        self.captured_legal_justifications = legal_justifications
         self._job_counter += 1
         job_id = f"job-{self._job_counter}"
         filename = self._doc_to_filename[doc_id]
@@ -688,7 +694,133 @@ def test_main_files_mode_errors_cleanly_when_a_file_is_missing(tmp_path, capsys)
     assert "absent.docx" in capsys.readouterr().err
 
 
-# --- doctrine guard: no engine imports from a tools/ HTTP client ----------------
+# --- legal basis: parse validation + payload wiring (PR 55/58 chain) ------------
+
+
+def test_parse_legal_basis_flags_accepts_and_normalizes():
+    out = airlock.parse_legal_basis_flags(
+        ["comments_and_notes=privilege", "tracked_changes=court_order"],
+        "AC-2024 redaction protocol",
+    )
+    assert out == {
+        "comments_and_notes": {"basis": "privilege", "note": "AC-2024 redaction protocol"},
+        "tracked_changes": {"basis": "court_order", "note": "AC-2024 redaction protocol"},
+    }
+
+
+def test_parse_legal_basis_flags_empty_when_nothing_supplied():
+    # Purely additive: no flags -> no legal_justifications key anywhere,
+    # which must remain a fully supported release, never a gate.
+    assert airlock.parse_legal_basis_flags(None, "") == {}
+    assert airlock.parse_legal_basis_flags([], "") == {}
+
+
+def test_parse_legal_basis_flags_rejects_bad_input(tmp_path, capsys):
+    for bad in ("nosign", "bogus=privilege", "comments_and_notes=privileged", "=privilege", "a=b=c2"):
+        with pytest.raises(airlock.AirlockError):
+            airlock.parse_legal_basis_flags([bad], "")
+    # duplicate subtype
+    with pytest.raises(airlock.AirlockError):
+        airlock.parse_legal_basis_flags(
+            ["comments_and_notes=privilege", "comments_and_notes=other"], ""
+        )
+    # note with no basis to hang it on would be silently dropped otherwise
+    with pytest.raises(airlock.AirlockError):
+        airlock.parse_legal_basis_flags(None, "orphan note")
+
+
+def test_main_rejects_bad_legal_basis_before_any_network_call(tmp_path, capsys):
+    p = _real_file(tmp_path)
+    rc = airlock.main([
+        "--password", "pw",  # past the password gate; the basis error must surface before any network call
+        "--matter-id", "m1",
+        "--file", str(p),
+        "--recipient-type", "court",
+        "--output-dir", str(tmp_path / "out"),
+        "--legal-basis", "comments_and_notes=not_a_basis",
+    ])
+    assert rc == 1
+    assert "not a known basis" in capsys.readouterr().err
+    # batch mode shares the same parse path
+    rc = airlock.main([
+        "--password", "pw",
+        "--matter-id", "m1",
+        "--files", str(p),
+        "--recipient-type", "court",
+        "--output-dir", str(tmp_path / "out"),
+        "--legal-basis", "bogus_subtype=privilege",
+    ])
+    assert rc == 1
+    assert "not a known subtype" in capsys.readouterr().err
+
+
+def test_run_airlock_passes_legal_justifications_to_release(tmp_path):
+    """Unit-level payload proof: run_airlock must forward the parsed
+    {subtype: {basis, note}} dict into Client.release() verbatim -- and
+    omit it entirely when none was supplied (a release without a basis
+    is fully valid, never gated)."""
+    client = FakeClient(job_status="done")
+    out = tmp_path / "out"
+    airlock.run_airlock(
+        client,
+        matter_id="m1",
+        file_path=_real_file(tmp_path),
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="",
+        purpose="test",
+        intended_external=True,
+        reason="test",
+        output_dir=out,
+        timeout_s=5,
+        legal_justifications={"comments_and_notes": {"basis": "privilege", "note": "n"}},
+    )
+    assert client.captured_legal_justifications == {
+        "comments_and_notes": {"basis": "privilege", "note": "n"}
+    }
+
+    # Unsupplied stays None/absent -- the additive contract.
+    client2 = FakeClient(job_status="done")
+    airlock.run_airlock(
+        client2,
+        matter_id="m1",
+        file_path=_real_file(tmp_path),
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="",
+        purpose="test",
+        intended_external=True,
+        reason="test",
+        output_dir=tmp_path / "out2",
+        timeout_s=5,
+    )
+    assert client2.captured_legal_justifications is None
+
+
+def test_run_airlock_batch_passes_legal_justifications_to_every_file(tmp_path):
+    """Batch mode: one --legal-basis applies to every file (same
+    no-per-file-overrides rule as profile/recipient), verified per
+    release call, not just the first."""
+    a = _named_file(tmp_path, "a.docx")
+    b = _named_file(tmp_path, "b.docx")
+    client = FakeBatchClient({"a.docx": "done", "b.docx": "done"})
+    airlock.run_airlock_batch(
+        client,
+        matter_id="m1",
+        files=[a, b],
+        profile_id="counterparty_deal_room",
+        recipient_type="court",
+        recipient_name="",
+        purpose="test",
+        intended_external=True,
+        reason="test",
+        output_dir=tmp_path / "out",
+        timeout_s=5,
+        legal_justifications={"comments_and_notes": {"basis": "work_product", "note": "prep"}},
+    )
+    expected = {"comments_and_notes": {"basis": "work_product", "note": "prep"}}
+    assert client.captured_legal_justifications == expected
+    assert client.calls.count("release") == 2
 
 
 def test_airlock_cli_never_imports_the_engine_or_app_internals():
@@ -867,3 +999,64 @@ def test_airlock_cli_batch_end_to_end_against_a_real_server_mixed_folder(tmp_pat
 
     result_report = verifier.verify_release_result(refused_dir / "release_result.json")
     assert result_report.valid, result_report.to_text()
+
+
+def test_airlock_cli_end_to_end_legal_basis_reaches_certificate_html(tmp_path, live_server):
+    """The data-entry gap this closes (flagged after SHOULD-3): the server
+    accepted legal_justifications and the certificate rendered them, but
+    no client ever sent one -- so every real-world release showed the
+    "no basis recorded" caveat. This proves the full chain through the
+    CLI's real HTTP path: --legal-basis on the wire -> hidden.xlsx's
+    hidden_structure finding SURVIVES counterparty_deal_room (a flag
+    record) -> the manifest's action_records carry the basis -> the
+    extracted certificate.html shows the basis, not the unspecified
+    caveat. The CLI-driven main() path is exercised, not run_airlock(),
+    so the argparse flags themselves are what's proven."""
+    client = airlock.Client(live_server)
+    client.login("airlockpw123")
+    matter = client._json("POST", "/v1/matters", payload={"name": "Airlock Legal Basis"})
+
+    src = tmp_path / "hidden.xlsx"
+    src.write_bytes((FIXTURES / "hidden.xlsx").read_bytes())
+    out = tmp_path / "out"
+    rc = airlock.main([
+        "--base-url", live_server,
+        "--password", "airlockpw123",
+        "--matter-id", matter["id"],
+        "--file", str(src),
+        "--profile", "counterparty_deal_room",
+        "--recipient-type", "opposing_counsel",
+        "--legal-basis", "hidden_structure=privilege",
+        "--legal-basis-note", "attorney notes embedded per draft protocol",
+        "--reason", "legal basis e2e",
+        "--output-dir", str(out),
+        "--timeout-s", "30",
+    ])
+    assert rc == 0, "hidden.xlsx under counterparty_deal_room must complete (flag record, not refusal)"
+
+    cert = (out / "certificate.html").read_text()
+    # The basis reached the operator-facing artifact, spelled as the
+    # certificate renders it -- not just the API payload.
+    assert "Legal basis for retained content" in cert
+    assert "privilege" in cert
+    assert "attorney notes embedded per draft protocol" in cert
+    assert "hidden_structure" in cert  # the certificate renders the raw subtype slug in <code>
+    # The all-unspecified caveat must NOT appear: a real basis was supplied.
+    assert "No operator-supplied legal basis was recorded" not in cert
+
+    # The packet's machine-readable side carries it too (release_packet.json
+    # travels in the same zip the CLI extracted).
+    packet = json.loads((out / "release_packet.json").read_text())
+    records = [
+        e for e in packet["legal_justifications"]
+        if e["subtype"] == "hidden_structure"
+    ]
+    assert records, "legal_justifications missing from release_packet.json"
+    assert records[0]["legal_justification"]["basis"] == "privilege"
+    assert records[0]["legal_justification"]["note"] == "attorney notes embedded per draft protocol"
+
+    # The packet still verifies as a whole -- the basis didn't break anything.
+    import counselclear_verify_release_packet as verifier
+
+    report = verifier.verify_release_packet(out)
+    assert report.valid, report.to_text()
