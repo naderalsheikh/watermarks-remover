@@ -10,6 +10,7 @@ import {
   attentionScopeNote,
   attentionTabCounts,
   filterAttentionByTab,
+  recentActivityHref,
   recentEmptyStateText,
   recentScopeNote,
   type AttentionTab,
@@ -344,8 +345,14 @@ export default function DashboardPage() {
                 <ul className="divide-y divide-border rounded-md border border-border">
                   {data.recent.map((e, i) => (
                     <li key={`${e.at}:${e.action}:${i}`}>
+                      {/* Deep-links to the most specific thing the event's
+                          audit payload carries (recentActivityHref): the
+                          exact job for job-bearing rows, the document for
+                          upload/attestation rows, the matter otherwise —
+                          one click closer than a flat matter link for
+                          every row that can be. */}
                       <Link
-                        href={`/matters/view?id=${e.matter_id}`}
+                        href={recentActivityHref(e)}
                         className="flex flex-col gap-0.5 px-4 py-2.5 text-sm hover:bg-black/[0.03] dark:hover:bg-white/[0.03] sm:flex-row sm:items-center sm:justify-between sm:gap-4"
                       >
                         <span className="min-w-0">

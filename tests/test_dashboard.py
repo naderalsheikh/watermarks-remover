@@ -93,7 +93,7 @@ def _seed_job(
     s.flush()
 
 
-def _seed_audit(s, event_id: str, mid: str, seq: int, action: str, at: str):
+def _seed_audit(s, event_id: str, mid: str, seq: int, action: str, at: str, payload=None):
     s.add(
         AuditEvent(
             id=event_id,
@@ -101,7 +101,7 @@ def _seed_audit(s, event_id: str, mid: str, seq: int, action: str, at: str):
             seq=seq,
             actor_id="operator",
             action=action,
-            payload={},
+            payload={} if payload is None else payload,
             prev_hash="0" * 64,
             row_hash="0" * 64,
             at=at,
@@ -373,6 +373,68 @@ def test_dashboard_recent_activity_from_api_events(env):
     assert actions[0] == "job.sanitize"
     assert set(actions[1:3]) == {"document.upload", "matter.create"}
     assert all(e["matter_name"] == "Project Dandelion" for e in recent[:3])
+
+
+def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
+    """recent[] must echo whichever of job_id/document_id each event's
+    AuditEvent payload actually carries (dashboard deep-links, operator
+    decision 2026-08-29), and nothing else: a job-bearing row links to
+    that exact job, a document-only row to the document, a matter-level
+    event stays a matter link. Payloads here mirror the append sites'
+    real shapes (service/app/main.py): job.sanitize carries both ids,
+    release.terminal/bundle.download job only, document.upload document
+    only, matter.create neither.
+    """
+    c, sf, _ = env
+    with sf() as s:
+        _seed_matter(s, "m1", "Merger")
+        # newest first
+        _seed_audit(
+            s, "e1", "m1", 5, "bundle.download", _ts(0),
+            payload={"job_id": "j9", "include_original": True},
+        )
+        _seed_audit(
+            s, "e2", "m1", 4, "release.terminal", _ts(1),
+            payload={"release_id": "r1", "job_id": "j8", "status": "done"},
+        )
+        _seed_audit(
+            s, "e3", "m1", 3, "job.sanitize", _ts(2),
+            payload={"job_id": "j7", "document_id": "d3", "policy_id": "production"},
+        )
+        _seed_audit(
+            s, "e4", "m1", 2, "document.upload", _ts(3),
+            payload={"document_id": "d3", "sha256": "ab" * 32, "bytes": 12},
+        )
+        _seed_audit(s, "e5", "m1", 1, "matter.create", _ts(4), payload={"name": "Merger"})
+        # malformed/foreign-typed values must degrade to a matter link,
+        # never surface as e.g. a job_id: null href
+        _seed_audit(s, "e6", "m1", 0, "job.sanitize", _ts(5), payload={"job_id": 7, "document_id": ""})
+        s.commit()
+
+    recent = c.get("/v1/dashboard").json()["recent"]
+    # Two job.sanitize rows exist (one well-formed, one malformed), so
+    # keying by action alone would collapse them; (action, at) is unique.
+    by_key = {(r["action"], r["at"]): r for r in recent}
+    bd = by_key[("bundle.download", _ts(0))]
+    assert bd["job_id"] == "j9"
+    assert "document_id" not in bd
+    rt = by_key[("release.terminal", _ts(1))]
+    assert rt["job_id"] == "j8"
+    assert "document_id" not in rt
+    js = by_key[("job.sanitize", _ts(2))]
+    assert js["job_id"] == "j7"
+    assert js["document_id"] == "d3"
+    du = by_key[("document.upload", _ts(3))]
+    assert du["document_id"] == "d3"
+    assert "job_id" not in du
+    # matter-level: neither id — the frontend falls back to a matter link
+    mc = by_key[("matter.create", _ts(4))]
+    assert "job_id" not in mc
+    assert "document_id" not in mc
+    # non-string / empty values are dropped, not echoed
+    malformed = by_key[("job.sanitize", _ts(5))]
+    assert "job_id" not in malformed
+    assert "document_id" not in malformed
 
 
 # --- end-to-end: real worker output feeds the queue ---------------------------

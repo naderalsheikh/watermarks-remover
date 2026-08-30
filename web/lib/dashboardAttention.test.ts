@@ -5,6 +5,7 @@ import {
   attentionScopeNote,
   attentionTabCounts,
   filterAttentionByTab,
+  recentActivityHref,
   recentEmptyStateText,
   recentScopeNote,
 } from "./dashboardAttention";
@@ -161,5 +162,34 @@ describe("recentEmptyStateText", () => {
     expect(recentEmptyStateText(0, 3)).toBe(
       "No activity visible — you have read access only, not admin, on these matters.",
     );
+  });
+});
+
+describe("recentActivityHref (dashboard deep-links)", () => {
+  it("lands a job-bearing row on that exact job page", () => {
+    // job.inspect/job.sanitize/release.created/certificate.issued/
+    // release.terminal/bundle.download/attest.used all carry job_id.
+    expect(recentActivityHref({ matter_id: "m1", job_id: "j7", document_id: "d3" })).toBe(
+      "/matters/job?matter=m1&job=j7",
+    );
+    // job_id wins even when document_id is present, and the URL shape
+    // matches attentionPrimaryHref's own job link — the two feeds must
+    // not drift into different conventions for the same destination.
+    expect(recentActivityHref({ matter_id: "m1", job_id: "j7" })).toBe(
+      attentionPrimaryHref({ type: "refused", matter_id: "m1", job_id: "j7" }),
+    );
+  });
+
+  it("lands a document-only row on the matter scrolled to that document", () => {
+    // document.upload / attest.issued carry document_id but no job_id.
+    expect(recentActivityHref({ matter_id: "m1", document_id: "d3" })).toBe(
+      "/matters/view?id=m1&doc=d3",
+    );
+  });
+
+  it("falls back to a plain matter link when the action carries neither id", () => {
+    // matter.create / acl.grant / acl.revoke / batch.* — nothing more
+    // specific exists to point at, and the row must not pretend.
+    expect(recentActivityHref({ matter_id: "m1" })).toBe("/matters/view?id=m1");
   });
 });

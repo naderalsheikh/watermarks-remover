@@ -3654,6 +3654,31 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             if admin_matter_ids
             else []
         )
+
+        def _recent_ids(payload: dict | None) -> dict:
+            """job_id/document_id from an AuditEvent payload, when present.
+
+            Grounded in what each action actually records (see the
+            append sites): job.inspect/job.sanitize/release.created/
+            certificate.issued carry both; release.terminal/bundle.download/
+            attest.used carry job_id only; document.upload/attest.issued
+            document_id only; matter.create/acl.grant/acl.revoke/batch.* /
+            batch.cancelled carry neither. Caller decides the destination
+            from whichever ids exist -- a job-bearing row deep-links to
+            that job, a document-only row to the document, the rest stay
+            matter-level links. Values are echoed only when they're real
+            strings; a malformed payload degrades to a matter link, never
+            a /matters/job?matter=m1&job=null href.
+            """
+            if not isinstance(payload, dict):
+                return {}
+            ids: dict = {}
+            for key in ("job_id", "document_id"):
+                v = payload.get(key)
+                if isinstance(v, str) and v:
+                    ids[key] = v
+            return ids
+
         return {
             "totals": {
                 "matters": total_matters,
@@ -3668,6 +3693,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     "action": e.action,
                     "actor_id": e.actor_id,
                     "at": e.at,
+                    **_recent_ids(e.payload),
                 }
                 for e, name in recent_rows
             ],

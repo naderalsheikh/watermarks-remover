@@ -179,12 +179,22 @@ export type CrossMatterJobRow = {
   created_utc: string;
 };
 
+// One row of the dashboard's RECENT ACTIVITY feed (the cross-matter
+// audit-event view, admin-scoped server-side). job_id/document_id are
+// echoed from the event's AuditEvent payload only when that action type
+// actually records them (service/app/main.py _recent_ids): job.inspect/
+// job.sanitize/release.created/certificate.issued carry both, release.
+// terminal/bundle.download/attest.used job only, document.upload/
+// attest.issued document only, matter.create/acl.* neither. The row's
+// link picks the most specific destination the ids allow.
 export type DashboardRecent = {
   matter_id: string;
   matter_name: string;
   action: string;
   actor_id: string;
   at: string;
+  job_id?: string;
+  document_id?: string;
 };
 
 // admin_matters: how many of the principal's readable matters they also

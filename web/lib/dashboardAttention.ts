@@ -1,4 +1,4 @@
-import type { AttentionItem, AttentionType } from "./types";
+import type { AttentionItem, AttentionType, DashboardRecent } from "./types";
 
 // Extracted from web/app/dashboard/page.tsx so the deep-link contract,
 // the tab-filtering logic, and the admin-scope disclosure copy are all
@@ -106,4 +106,21 @@ export function recentEmptyStateText(adminMatters: number, totalMatters: number)
   return adminMatters === 0 && totalMatters > 0
     ? "No activity visible — you have read access only, not admin, on these matters."
     : "No activity yet.";
+}
+
+// The most specific destination a recent-activity row's ids allow
+// (dashboard deep-links, operator decision 2026-08-29). A job-bearing
+// row lands on that exact job page — the same URL shape
+// attentionPrimaryHref builds, so the two feeds can't drift into
+// different link conventions for the same destination. A document-only
+// row lands on the matter view scrolled to that document (the same
+// ?doc= highlight attentionMatterHref uses). Anything else stays a
+// plain matter link: not every action has a job or document to point at
+// (matter.create, acl.grant/revoke), and those rows must not pretend.
+export function recentActivityHref(
+  e: Pick<DashboardRecent, "matter_id" | "job_id" | "document_id">,
+): string {
+  if (e.job_id) return `/matters/job?matter=${e.matter_id}&job=${e.job_id}`;
+  if (e.document_id) return `/matters/view?id=${e.matter_id}&doc=${e.document_id}`;
+  return `/matters/view?id=${e.matter_id}`;
 }
