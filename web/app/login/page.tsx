@@ -25,7 +25,11 @@ export default function LoginPage() {
     setError(null);
     try {
       await api.post("/v1/auth/login", { password });
-      router.replace("/matters");
+      // Land on /dashboard so the login flow matches the root redirect in
+      // app/page.tsx — one unified post-login landing page (PR 22's
+      // operator dashboard is the overview surface, with Matters in the
+      // header nav one click away).
+      router.replace("/dashboard");
     } catch (e) {
       if (e instanceof ApiError && e.status === 429) {
         setError("Too many failed attempts. Try again shortly.");
