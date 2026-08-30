@@ -885,6 +885,60 @@ def test_custody_signing_key_is_provisioned_0600_and_idempotent(client, tmp_path
     assert key_file.read_bytes() == first, "existing key file must win on reboot"
 
 
+def test_concurrent_first_boot_provisions_exactly_one_key(tmp_path):
+    """SHOULD-1 (review 2026-08-30): N threads hitting
+    ensure_custody_signing_key on a fresh path (two uvicorn workers racing
+    the first packet download) must ALL end up with the identical key. The
+    old mkstemp+os.replace had a check-then-act window: both racers
+    passed exists(), both generated, and the second os.replace atomically
+    clobbered the first winner's key -- a key that may already have been
+    handed out in packets, silently invalidating their signatures.
+
+    Each round is a fresh data root, so every round re-opens the
+    first-boot race window; a barrier lines all threads up before the
+    exists() check to maximize overlap. Fail-without proof: against the
+    pre-fix implementation the racers return different keys (each reads
+    its own file back before the other's replace lands).
+    """
+    import threading
+
+    from app.config import Config
+    from cryptography.hazmat.primitives import serialization
+
+    n = 4
+    for round_ in range(5):
+        cfg = Config(data_root=tmp_path / f"race{round_}")
+        barrier = threading.Barrier(n)
+        keys: list[bytes] = []
+        lock = threading.Lock()
+
+        def racer(cfg=cfg, barrier=barrier, keys=keys, lock=lock):
+            barrier.wait()
+            key = cfg.ensure_custody_signing_key()
+            pem = key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            with lock:
+                keys.append(pem)
+
+        threads = [threading.Thread(target=racer) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert len(keys) == n, "every racer must return a key"
+        assert len(set(keys)) == 1, (
+            f"round {round_}: racers ended up with different keys -- "
+            "the create race clobbered a winner"
+        )
+        key_file = cfg.custody_signing_key_file
+        assert key_file.is_file()
+        assert (key_file.stat().st_mode & 0o777) == 0o600
+
+
 def test_release_result_carries_signature_ref(client):
     """The lighter artifact carries a REFERENCE to the signing key (not
     its own signature -- it has no derivative to protect), so a

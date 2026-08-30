@@ -180,30 +180,81 @@ class Config:
         counsel's expert) for offline verification without ever giving
         them the ability to forge a packet, which a symmetric HMAC
         secret fundamentally cannot offer.
+
+        Race-hardened (review 2026-08-30, SHOULD-1): creation is O_CREAT |
+        O_EXCL -- exactly one process wins, atomically, with no
+        check-then-act window. A loser gets FileExistsError from the open
+        itself and simply falls through to re-read the winner's key, so
+        concurrent booting processes (two uvicorn workers racing the
+        first packet download) end up signing with the SAME key instead
+        of one silently overwriting the other's and invalidating every
+        packet the loser already handed out. The key is written directly
+        under the O_EXCL fd -- no mkstemp/replace hop -- so a losing
+        writer can never clobber a winner mid-write: os.replace made the
+        final name appear atomically, but nothing stopped the SECOND
+        mkstemp+replace from atomically replacing the FIRST winner.
+
+        The 0600 in the open() mode is masked by the process umask
+        (verified: umask 0o777 yields mode 000 -- unreadable even by the
+        owning process on restart), so the winner chmods 0600 explicitly
+        after writing. A pre-existing file skips this branch entirely,
+        which keeps operator-set modes deliberate rather than trampled.
         """
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
         self.ensure_dirs()
-        if not self.custody_signing_key_file.exists():
+        for _attempt in range(3):
+            if self.custody_signing_key_file.exists():
+                break
             key = Ed25519PrivateKey.generate()
             pem = key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption(),
             )
-            fd, tmp_name = tempfile.mkstemp(dir=self.auth_dir, prefix=".custody_signing_key.")
             try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(pem)
-                os.chmod(tmp_name, 0o600)
-                os.replace(tmp_name, self.custody_signing_key_file)
-            except BaseException:
-                with suppress(FileNotFoundError):
-                    os.unlink(tmp_name)
-                raise
-        return serialization.load_pem_private_key(
-            self.custody_signing_key_file.read_bytes(), password=None
+                fd = os.open(
+                    self.custody_signing_key_file,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+            except FileExistsError:
+                # Another process won the create race between the
+                # exists() check and this open. Their key is on disk;
+                # ours never existed. Loop to the exists() re-read
+                # before loading, so we never read a half-written file.
+                continue
+            else:
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(pem)
+                    os.chmod(self.custody_signing_key_file, 0o600)
+                except BaseException:
+                    # We won the race, so the file on disk is ours: a
+                    # failed write must not leave a torn/empty key that
+                    # every subsequent boot would load as "existing".
+                    with suppress(FileNotFoundError):
+                        os.unlink(self.custody_signing_key_file)
+                    raise
+        # A loser can reach this read while the winner is still inside its
+        # fdopen write (no fsync here by design -- the key must simply be
+        # ONE valid value, not durable across a power cut) or has just
+        # created-but-not-yet-written the file. PEM is self-delimiting
+        # ("-----END PRIVATE KEY-----"), so retry on any load failure
+        # instead of returning a torn read as if it were a key.
+        for _attempt in range(50):
+            try:
+                return serialization.load_pem_private_key(
+                    self.custody_signing_key_file.read_bytes(), password=None
+                )
+            except (ValueError, OSError):
+                if not self.custody_signing_key_file.exists():
+                    raise
+                continue
+        raise RuntimeError(
+            "custody signing key file present but never became loadable: "
+            f"{self.custody_signing_key_file}"
         )
 
     def rotate_cookie_secret(self) -> bytes:
