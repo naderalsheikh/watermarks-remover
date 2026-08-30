@@ -158,6 +158,27 @@ export type AttentionItem = {
   created_utc: string;
 };
 
+// GET /v1/jobs (service/app/main.py list_jobs_across_matters) — the
+// cross-matter problem-jobs list the dashboard's attention card links to.
+// Deliberately AttentionItem-shaped (same field names, `type` = the job's
+// terminal status "refused"/"failed") so the existing link helpers in
+// web/lib/dashboardAttention.ts apply without a parallel row type; the
+// extra release_id/profile_id fields are what the re-run flow on the job
+// page needs and aren't part of AttentionItem.
+export type CrossMatterJobRow = {
+  type: string;
+  matter_id: string;
+  matter_name: string;
+  document_id?: string;
+  document_name?: string;
+  job_id?: string;
+  kind?: JobKind;
+  release_id: string | null;
+  profile_id: string | null;
+  detail: string;
+  created_utc: string;
+};
+
 export type DashboardRecent = {
   matter_id: string;
   matter_name: string;

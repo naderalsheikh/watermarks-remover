@@ -172,8 +172,13 @@ export default function DashboardPage() {
                 <p className="text-2xl font-semibold">{data.totals.documents}</p>
                 <p className="text-sm text-muted">Documents</p>
               </div>
+              {/* The card's destination is the cross-matter problem-jobs
+                  list (web/app/matters/jobs), not the matters index —
+                  the number is a server total, and the page it opens
+                  shows exactly those jobs with their errors and re-run
+                  paths. */}
               <Link
-                href="/matters"
+                href="/matters/jobs"
                 className="rounded-md border border-red-600/40 px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
               >
                 <p className="text-2xl font-semibold">

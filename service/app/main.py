@@ -3453,6 +3453,100 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         return Response(content=body, media_type="text/html")
 
+    @app.get("/v1/jobs")
+    def list_jobs_across_matters(
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+        status: str = "refused,failed",
+        limit: int = 100,
+        offset: int = 0,
+    ):
+        """Cross-matter terminal-problem job list (the dashboard's
+        "Failed / refused jobs" card's destination, 2026-08-29 decision).
+
+        Read-scoped with the same disclosure argument as the dashboard's
+        refused/failed attention queues: every row's detail (the error
+        string) is already visible through the read-gated per-job detail
+        route, so aggregating them across the principal's readable
+        matters discloses nothing new. `status` is a comma-separated
+        allowlist over Job statuses; the UI only ever asks for
+        refused,failed, but the parameter is general so the page can
+        offer other filters without a second endpoint.
+
+        The row shape is deliberately AttentionItem-shaped (type/
+        matter/document/job ids + the error detail) rather than a bare
+        _job_dict list: the refusal reason is the whole point of this
+        view, and keeping one row shape lets the frontend reuse the
+        dashboard's existing link helpers instead of a parallel
+        rendering path. Order matches the attention queues: newest
+        first, no pagination accumulation beyond limit/offset.
+        """
+        allowed = {"queued", "running", "done", "failed", "refused"}
+        wanted = [st.strip() for st in status.split(",") if st.strip()]
+        unknown = [st for st in wanted if st not in allowed]
+        if unknown:
+            raise HTTPException(400, f"unknown job status filter: {', '.join(unknown)}")
+        if not wanted:
+            raise HTTPException(400, "status filter is empty")
+        limit = min(max(1, limit), 500)  # server-capped, never unbounded
+        offset = max(0, offset)
+
+        matter_ids = [
+            r[0]
+            for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
+        ]
+        if matter_ids:
+            # Same demo-matter exclusion as the dashboard: real data, but
+            # a shared walkthrough sample shouldn't inflate an operator's
+            # cross-matter problem list.
+            demo_ids = {
+                r[0]
+                for r in s.query(Matter.id).filter(Matter.id.in_(matter_ids), Matter.is_demo.is_(True))
+            }
+            if demo_ids:
+                matter_ids = [m for m in matter_ids if m not in demo_ids]
+        if not matter_ids:
+            return {"jobs": [], "total": 0, "offset": offset, "limit": limit}
+
+        q = (
+            s.query(Job, Document.filename, Matter.name)
+            .join(Document, Document.id == Job.document_id)
+            .join(Matter, Matter.id == Job.matter_id)
+            .filter(Job.matter_id.in_(matter_ids), Job.status.in_(wanted))
+            .order_by(Job.created_utc.desc())
+        )
+        total = q.count()
+        rows = q.offset(offset).limit(limit).all()
+        releases_by_job = {
+            r.job_id: r
+            for r in s.query(Release).filter(Release.job_id.in_([j.id for j, _, _ in rows])).all()
+        }
+        return {
+            "jobs": [
+                {
+                    "type": job.status,  # "refused" | "failed" — the
+                    # attention vocabulary, so the frontend's existing
+                    # badge/link machinery applies unchanged
+                    "matter_id": job.matter_id,
+                    "matter_name": matter_name,
+                    "document_id": job.document_id,
+                    "document_name": doc_name,
+                    "job_id": job.id,
+                    "kind": job.kind,
+                    "release_id": releases_by_job[job.id].id if job.id in releases_by_job else None,
+                    "profile_id": (
+                        releases_by_job[job.id].profile_id if job.id in releases_by_job else None
+                    ),
+                    "detail": job.error[:300] or job.status,
+                    "created_utc": job.created_utc,
+                }
+                for job, doc_name, matter_name in rows
+            ],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
+
     @app.get("/v1/dashboard")
     def dashboard(
         user: str = Depends(principal),

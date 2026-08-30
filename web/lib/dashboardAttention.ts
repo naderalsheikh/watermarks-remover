@@ -8,12 +8,23 @@ import type { AttentionItem, AttentionType } from "./types";
 // renamed anchor id, a flipped comparison in the scope note) with
 // nothing catching it until someone notices live.
 
+// Minimal structural contract these link builders actually need. Named
+// because GET /v1/jobs rows (CrossMatterJobRow, the cross-matter problem
+// list) carry the same fields with `type` = the job's terminal status —
+// same link semantics, so they reuse these builders without a cast.
+export type AttentionLinkTarget = {
+  type: string; // AttentionType, or a JobStatus on the cross-matter list
+  matter_id: string;
+  job_id?: string;
+  document_id?: string;
+};
+
 // Precise per-type destinations, not one generic "open the matter" link
 // for everything: a job-bearing item (unreviewed/refused/failed) lands on
 // that exact job, with unreviewed_findings scrolling straight to the
 // warning section (web/app/matters/job/page.tsx's ?highlight= handling);
 // stale has no job to point at, so it lands on the matter itself.
-export function attentionPrimaryHref(item: AttentionItem): string {
+export function attentionPrimaryHref(item: AttentionLinkTarget): string {
   if (item.job_id) {
     const base = `/matters/job?matter=${item.matter_id}&job=${item.job_id}`;
     return item.type === "unreviewed_findings" ? `${base}&highlight=unreviewed` : base;
@@ -21,7 +32,7 @@ export function attentionPrimaryHref(item: AttentionItem): string {
   return `/matters/view?id=${item.matter_id}`;
 }
 
-export function attentionMatterHref(item: AttentionItem): string {
+export function attentionMatterHref(item: AttentionLinkTarget): string {
   const base = `/matters/view?id=${item.matter_id}`;
   return item.document_id ? `${base}&doc=${item.document_id}` : base;
 }
