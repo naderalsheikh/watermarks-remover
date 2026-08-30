@@ -510,6 +510,56 @@ def test_certificate_legal_basis_note_is_html_escaped(env):
     assert "client_instruction" in section
 
 
+def test_certificate_legal_basis_release_route_payload_matches_the_web_ui(env):
+    """The data-entry gap this closes (flagged after SHOULD-3): the web
+    UI's ReleasePanel now sends legal_justifications built by
+    buildLegalJustifications (web/lib/legalBasis.ts) -- kept subtypes
+    with a real basis only, an empty note left as-is. This pins the
+    exact payload shape the UI produces against the real API end to
+    end: a kept row with a chosen basis and an EMPTY note must land on
+    the certificate as basis + empty note, not as the engine's
+    unspecified fallback (the helper only sends non-"unspecified"
+    bases, so an empty note is a real record, not an omission)."""
+    c, _, _ = env
+    mid = _matter(c, "UI Payload Matter")
+    doc = _upload(c, mid, "spa.docx")
+    # Exactly what ReleasePanel.submit() posts for: both approve-default
+    # subtypes present, one kept with a basis pick and an empty note
+    # input, the other approved (stripped -- its basis, if any, is
+    # dropped client-side and never sent).
+    r = c.post(
+        f"/v1/matters/{mid}/documents/{doc}/releases",
+        json={
+            "profile_id": "ediscovery_production",
+            "recipient_type": "opposing_counsel",
+            "recipient_name": "",
+            "purpose": "",
+            "reason": "",
+            "intended_external": True,
+            "signature_break_attestation": False,
+            "finding_decisions": {
+                "comments_and_notes": "keep",
+                "tracked_changes": "approve",
+            },
+            "legal_justifications": {
+                "comments_and_notes": {"basis": "court_order", "note": ""}
+            },
+        },
+    )
+    assert r.status_code == 200, r.text
+    job = r.json()["job"]
+    assert job["status"] == "done", job["error"]
+
+    body = _certificate(c, mid, job["id"]).text
+    assert "<h2>Legal basis for retained content</h2>" in body
+    assert "court_order" in body
+    assert "comments_and_notes" in body
+    # An empty note with a real basis is a record, not a fallback: the
+    # all-unspecified caveat must not fire, and no note dash renders.
+    assert "No operator-supplied legal basis was recorded" not in body
+    assert "court_order —" not in body
+
+
 def test_certificate_legal_basis_reaches_the_bundle_embedded_certificate(env):
     """job_bundle embeds the same certificate bytes as the standalone
     route (one _build_certificate_html for both); the legal basis must be
