@@ -33,3 +33,19 @@ export function permissionGate(perms: string[] | undefined, perm: MatterPerm): P
     title: allowed ? undefined : `You don't have ${perm} permission on this matter`,
   };
 }
+
+// The release-preparation control is gated server-side on the "sanitize"
+// grant (POST .../releases checks it), but the button says "Prepare
+// Release Packet" -- a tooltip saying "you don't have sanitize permission"
+// names a control the operator can't see anywhere. Name the action the
+// button performs, then the grant that governs it, so the denied user
+// knows both what's blocked and what to ask for.
+export function releaseGate(perms: string[] | undefined): PermissionGate {
+  const allowed = hasMatterPerm(perms, "sanitize");
+  return {
+    allowed,
+    title: allowed
+      ? undefined
+      : "You don't have permission to prepare a release on this matter (requires the sanitize grant)",
+  };
+}

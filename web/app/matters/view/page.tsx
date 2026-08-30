@@ -8,7 +8,7 @@ import { computeProductionReviewState } from "@/lib/productionReview";
 import { useApiData } from "@/lib/useApi";
 import { usePaginatedList } from "@/lib/usePaginatedList";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
-import { hasMatterPerm, permissionGate } from "@/lib/matterPermissions";
+import { hasMatterPerm, permissionGate, releaseGate } from "@/lib/matterPermissions";
 import { BULK_MAX_DOCUMENTS, bulkCapOverflow, isOverBulkCap } from "@/lib/bulkCap";
 import { isCancelledResult } from "@/lib/batchCancel";
 import {
@@ -436,7 +436,7 @@ function DocumentRow({
   const [showHistory, setShowHistory] = useState(false);
   const rowRef = useRef<HTMLLIElement>(null);
   const inspectGate = permissionGate(perms, "inspect");
-  const sanitizeGate = permissionGate(perms, "sanitize");
+  const sanitizeGate = releaseGate(perms);
   const docJobs = jobs
     .filter((j) => j.document_id === doc.id)
     .sort((a, b) => b.created_utc.localeCompare(a.created_utc));

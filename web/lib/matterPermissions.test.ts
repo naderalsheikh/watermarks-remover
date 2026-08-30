@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasMatterPerm, permissionGate } from "./matterPermissions";
+import { hasMatterPerm, permissionGate, releaseGate } from "./matterPermissions";
 
 describe("hasMatterPerm", () => {
   it("is true when the perm is present", () => {
@@ -44,5 +44,24 @@ describe("permissionGate", () => {
   it("names each permission distinctly, not a generic message", () => {
     expect(permissionGate([], "inspect").title).toContain("inspect");
     expect(permissionGate([], "admin").title).toContain("admin");
+  });
+});
+
+describe("releaseGate", () => {
+  it("is governed by the sanitize grant (what POST .../releases checks)", () => {
+    expect(releaseGate(["read", "inspect"]).allowed).toBe(false);
+    expect(releaseGate(["read", "sanitize"]).allowed).toBe(true);
+  });
+
+  it("names the release action in the denied tooltip, not the invisible 'sanitize' control", () => {
+    const gate = releaseGate(["read"]);
+    expect(gate.allowed).toBe(false);
+    expect(gate.title).toContain("prepare a release");
+    // Still tells the operator which grant to request.
+    expect(gate.title).toContain("sanitize");
+  });
+
+  it("has no tooltip when the release action is allowed", () => {
+    expect(releaseGate(["sanitize"]).title).toBeUndefined();
   });
 });
