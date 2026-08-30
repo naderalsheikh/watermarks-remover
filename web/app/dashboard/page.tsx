@@ -66,6 +66,18 @@ const ATTENTION_TABS: { value: AttentionTab; label: string }[] = [
 
 const JOB_STATUS_ORDER = ["queued", "running", "done", "failed", "refused"] as const;
 
+// The raw status words are the shared vocabulary (StatusBadge, job rows
+// everywhere) -- but "done" alone reads as an engine state, not an
+// outcome, next to the "Completed jobs" card that means the same thing.
+// One label per status, capitalized like the cards around it.
+const JOB_STATUS_LABEL: Record<(typeof JOB_STATUS_ORDER)[number], string> = {
+  queued: "Queued",
+  running: "Running",
+  done: "Completed",
+  failed: "Failed",
+  refused: "Refused",
+};
+
 const ACTION_LABEL: Record<string, string> = {
   "matter.create": "Created matter",
   "document.upload": "Uploaded document",
@@ -80,7 +92,11 @@ const ACTION_LABEL: Record<string, string> = {
   "job.sanitize": "Released document",
   "acl.grant": "Granted access",
   "acl.revoke": "Revoked access",
-  "bundle.download": "Downloaded bundle",
+  // The audit action is bundle.download (the route is /jobs/{id}/bundle),
+  // but the operator-facing artifact has been "the release packet"
+  // everywhere since PR 40 -- same vocabulary here, not the raw route
+  // noun.
+  "bundle.download": "Downloaded release packet",
   "attest.issued": "Issued attestation",
   "attest.used": "Used attestation",
   // PR 41: Release's own two lifecycle events (service/app/main.py) --
@@ -181,7 +197,7 @@ export default function DashboardPage() {
                     key={status}
                     className="rounded-full border border-border px-3 py-1 text-sm"
                   >
-                    {status} · {data.totals.jobs[status]}
+                    {JOB_STATUS_LABEL[status]} · {data.totals.jobs[status]}
                   </span>
                 ))}
               </div>
@@ -295,7 +311,7 @@ export default function DashboardPage() {
                               rel="noopener noreferrer"
                               className="text-muted hover:text-foreground hover:underline"
                             >
-                              Open certificate
+                              Open custody certificate
                             </a>
                           )}
                         </div>
