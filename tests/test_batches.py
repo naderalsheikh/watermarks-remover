@@ -14,10 +14,12 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event, update
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "service" / "scripts"
 APP_DIR = Path(__file__).resolve().parents[1] / "service" / "app"
@@ -29,7 +31,7 @@ from app.config import Config
 from app.db import make_engine, make_session_factory
 from app.main import create_app
 from app.migrate import upgrade_head
-from app.models import AuditEvent, MatterAcl
+from app.models import AuditEvent, Job, MatterAcl
 from app.runner import RunnerResult
 from app.security import issue_session
 
@@ -396,6 +398,127 @@ def test_cancel_batch_only_touches_still_queued_children(tmp_path, monkeypatch):
 
         worker.release(running_job)
         _wait_batch_done(c, mid, bid)
+    finally:
+        _close_client(c)
+
+
+def test_cancel_batch_concurrent_claim_does_not_flip_running_job(tmp_path, monkeypatch):
+    """Regression: cancel_batch used to collect the still-queued child ids
+    with a SELECT, then bulk-UPDATE by id alone -- no status guard. If the
+    dispatcher claimed a child (queued -> running) in between, the UPDATE
+    force-flipped it to failed anyway: a running job that hadn't failed
+    was recorded as failed, the batch.cancelled audit event said 2 when
+    only 1 was actually cancelled, and sync_release then wrote that
+    stale "failed" into the claimed job's sibling Release.
+
+    The SELECT-then-UPDATE interleaving can't be won deterministically
+    against a live poll loop, so the race is simulated exactly: the poll
+    loop is disabled (start() -> no-op, nothing is ever claimed), and a
+    SQLAlchemy `before_execute` listener flips one child to "running"
+    the moment cancel_batch issues its bulk UPDATE -- that is, after the
+    pre-SELECT, before the UPDATE runs: the same window a real dispatcher
+    claim would land in.
+    """
+    monkeypatch.setattr("app.dispatcher.BatchDispatcher.start", lambda self: None)
+    c, sf, _ = _build_env(tmp_path, monkeypatch)
+    try:
+        mid = _matter(c)
+        docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt")]
+
+        r = _create_batch(c, mid, docs, "inspect")
+        assert r.status_code == 200, r.text
+        bid = r.json()["id"]
+        with sf() as s:
+            ids = [row[0] for row in s.query(Job.id).filter(Job.batch_id == bid).order_by(Job.id).all()]
+        claimed = ids[0]  # the one "the dispatcher claims" mid-race
+
+        def _claim_mid_race(conn, clauseelement, multiparams, params, execution_options):
+            # This listener sees every statement the app's engine runs;
+            # only the bulk cancel UPDATE targets jobs AND writes the
+            # route's literal error, so that pair alone identifies it.
+            # The inner flip below re-enters the listener, hence the flag.
+            if _claim_mid_race.armed is False:
+                return
+            stmt = clauseelement
+            table = getattr(stmt, "table", None)
+            if table is None or table.name != "jobs":
+                return
+            if "cancelled by operator" not in str(getattr(stmt, "_values", "")):
+                return
+            _claim_mid_race.armed = False
+            # Simulate the dispatcher's claim landing between the
+            # pre-SELECT and this UPDATE: the row reads "running" to the
+            # UPDATE that's about to execute. Same connection, so the
+            # flip is already visible -- exactly as a real claim's
+            # committed queued->running would be.
+            conn.execute(
+                update(Job)
+                .where(Job.id == claimed)
+                .values(status="running", error="", finished_utc=None)
+            )
+
+        _claim_mid_race.armed = True
+
+        # The listener must sit on the app's own engine -- create_app
+        # builds its own (the sf the test holds is a different instance
+        # against the same file); the app's engine is the one the
+        # cancel request actually executes on.
+        app_engine = c.app.state.batch_dispatcher._session_factory.kw["bind"]
+        event.listen(app_engine, "before_execute", _claim_mid_race)
+        try:
+            cancel = c.post(f"/v1/matters/{mid}/batches/{bid}/cancel")
+        finally:
+            event.remove(app_engine, "before_execute", _claim_mid_race)
+        assert _claim_mid_race.armed is False, "listener never saw the bulk cancel UPDATE"
+        assert cancel.status_code == 200, cancel.text
+        body = cancel.json()
+
+        by_job = {res["job_id"]: res for res in body["results"]}
+        # The claimed child is the dispatcher's now -- cancel must not
+        # have flipped it to failed or stamped a cancel error on it.
+        assert by_job[claimed]["status"] == "running"
+        assert not (by_job[claimed]["error"] or "").strip(), by_job[claimed]["error"]
+        others = [res for res in body["results"] if res["job_id"] != claimed]
+        assert len(others) == 1
+        assert others[0]["status"] == "failed"
+        assert "cancelled" in others[0]["error"]
+
+        # Truthful counts: one cancel actually happened, not two, and the
+        # summary must not count the still-running child as failed.
+        assert body["summary"]["failed"] == 1
+        assert body["summary"]["running"] == 1
+        assert body["finished_utc"] is None  # a live child means the batch isn't done
+
+        events = _audit_actions(c, mid)
+        cancelled_ev = [e for e in events if e["action"] == "batch.cancelled"]
+        assert len(cancelled_ev) == 1
+        assert cancelled_ev[0]["payload"]["cancelled"] == 1
+        # No batch.completed -- the claimed child is still running, so
+        # nothing has legitimately finished this batch yet.
+        assert not [e for e in events if e["action"] == "batch.completed"]
+
+        # The mid-race flip bypassed the dispatcher's own claim path, so
+        # no worker will ever finish the running row. Finish it the way
+        # the dispatcher would have (a plain terminal UPDATE -- it had
+        # already claimed the row, cancel never owned it), then make the
+        # same completion check the dispatcher's end-of-run path would
+        # have (the poll loop is off here, so nothing else runs it).
+        with sf() as s:
+            s.execute(
+                update(Job)
+                .where(Job.id == claimed)
+                .values(status="done", finished_utc=datetime.now(UTC).isoformat(timespec="seconds"))
+            )
+            s.commit()
+        with c.app.state.batch_dispatcher._session_factory() as s:
+            c.app.state.batch_dispatcher.check_batch_completion(s, bid)
+        final = _wait_batch_done(c, mid, bid)
+        # Counts that state what ACTUALLY happened: one cancel, one
+        # normal finish -- not "two cancels".
+        assert final["summary"] == {"requested": 2, "done": 1, "refused": 0, "failed": 1, "queued": 0, "running": 0}
+        done_ev = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
+        assert len(done_ev) == 1
+        assert done_ev[0]["payload"] == {"batch_id": bid, "total": 2, "done": 1, "refused": 0, "failed": 1}
     finally:
         _close_client(c)
 

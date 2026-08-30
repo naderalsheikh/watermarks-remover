@@ -2567,13 +2567,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             row[0]
             for row in s.query(Job.id).filter(Job.batch_id == batch_id, Job.status == "queued").all()
         ]
+        cancelled = 0
         if cancelled_ids:
-            s.execute(
+            # The status guard is the whole point: between the SELECT above
+            # and this UPDATE the dispatcher may claim one of these rows
+            # (queued -> running) -- flipping a row it now owns would fail a
+            # job that is actively running, and make the reported counts
+            # lie about what actually happened. rowcount, not
+            # len(cancelled_ids), is therefore the truthful "how many did
+            # we cancel" -- anything the guard filtered out was never
+            # cancelled by this call.
+            cancelled = s.execute(
                 update(Job)
-                .where(Job.id.in_(cancelled_ids))
+                .where(Job.id.in_(cancelled_ids), Job.status == "queued")
                 .values(status="failed", error="cancelled by operator", finished_utc=_now())
-            )
-        cancelled = len(cancelled_ids)
+            ).rowcount
         if cancelled:
             append_event(
                 s,
@@ -2583,14 +2591,30 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 payload={"batch_id": batch_id, "cancelled": cancelled},
             )
         s.commit()
-        if cancelled_ids:
+        # Only the rows the guarded UPDATE actually flipped, not every id
+        # the pre-SELECT saw: a row claimed mid-race is "running" and is
+        # the dispatcher's to finish -- syncing it here would write a
+        # stale status into its sibling Release. The error literal must
+        # stay in lockstep with the UPDATE above; it re-identifies the
+        # just-failed rows because the UPDATE can't hand back their ids.
+        actually_cancelled = [
+            row[0]
+            for row in s.query(Job.id)
+            .filter(
+                Job.id.in_(cancelled_ids),
+                Job.status == "failed",
+                Job.error == "cancelled by operator",
+            )
+            .all()
+        ]
+        if actually_cancelled:
             # release_id/profile_id bugfix: a cancelled child's sibling
             # Release (if any) is stuck "queued" forever, with no
             # release.terminal event, unless synced here explicitly --
             # cancel_batch bypasses the dispatcher's own normal per-job
             # completion path entirely.
             s.expire_all()
-            for job_id in cancelled_ids:
+            for job_id in actually_cancelled:
                 sync_release(s, s.get(Job, job_id))
             s.commit()
         # Cancelling every still-queued child can itself be what finishes
