@@ -24,8 +24,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     let message = res.statusText;
     try {
-      const body = (await res.json()) as { detail?: string };
-      if (body.detail) message = body.detail;
+      // FastAPI error bodies carry `detail` as a plain string for
+      // HTTPException (the common case) but as an ARRAY of per-field
+      // objects for request-validation 422s. Assigning the array
+      // straight into Error.message and rendering it crashes React
+      // ("Objects are not valid as a React child") -- so normalize to
+      // a string here, at the one boundary every error passes through.
+      const body = (await res.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") {
+        message = body.detail;
+      } else if (Array.isArray(body.detail)) {
+        const parts = body.detail
+          .map((d) =>
+            d && typeof d === "object" && "msg" in d
+              ? `${loc(d)} ${String((d as { msg: unknown }).msg)}`
+              : JSON.stringify(d),
+          )
+          .filter((s) => s.length > 0);
+        if (parts.length > 0) message = parts.join("; ");
+      }
     } catch {
       // response wasn't JSON — keep statusText
     }
@@ -33,6 +50,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+// "body.reason -> must be of string type" from a 422 item's loc+msg --
+// the field path plus the human-readable constraint, no raw JSON dump.
+function loc(d: object): string {
+  const l = (d as { loc?: unknown }).loc;
+  if (Array.isArray(l) && l.length > 1) return `body.${l.slice(1).join(".")}:`;
+  return "";
 }
 
 export const api = {
