@@ -367,8 +367,8 @@ function ReleasePanel({
           <summary className="cursor-pointer select-none">Technical details</summary>
           <p className="mt-1">
             Resolves to policy <code className="font-mono">{selectedProfile.policy_id}</code>. This
-            release is not externally anchored — see the release packet or release result for what
-            that means.
+            release&apos;s packet is signed by this deployment&apos;s custody key but not
+            externally anchored — see the release packet or release result for what that means.
           </p>
           <label className="mt-2 flex items-center gap-2">
             <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />

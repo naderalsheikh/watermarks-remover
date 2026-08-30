@@ -374,8 +374,9 @@ function BundleContents({
         </li>
         <li>
           <code className="font-mono">release_packet.json</code> — content hashes for every
-          file above, checkable offline without trusting this page (not externally
-          anchored yet).
+          file above plus an Ed25519 signature from this deployment&apos;s custody key over
+          the packet&apos;s recorded facts, checkable offline without trusting this page
+          (not externally anchored — no independent timestamp).
         </li>
         <li>
           <code className="font-mono">README.txt</code> — names every file above for someone
@@ -614,6 +615,24 @@ function JobView({
                     <code className="mt-1 block rounded bg-black/[0.04] px-2 py-1 font-mono dark:bg-white/[0.06]">
                       python3 tools/counselclear_verify_release_packet.py &lt;downloaded-file-or-folder&gt;
                     </code>
+                    For a full release packet, also hand it the deployment&apos;s public key to
+                    check the packet&apos;s Ed25519 signature:
+                    <br />
+                    <code className="mt-1 block rounded bg-black/[0.04] px-2 py-1 font-mono dark:bg-white/[0.06]">
+                      python3 tools/counselclear_verify_release_packet.py --public-key
+                      key.pem &lt;packet.zip&gt;
+                    </code>
+                    (save the key from{" "}
+                    <a
+                      href="/v1/custody-public-key"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-accent hover:underline"
+                    >
+                      this deployment&apos;s custody public key
+                    </a>{" "}
+                    into <code className="font-mono">key.pem</code> first — copy it to the
+                    recipient out of band, not from this link).
                   </p>
                 </div>
               )}
@@ -738,16 +757,21 @@ function JobView({
                   </a>
                   .
                 </p>
-                {/* PR 37: honest, narrow claim only -- what the manifest
+                {/* PR 37: honest, narrow claim only -- what the packet
                     actually lets a recipient do (recompute hashes offline
                     and confirm nothing was swapped), not what it doesn't
                     yet do. No "unforgeable"/"independently timestamped"/
                     "court-proof"/"unimpeachable" -- see
                     docs/release-packet-verification-and-anchoring-proposal.md
-                    §7; this packet is not externally anchored yet. */}
+                    §7. PR 57: the packet is now Ed25519-signed by this
+                    deployment's custody key (an operator signature, not
+                    an external timestamp authority), so the honest
+                    limitation is stated as exactly what remains missing:
+                    external anchoring. */}
                 <p className="mt-1 text-xs text-muted">
                   Also includes <code className="font-mono">release_packet.json</code>, a
-                  machine-verifiable manifest — content hashes for every file in this packet,
+                  machine-verifiable manifest — content hashes for every file in this packet
+                  plus an Ed25519 signature over them by this deployment&apos;s custody key,
                   checkable offline with{" "}
                   <code className="font-mono">tools/counselclear_verify_release_packet.py</code>.
                   This packet is not externally anchored (no independent timestamp yet).
