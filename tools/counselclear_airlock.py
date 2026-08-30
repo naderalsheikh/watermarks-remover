@@ -66,9 +66,10 @@ Client.release()), not the legacy POST .../sanitize-jobs -- a
 every output directory gets a release_result.json (the lightweight,
 always-present outcome record, written for every terminal release
 including a successful one) alongside the full release packet when
-done. --policy is no longer a recognized argument; Client.sanitize()
-itself is untouched and still callable by other code, in case anything
-else still needs the raw, unwrapped route.
+done. --policy is no longer a recognized argument, and Client.sanitize()
+-- the old caller-side wrapper for the legacy route -- is deleted (dead
+code: nothing in this repo ever called it), so this CLI now has no code
+path to the legacy sanitize-jobs route at all.
 """
 
 from __future__ import annotations
@@ -176,16 +177,6 @@ class Client:
         if status >= 400:
             raise AirlockError(f"upload {path.name} failed ({status}): {parsed.get('detail', parsed)}")
         return parsed
-
-    def sanitize(self, matter_id: str, doc_id: str, *, policy_id: str, reason: str) -> dict:
-        """The legacy, unwrapped route -- untouched, still here in case
-        anything else needs it. run_airlock() itself calls release()
-        below, not this, as of PR 43."""
-        return self._json(
-            "POST",
-            f"/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs",
-            payload={"policy_id": policy_id, "reason": reason},
-        )
 
     def release(
         self,
