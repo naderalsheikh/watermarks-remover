@@ -12,6 +12,12 @@ import { hasMatterPerm, permissionGate } from "@/lib/matterPermissions";
 import { BULK_MAX_DOCUMENTS, bulkCapOverflow, isOverBulkCap } from "@/lib/bulkCap";
 import { isCancelledResult } from "@/lib/batchCancel";
 import {
+  STATUS_TONE_CLASS,
+  STATUS_TONE_LABEL,
+  documentNextStep,
+  type StatusTone,
+} from "@/lib/documentNextStep";
+import {
   buildLegalJustifications,
   FALLBACK_LEGAL_BASIS_DISCLOSURE,
   KNOWN_LEGAL_BASES,
@@ -393,132 +399,13 @@ function ReleasePanel({
   );
 }
 
-type StatusTone = "muted" | "amber" | "emerald" | "red" | "orange";
-
-const STATUS_TONE_CLASS: Record<StatusTone, string> = {
-  muted: "text-muted",
-  amber: "text-amber-700 dark:text-amber-400",
-  emerald: "text-emerald-600",
-  red: "text-red-600",
-  orange: "text-orange-700 dark:text-orange-400",
-};
-
-// documentNextStep() returns the same tone for a done Release as for a
-// done legacy sanitize (and for "in progress" either way) -- filtering
-// by tone already correctly includes both, but "Sanitized"/"needs
-// sanitize" alone implied only the legacy case, which a reader clicking
-// the chip had no way to know included Released documents too.
-const STATUS_TONE_LABEL: Record<StatusTone, string> = {
-  muted: "Not reviewed",
-  amber: "In progress / needs release",
-  emerald: "Sanitized / Released",
-  red: "Failed",
-  orange: "Refused",
-};
-
 // The single "where are we, what's next" line for a document — the point
 // isn't just showing the latest job's raw status (already visible in the
 // job history disclosure below), it's translating that into what a
-// reviewer should actually do next.
-//
-// Two paths, deliberately kept separate (PR 40): a job carrying
-// release_id (created through POST .../releases) gets Release-aware
-// wording; a job with no release_id -- either created before this pass
-// shipped, or through the still-untouched legacy /sanitize-jobs route --
-// keeps the exact original wording below, unchanged. This is a real data
-// boundary, not a copy preference: a matter with pre-existing history has
-// no Release rows to describe, and pretending otherwise would render as
-// broken or misleading rather than just older.
-function documentNextStep(
-  docJobs: Job[],
-  releaseProfiles: ReleaseProfile[],
-): { tone: StatusTone; label: string; detail: string } {
-  if (docJobs.length === 0) {
-    return {
-      tone: "muted",
-      label: "Not yet reviewed",
-      detail: "Inspect to see what's inside, or prepare a release directly.",
-    };
-  }
-  const latest = docJobs[0];
-
-  if (latest.release_id) {
-    if (latest.status === "queued" || latest.status === "running") {
-      return { tone: "amber", label: "Release in progress", detail: "Checking again automatically." };
-    }
-    if (latest.status === "failed") {
-      return { tone: "red", label: "Release failed", detail: "See release result below." };
-    }
-    if (latest.status === "refused") {
-      return {
-        tone: "orange",
-        label: "Release refused",
-        detail: "No derivative was produced — see release result below.",
-      };
-    }
-    const profile = releaseProfiles.find((p) => p.id === latest.profile_id);
-    return {
-      tone: "emerald",
-      label: `Released under ${profile?.label ?? latest.profile_id ?? "unknown profile"}`,
-      // Deliberately the same restraint the pre-Release wording already
-      // had: never "clean" or "safe" -- a release can still have kept
-      // findings without review (see NoDecisionWarning on the job page).
-      detail: "Open the release for the packet, findings, and custody.",
-    };
-  }
-
-  // --- legacy path: exact original wording, unchanged ---------------------
-  if (latest.status === "queued" || latest.status === "running") {
-    return {
-      tone: "amber",
-      label: `${latest.kind === "sanitize" ? "Sanitize" : "Inspect"} in progress`,
-      detail: "Checking again automatically.",
-    };
-  }
-  if (latest.status === "failed") {
-    return { tone: "red", label: "Last job failed", detail: "See job details below." };
-  }
-  if (latest.status === "refused") {
-    return {
-      tone: "orange",
-      label: "Refused by policy",
-      detail: "No derivative was produced — see job details below.",
-    };
-  }
-  if (latest.kind === "sanitize") {
-    return {
-      tone: "emerald",
-      label: `Sanitized with ${latest.policy_id}`,
-      detail: "Open the job for findings, custody, and what was kept.",
-    };
-  }
-  // The badge above only looked at the single MOST RECENT job -- if that
-  // happens to be a later inspect run, a still-real completed Release
-  // earlier in the history must not silently read as legacy "sanitize"
-  // wording just because it's no longer the latest job. Release-aware
-  // only when that earlier done sanitize actually has one; otherwise
-  // exactly the original legacy wording, unchanged.
-  const lastDoneSanitize = docJobs.find((j) => j.kind === "sanitize" && j.status === "done");
-  if (lastDoneSanitize?.release_id) {
-    const profile = releaseProfiles.find((p) => p.id === lastDoneSanitize.profile_id);
-    return {
-      tone: "amber",
-      label: "Inspected again since last release",
-      detail: `The earlier release (${profile?.label ?? lastDoneSanitize.profile_id}) predates this inspection — review before relying on it.`,
-    };
-  }
-  return lastDoneSanitize
-    ? {
-        tone: "amber",
-        label: "Inspected again since last sanitize",
-        detail: "The earlier sanitize predates this inspection — review before relying on it.",
-      }
-    : {
-        tone: "amber",
-        label: "Inspected — not yet sanitized",
-        detail: "Choose a policy and sanitize when ready.",
-      };
-}
+// reviewer should actually do next. The logic and wording live in
+// web/lib/documentNextStep.ts (extracted this pass so the vocabulary is
+// unit-testable); see that module for the release-aware vs legacy data
+// boundary.
 
 function DocumentRow({
   matterId,
