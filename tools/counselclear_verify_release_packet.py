@@ -1231,14 +1231,31 @@ def _load_public_keys(paths: list[Path]) -> dict[str, bytes]:
     """--public-key can be given more than once (a bundle of keys
     covering multiple rotations). Returns {key_id: raw bytes} -- raises
     SystemExit on an unparseable file, since a bad key path is an
-    operator error to fix, not a packet verdict."""
+    operator error to fix, not a packet verdict.
+
+    SHOULD-3 (review 2026-08-30): two DIFFERENT key files resolving to
+    the same key_id is also an operator error, and it used to be a
+    silent last-one-wins overwrite -- the operator believes their bundle
+    covers two rotations while it actually holds one, and a packet
+    signed by the shadowed key verifies against the wrong material
+    without a word said. Same-file duplicates (a path passed twice) are
+    the no-op they always were."""
     keys: dict[str, bytes] = {}
+    seen_paths: dict[str, Path] = {}
     for p in paths:
         try:
             raw = _parse_public_key_pem(p.read_text())
         except (OSError, ValueError) as e:
             raise SystemExit(f"--public-key {p}: {e}") from e
-        keys[_public_key_id(raw)] = raw
+        key_id = _public_key_id(raw)
+        prior = seen_paths.get(key_id)
+        if prior is not None and prior != p:
+            raise SystemExit(
+                f"--public-key: {prior} and {p} both resolve to key_id {key_id} "
+                "-- two distinct files must not share one id"
+            )
+        seen_paths[key_id] = p
+        keys[key_id] = raw
     return keys
 
 

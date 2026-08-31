@@ -1089,6 +1089,55 @@ def test_public_key_cli_accepts_pem_and_hex_forms(tmp_path):
         assert report.signature_status == "verified", f"{kf.name} form failed"
 
 
+def test_load_public_keys_same_file_twice_is_a_noop(tmp_path):
+    """SHOULD-3 (review 2026-08-30): passing the same --public-key path
+    twice (a shell glob expansion, a repeated flag in a script) is the
+    honest no-op it always was -- the dedup the fix adds must not break
+    the legitimate duplicate."""
+    key = _ed25519()
+    key_file = tmp_path / "pub.pem"
+    key_file.write_bytes(_public_key_pem(key))
+    once = verifier._load_public_keys([key_file])
+    twice = verifier._load_public_keys([key_file, key_file])
+    assert once == twice
+
+
+def test_load_public_keys_two_distinct_files_with_same_id_errors(tmp_path):
+    """SHOULD-3 (review 2026-08-30): two DIFFERENT files resolving to
+    the same key_id used to be a silent last-one-wins overwrite -- the
+    operator believes their bundle covers two rotations while it holds
+    one, and a packet signed by the shadowed key verifies against the
+    wrong material without a word said. Must SystemExit (the function's
+    own convention for operator errors), and the message must name BOTH
+    files so the operator can find the duplicate.
+
+    Same id from different files happens with the two serializations
+    the CLI accepts (PEM and raw hex of the same key material): both
+    parse to the same raw bytes, so they share the id.
+    """
+    import pytest
+
+    key = _ed25519()
+    pem_file = tmp_path / "pub.pem"
+    pem_file.write_bytes(_public_key_pem(key))
+    hex_file = tmp_path / "pub.hex"
+    hex_file.write_text(_pub_raw(key).hex())
+
+    with pytest.raises(SystemExit, match="both resolve to key_id"):
+        verifier._load_public_keys([pem_file, hex_file])
+    # Order-invariant: the error is about the collision, not the order.
+    with pytest.raises(SystemExit, match="both resolve to key_id"):
+        verifier._load_public_keys([hex_file, pem_file])
+
+    # A genuinely distinct key alongside is fine -- rotation bundles are
+    # the whole point of multiple --public-key flags.
+    other = _ed25519()
+    other_file = tmp_path / "other.pem"
+    other_file.write_bytes(_public_key_pem(other))
+    loaded = verifier._load_public_keys([pem_file, other_file])
+    assert len(loaded) == 2
+
+
 def test_signature_cross_checks_against_cryptography(tmp_path):
     """The stdlib Ed25519 verify must agree with the cryptography
     library on both a valid signature and every failure mode -- this is
