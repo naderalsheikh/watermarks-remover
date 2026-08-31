@@ -6,6 +6,11 @@
   --border: #e5e7eb;
   --muted: #6b7280;
   --accent: #1d4ed8;
+  --shadow-card: 0 1px 2px rgb(23 23 23 / 0.04), 0 1px 3px rgb(23 23 23 / 0.06);
+  --shadow-card-hover: 0 2px 4px rgb(23 23 23 / 0.05), 0 3px 8px rgb(23 23 23 / 0.08);
+  --focus-ring-color: var(--accent);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
 }
 
 @theme inline {
@@ -14,6 +19,8 @@
   --color-border: var(--border);
   --color-muted: var(--muted);
   --color-accent: var(--accent);
+  --shadow-card: var(--shadow-card);
+  --shadow-card-hover: var(--shadow-card-hover);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,6 +30,8 @@
     --border: #27272a;
     --muted: #9ca3af;
     --accent: #60a5fa;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.4);
+    --shadow-card-hover: 0 2px 4px rgb(0 0 0 / 0.5), 0 3px 8px rgb(0 0 0 / 0.45);
   }
 }
 
@@ -31,4 +40,37 @@ body {
   color: var(--foreground);
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Interactive elements: every hover/focus state in the app changes color,
+   background, border, or opacity, and all of them snapped instantly (the
+   pre-audit pages had zero transitions on 80+ interactive elements). One
+   base rule restores motion without any per-component class edits. */
+a,
+button,
+input,
+select,
+summary,
+[role="button"] {
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    border-color 150ms ease,
+    opacity 150ms ease,
+    box-shadow 150ms ease;
+}
+
+/* Keyboard focus: outline-none on inputs removed all visible focus, and
+   buttons/links had only the browser default blue -- not a token. One
+   focus-visible rule gives every interactive element the same
+   accent-colored ring, offset so it clears filled buttons and card
+   borders alike. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
 }
