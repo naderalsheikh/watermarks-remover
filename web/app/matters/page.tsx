@@ -98,7 +98,7 @@ export default function MattersPage() {
             onChange={(e) => setName(e.target.value)}
             placeholder="New matter name"
             aria-label="New matter name"
-            className="flex-1 rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:border-accent"
+            className="flex-1 rounded-md border border-border bg-transparent px-3 py-2 text-sm focus-visible:border-accent"
           />
           <button
             type="submit"
@@ -158,7 +158,7 @@ export default function MattersPage() {
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search matters by name…"
           aria-label="Search matters by name"
-          className="mb-1 w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-accent"
+          className="mb-1 w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm focus-visible:border-accent"
         />
         <p className="mb-3 text-xs text-muted">
           Searches every matter you can read on the server — not just what&apos;s loaded below.
@@ -180,7 +180,7 @@ export default function MattersPage() {
                 {debouncedSearch ? " matching" : ""} matters.
               </p>
             )}
-            <ul className="divide-y divide-border rounded-md border border-border">
+            <ul className="divide-y divide-border rounded-md border border-border shadow-card">
               {matters.map((m) => (
                 <li key={m.id}>
                   <Link

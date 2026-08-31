@@ -21,7 +21,7 @@ function permLabel(perm: string): string {
 function YourPrincipal({ oidc, principal }: { oidc: boolean; principal: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="mb-6 rounded-md border border-border p-3 text-sm">
+    <div className="mb-6 rounded-md border border-border p-3 text-sm shadow-card">
       <p className="text-xs font-medium uppercase tracking-wide text-muted">Your principal ID</p>
       <div className="mt-1 flex items-center gap-2">
         <code className="break-all font-mono text-sm">{principal}</code>
@@ -116,7 +116,7 @@ function GrantForm({ onGrant }: { onGrant: (userId: string, perm: string) => Pro
           value={userId}
           onChange={(e) => setUserId(e.target.value)}
           placeholder="oidc:a1b2c3…"
-          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 font-mono text-sm outline-none focus:border-accent"
+          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 font-mono text-sm focus-visible:border-accent"
         />
         <p className="mt-1 text-xs text-muted">
           CounselClear does not yet resolve a reviewer&apos;s email to their login principal ID.
@@ -129,7 +129,7 @@ function GrantForm({ onGrant }: { onGrant: (userId: string, perm: string) => Pro
         <select
           value={perm}
           onChange={(e) => setPerm(e.target.value)}
-          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm capitalize outline-none focus:border-accent"
+          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm capitalize focus-visible:border-accent"
         >
           {KNOWN_PERMS.map((p) => (
             <option key={p} value={p}>
@@ -255,7 +255,7 @@ function AccessView({ matterId }: { matterId: string }) {
 
       {aclQ.data && (
         <>
-          <ul className="divide-y divide-border rounded-md border border-border">
+          <ul className="divide-y divide-border rounded-md border border-border shadow-card">
             {aclQ.data.grants.map((g) => (
               <GrantRow
                 key={g.user_id}
@@ -285,7 +285,7 @@ export default function AccessPage() {
   return (
     <>
       <Header />
-      <Suspense fallback={<div className="flex-1 px-6 py-8 text-sm text-muted">Loading…</div>}>
+      <Suspense fallback={<div className="flex-1 px-6 py-8"><div className="h-8 w-40 animate-pulse rounded-md bg-black/[0.06] dark:bg-white/[0.06]" /></div>}>
         <AccessInner />
       </Suspense>
     </>

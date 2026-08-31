@@ -190,7 +190,7 @@ function ReleasePanel({
         <select
           value={profileId}
           onChange={(e) => setProfileId(e.target.value)}
-          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
         >
           {releaseProfiles.map((p) => (
             <option key={p.id} value={p.id}>
@@ -207,7 +207,7 @@ function ReleasePanel({
           <select
             value={recipientType}
             onChange={(e) => setRecipientType(e.target.value)}
-            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
           >
             {recipientTypes.map((rt) => (
               <option key={rt} value={rt}>
@@ -221,7 +221,7 @@ function ReleasePanel({
           <input
             value={recipientName}
             onChange={(e) => setRecipientName(e.target.value)}
-            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
           />
         </div>
       </div>
@@ -288,7 +288,7 @@ function ReleasePanel({
                       onChange={(e) =>
                         setDecisions((d) => ({ ...d, [st]: e.target.value as "approve" | "keep" }))
                       }
-                      className="rounded border border-border bg-transparent px-1.5 py-1 text-xs outline-none focus:border-accent"
+                      className="rounded border border-border bg-transparent px-1.5 py-1 text-xs focus-visible:border-accent"
                     >
                       <option value="keep">Keep</option>
                       <option value="approve">Approve (strip)</option>
@@ -311,7 +311,7 @@ function ReleasePanel({
                           }))
                         }
                         aria-label={`Legal basis for kept ${subtypeLabel(st)}`}
-                        className="rounded border border-border bg-transparent px-1.5 py-1 text-xs outline-none focus:border-accent"
+                        className="rounded border border-border bg-transparent px-1.5 py-1 text-xs focus-visible:border-accent"
                       >
                         {KNOWN_LEGAL_BASES.map((v) => (
                           <option key={v} value={v}>
@@ -329,7 +329,7 @@ function ReleasePanel({
                         }
                         placeholder="Basis note (optional)"
                         aria-label={`Basis note for kept ${subtypeLabel(st)}`}
-                        className="rounded border border-border bg-transparent px-1.5 py-1 text-xs outline-none focus:border-accent"
+                        className="rounded border border-border bg-transparent px-1.5 py-1 text-xs focus-visible:border-accent"
                       />
                     </div>
                   )}
@@ -349,7 +349,7 @@ function ReleasePanel({
         <input
           value={purpose}
           onChange={(e) => setPurpose(e.target.value)}
-          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+          className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
         />
       </div>
       <label className="flex items-center gap-2 text-xs">
@@ -658,7 +658,7 @@ function BulkRunPanel({
             <select
               value={profileId}
               onChange={(e) => setProfileId(e.target.value)}
-              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
             >
               {releaseProfiles.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -675,7 +675,7 @@ function BulkRunPanel({
             <select
               value={recipientType}
               onChange={(e) => setRecipientType(e.target.value)}
-              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
             >
               {recipientTypes.map((rt) => (
                 <option key={rt} value={rt}>
@@ -700,7 +700,7 @@ function BulkRunPanel({
             <input
               value={purpose}
               onChange={(e) => setPurpose(e.target.value)}
-              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+              className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
             />
           </div>
         </>
@@ -776,7 +776,7 @@ function BulkResults({
 
   const s = batch.summary;
   return (
-    <div className="mb-4 rounded-md border border-border">
+    <div className="mb-4 rounded-md border border-border shadow-card">
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2 text-xs text-muted">
         <span>
           {s.done} done · {s.refused} refused · {s.failed} failed · {s.queued} queued ·{" "}
@@ -901,7 +901,7 @@ function ReportsAndExports({
   const linkClass =
     "shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]";
   return (
-    <div className="mb-4 rounded-md border border-border p-3">
+    <div className="mb-4 rounded-md border border-border p-3 shadow-card">
       <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
         Reports &amp; exports
       </h2>
@@ -1283,7 +1283,7 @@ function MatterView({
               onChange={(e) => setDocSearch(e.target.value)}
               placeholder="Search documents by filename…"
               aria-label="Search documents by filename"
-              className="w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm outline-none focus:border-accent"
+              className="w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm focus-visible:border-accent"
             />
             <p className="text-xs text-muted">
               Searches every document in this matter on the server. The status filter below only
@@ -1293,7 +1293,7 @@ function MatterView({
               <button
                 onClick={() => setStatusFilter("all")}
                 aria-pressed={statusFilter === "all"}
-                className={`rounded px-2 py-1.5 text-xs ${
+                className={`rounded-md px-2 py-1.5 text-xs ${
                   statusFilter === "all"
                     ? "bg-accent text-white"
                     : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -1306,7 +1306,7 @@ function MatterView({
                   key={tone}
                   onClick={() => setStatusFilter(tone)}
                   aria-pressed={statusFilter === tone}
-                  className={`rounded px-2 py-1.5 text-xs ${
+                  className={`rounded-md px-2 py-1.5 text-xs ${
                     statusFilter === tone
                       ? "bg-accent text-white"
                       : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -1336,7 +1336,7 @@ function MatterView({
                 />
                 Select all {docsQ.items.length} loaded documents
               </label>
-              <ul className="divide-y divide-border rounded-md border border-border">
+              <ul className="divide-y divide-border rounded-md border border-border shadow-card">
                 {filteredDocs.map((doc) => (
                   <DocumentRow
                     key={doc.id}
@@ -1396,7 +1396,7 @@ export default function MatterViewPage() {
   return (
     <>
       <Header />
-      <Suspense fallback={<div className="flex-1 px-6 py-8 text-sm text-muted">Loading…</div>}>
+      <Suspense fallback={<div className="flex-1 px-6 py-8"><div className="h-8 w-40 animate-pulse rounded-md bg-black/[0.06] dark:bg-white/[0.06]" /></div>}>
         <MatterViewInner />
       </Suspense>
     </>

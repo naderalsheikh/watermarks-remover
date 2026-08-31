@@ -184,7 +184,7 @@ function FindingsByCategory({ findings }: { findings: Finding[] }) {
   return (
     <div className="space-y-4">
       {categories.map((cat) => (
-        <div key={cat} className="rounded-md border border-border">
+        <div key={cat} className="rounded-md border border-border shadow-card">
           <div className="border-b border-border bg-black/[0.02] px-4 py-2 text-sm font-medium dark:bg-white/[0.02]">
             {titleCase(cat)}{" "}
             <span className="text-xs font-normal text-muted">
@@ -204,7 +204,7 @@ function FindingsByCategory({ findings }: { findings: Finding[] }) {
 
 function CustodyCard({ manifest }: { manifest: Manifest }) {
   return (
-    <div className="mb-6 rounded-md border border-border p-4">
+    <div className="mb-6 rounded-md border border-border p-4 shadow-card">
       <h2 className="mb-3 text-sm font-semibold tracking-tight">Custody</h2>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2">
@@ -512,7 +512,7 @@ function RerunPanel({
   }
 
   return (
-    <details className="mt-3 rounded-md border border-border bg-black/[0.02] px-4 py-3 dark:bg-white/[0.02]">
+    <details className="mt-3 rounded-md border border-border bg-black/[0.02] px-4 py-3 shadow-card dark:bg-white/[0.02]">
       <summary className="cursor-pointer select-none text-sm font-medium text-foreground">
         Re-run this release
       </summary>
@@ -533,7 +533,7 @@ function RerunPanel({
           <select
             value={state.profileId}
             onChange={(e) => setState((s) => ({ ...s, profileId: e.target.value }))}
-            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
           >
             {releaseProfiles.map((p) => (
               <option key={p.id} value={p.id}>
@@ -561,7 +561,7 @@ function RerunPanel({
           <select
             value={state.recipientType}
             onChange={(e) => setState((s) => ({ ...s, recipientType: e.target.value }))}
-            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
           >
             {recipientTypes.map((rt) => (
               <option key={rt} value={rt}>
@@ -581,7 +581,7 @@ function RerunPanel({
           <input
             value={state.recipientName}
             onChange={(e) => setState((s) => ({ ...s, recipientName: e.target.value }))}
-            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
           />
         </div>
         <div>
@@ -589,7 +589,7 @@ function RerunPanel({
           <input
             value={state.purpose}
             onChange={(e) => setState((s) => ({ ...s, purpose: e.target.value }))}
-            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus:border-accent"
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm focus-visible:border-accent"
           />
         </div>
         <label className="flex items-center gap-2 text-xs">
@@ -990,7 +990,7 @@ function JobView({
             )}
 
             {job.status === "done" && job.kind === "sanitize" && (
-              <div className="mb-6 rounded-md border-2 border-accent p-4">
+              <div className="mb-6 rounded-md border-2 border-accent p-4 shadow-card">
                 <p className="mb-3 text-sm font-medium">
                   Release packet — the derivative and its verification manifest, together
                 </p>
@@ -1076,7 +1076,7 @@ export default function JobPage() {
   return (
     <>
       <Header />
-      <Suspense fallback={<div className="flex-1 px-6 py-8 text-sm text-muted">Loading…</div>}>
+      <Suspense fallback={<div className="flex-1 px-6 py-8"><div className="h-8 w-40 animate-pulse rounded-md bg-black/[0.06] dark:bg-white/[0.06]" /></div>}>
         <JobPageInner />
       </Suspense>
     </>
