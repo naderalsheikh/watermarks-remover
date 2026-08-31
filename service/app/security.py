@@ -90,6 +90,40 @@ _sign = sign_hmac_sha256
 PACKET_SIGNATURE_SIGNED_FIELDS = "release_packet.v1.canonical"
 
 
+def _assert_canonical_scalar_types(node: object, path: str = "packet") -> None:
+    """SHOULD-2 (review 2026-08-30): every value the signature covers must
+    be a str | int | bool | None (nested through dicts/lists). A float
+    would serialize with repr() whose shortest-round-trip form CHANGED
+    across Python versions (3.1's shortest-repr switch) and can differ
+    between the signer's json.dumps and a verifier's re-parse on a
+    platform that disagrees -- a packet whose canonical bytes aren't
+    reproducible is unverifiable, exactly what the signature exists to
+    prevent. The docstring's stability claim was true only by
+    convention; this makes it true by construction, failing loudly at
+    sign time (the earliest, cheapest place) instead of silently
+    producing bytes a future verifier can't reproduce.
+    """
+    if node is None or isinstance(node, (str, bool, int)):
+        return
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"{path}: canonical packet keys must be str, got {type(k).__name__}"
+                )
+            _assert_canonical_scalar_types(v, f"{path}.{k}")
+        return
+    if isinstance(node, list):
+        for i, v in enumerate(node):
+            _assert_canonical_scalar_types(v, f"{path}[{i}]")
+        return
+    raise TypeError(
+        f"{path}: value type {type(node).__name__} is not canonicalizable "
+        f"({', '.join(t.__name__ for t in (str, int, bool))}, or null) -- "
+        "release_packet.v1.canonical must be byte-stable across platforms"
+    )
+
+
 def packet_canonical_bytes(packet: dict) -> bytes:
     """The exact bytes the signature covers: the packet dict minus its
     own ``signature`` block, re-serialized with a fixed canonical form.
@@ -101,11 +135,17 @@ def packet_canonical_bytes(packet: dict) -> bytes:
     Stability: the packet schema carries strings, ints, nulls, booleans
     and nested dicts/lists only (no floats), so json.dumps with
     sort_keys + compact separators + ensure_ascii is byte-stable across
-    Python versions for everything that can appear here.
-    test_packet_canonical_bytes_roundtrip_stability pins that claim
-    against a payload exercising every field type.
+    Python versions for everything that can appear here -- and since
+    SHOULD-2 that's enforced, not assumed: _assert_canonical_scalar_types
+    walks the whole payload (minus the signature block) and raises at
+    sign time on anything else, so a future field that smuggles in a
+    float fails loudly here instead of producing bytes some verifier
+    can't reproduce. test_packet_canonical_bytes_roundtrip_stability
+    pins both halves: every schema-legal type round-trips byte-stably,
+    and a deliberately-injected float is rejected.
     """
     content = {k: v for k, v in packet.items() if k != "signature"}
+    _assert_canonical_scalar_types(content)
     return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 

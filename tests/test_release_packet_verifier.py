@@ -1172,6 +1172,91 @@ def test_packet_canonical_bytes_matches_app_construction():
     assert verifier._packet_canonical_bytes(packet) == packet_canonical_bytes(packet)
 
 
+def test_packet_canonical_bytes_roundtrip_stability():
+    """SHOULD-2 (review 2026-08-30): the invariant security.py's own
+    docstring has been citing this test's name for -- the canonical bytes
+    must be reproducible from any parse of the packet file, across
+    platforms, for every field type the schema allows. Two halves:
+
+    1. byte-stability: json.loads(json.dumps(payload)) -> canonicalize
+       yields the identical bytes the original produced (the verifier's
+       actual path -- it parses the file, then recomputes), for a
+       payload exercising every schema-legal type including unicode and
+       escape-hostile strings.
+    2. the guard: a deliberately-injected float is REJECTED at sign
+       time. A float's repr() shortest-round-trip form changed across
+       Python versions and can disagree between platforms, so a float in
+       the signed content would make the packet unverifiable by exactly
+       the future verifier the signature exists for. Before SHOULD-2
+       the guard didn't exist -- the float would have serialized
+       silently.
+    """
+    import pytest
+
+    sys.path.insert(0, str(REPO / "service"))
+    from app.security import packet_canonical_bytes
+
+    payload = {
+        "spec_version": "1.0",
+        "packet_id": "pk1",
+        "release_id": None,
+        "release": {"profile_id": "p", "recipient_type": "r", "recipient_name": "n",
+                    "purpose": "u", "intended_external": True},
+        "policy": {"id": None, "version": 3, "digest": None},
+        "hashes": {"derivative": {"filename": "f.docx", "sha256": "a" * 64},
+                   "manifest_json_sha256": "b" * 64},
+        "audit_refs": {"bundle_download_seq": 3, "certificate_issued_seq": 4},
+        "legal_justifications": [{"subtype": "s", "action": "keep",
+                                  "legal_justification": {"basis": "privilege", "note": "x"}}],
+        "limitations": ["l1", ""],
+        "anchor": {"type": "ed25519-operator", "digest": None, "reference": "c" * 16},
+        "unicode": "café — ünïcödé ✓",
+        "escaped": "quote\" backslash\\ newline\n\t",
+        "zero": 0,
+        "negative": -42,
+        "false": False,
+        "nested": {"deep": {"deeper": [{"leaf": None, "n": 1}, {"leaf": True, "n": 2}]}},
+        # The signature block is excluded from the canonical content --
+        # present here to prove the exclusion holds through the roundtrip.
+        "signature": {"algorithm": "ed25519", "key_id": "c" * 16,
+                      "signed_fields": "release_packet.v1.canonical",
+                      "digest": "sha256:" + "d" * 64, "value": "e" * 128},
+    }
+
+    original = packet_canonical_bytes(payload)
+
+    # Round-trip through the file format the verifier actually parses:
+    # indent=2/sort_keys (job_bundle's on-disk shape), then json.loads.
+    on_disk = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    reparsed = json.loads(on_disk)
+    assert packet_canonical_bytes(reparsed) == original
+
+    # Formatting never matters: compact dumps, different key order in
+    # the source dict -- same canonical bytes both directions.
+    compact = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    assert packet_canonical_bytes(json.loads(compact)) == original
+    shuffled = dict(reversed(list(payload.items())))
+    assert packet_canonical_bytes(shuffled) == original
+
+    # The signature block is genuinely excluded: changing it never
+    # changes the canonical bytes.
+    tampered_sig = {**payload, "signature": {"value": "f" * 128}}
+    assert packet_canonical_bytes(tampered_sig) == original
+
+    # A float anywhere in the signed content must fail loudly at sign
+    # time, never serialize silently.
+    with pytest.raises(TypeError, match="float"):
+        packet_canonical_bytes({**payload, "hashes": {"ratio": 0.5}})
+    with pytest.raises(TypeError, match="float"):
+        packet_canonical_bytes({**payload, "limitations": [1.5]})
+    with pytest.raises(TypeError, match="float"):
+        packet_canonical_bytes({**payload, "nested": {"deep": {"n": 2.0}}})
+    # Non-str keys are the same class of defect (sort_keys on mixed types
+    # raises incomparably on some platforms) -- rejected too.
+    with pytest.raises(TypeError, match="keys must be str"):
+        packet_canonical_bytes({**payload, "bad": {1: "int key"}})
+
+
 def test_combined_mode_checks_signature_ref_agreement(tmp_path):
     """release_result.json's signature_ref names the key that signed
     the packet it travels with; combined mode must fail when they
