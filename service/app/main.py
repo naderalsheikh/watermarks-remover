@@ -981,6 +981,11 @@ class ReleaseBody(BaseModel):
     purpose: str = ""
     intended_external: bool = True
     reason: str = ""
+    # SHOULD-4 (review 2026-08-30): the release this one re-runs
+    # (supersedes), if any. Validated server-side against the same
+    # document -- a caller can never link a release to an unrelated
+    # matter's history by naming a foreign id.
+    predecessor_release_id: str | None = None
     signature_break_attestation: bool = False
     finding_decisions: dict[str, str] = {}
     legal_justifications: dict[str, LegalJustificationBody] = {}
@@ -2004,6 +2009,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "status": r.status,
             "created_utc": r.created_utc,
             "finished_utc": r.finished_utc,
+            # SHOULD-4 (review 2026-08-30): the re-run link, when this
+            # release supersedes an earlier one. Nullable -- first
+            # releases and pre-0010 rows carry null, never a fabricated
+            # link.
+            "predecessor_release_id": r.predecessor_release_id,
         }
 
     def _legal_justifications_from_manifest(manifest: dict) -> list[dict[str, object]]:
@@ -2094,6 +2104,15 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # release_result.json and one holding only manifest.json read
             # the same vocabulary.
             "attestation": "signature_break_attested" if job.attestation else "none",
+            # SHOULD-4 (review 2026-08-30): when this release re-runs
+            # (supersedes) an earlier one, say so on the artifact every
+            # terminal release produces -- especially load-bearing for a
+            # re-run of a REFUSED release, where release_result.json is
+            # the only structured record the predecessor ever produced.
+            # Omitted entirely for a first release (None), never a
+            # fabricated or null-typed link.
+            **({"predecessor_release_id": release.predecessor_release_id}
+               if release.predecessor_release_id else {}),
             "original_sha256": doc.sha256,
             "created_at": release.created_utc,
             "finished_at": release.finished_utc,
@@ -2145,6 +2164,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if body.recipient_type not in RECIPIENT_TYPES:
             raise HTTPException(400, f"unknown recipient_type: {body.recipient_type!r}")
         policy_id = profile["policy_id"]
+
+        # SHOULD-4 (review 2026-08-30): a re-run must reference a real
+        # Release row of the SAME document in the SAME matter -- the
+        # supersession link is a custody fact, so a bogus or foreign id
+        # refuses loudly here rather than landing silently on the record
+        # as an unverifiable string.
+        predecessor_release_id = None
+        if body.predecessor_release_id is not None:
+            pred = _release(matter_id, body.predecessor_release_id, s)
+            if pred.document_id != doc.id:
+                raise HTTPException(
+                    400,
+                    f"predecessor release {pred.id} belongs to a different document "
+                    f"({pred.document_id}), not {doc.id}",
+                )
+            predecessor_release_id = pred.id
 
         layer_b: dict | None = None
         attest_claims: dict | None = None
@@ -2208,6 +2243,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             intended_external=body.intended_external,
             requested_by=user,
             status="queued",
+            predecessor_release_id=predecessor_release_id,
         )
         s.add(release)
         s.flush()  # assigns release.id
@@ -2224,6 +2260,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "profile_id": body.profile_id,
                 "recipient_type": body.recipient_type,
                 "requested_by": user,
+                # SHOULD-4 (review 2026-08-30): the supersession link
+                # rides the audit chain's own payload too (not just the
+                # Release row) so it is tamper-evident like every other
+                # custody fact -- the chain hash commits to it.
+                **({"predecessor_release_id": predecessor_release_id}
+                   if predecessor_release_id else {}),
             },
         )
         s.commit()
@@ -3229,6 +3271,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # Derived from the Job row's own bool, never from the
             # manifest: a legacy unwrapped job has the same claim to make.
             "attestation": "signature_break_attested" if job.attestation else "none",
+            # SHOULD-4 (review 2026-08-30): the supersession link, when
+            # this packet re-runs an earlier release of the same
+            # document. Like attestation above it is part of the SIGNED
+            # canonical bytes -- a custody fact the signature must cover
+            # -- and omitted for a first release rather than nulled.
+            **({"predecessor_release_id": release.predecessor_release_id}
+               if release and release.predecessor_release_id else {}),
             "policy": {
                 "id": policy_id,
                 "version": policy_version if policy_id else None,

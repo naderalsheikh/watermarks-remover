@@ -46,6 +46,11 @@
       "enum": ["none", "signature_break_attested"],
       "_comment_optional": "not in required -- results issued before 2026-08-30 carry no attestation field and must keep validating"
     },
+    "predecessor_release_id": {
+      "type": "string",
+      "minLength": 1,
+      "_comment_optional": "SHOULD-4 (review 2026-08-30): present only when this release re-runs an earlier release of the same document; not in required -- first releases and pre-2026-08-30 results carry no such field and must keep validating"
+    },
     "original_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "created_at": { "type": "string", "minLength": 1 },
     "finished_at": { "type": ["string", "null"] },

@@ -226,6 +226,17 @@ class Release(Base):
     # certificate/packet/UI copy may claim otherwise (see docs).
     intended_external: Mapped[bool] = mapped_column(default=True)
     requested_by: Mapped[str] = mapped_column(String(64))
+    # SHOULD-4 (review 2026-08-30): when a release is a re-run of an
+    # earlier release of the SAME document (the job page's re-run
+    # control), the earlier release's id -- the custody link the audit
+    # chain alone couldn't provide, because chain events commit to their
+    # PREDECESSOR EVENT, not to the business record they supersede.
+    # NULL for a first release, for a re-run of a legacy unwrapped job
+    # (no Release row exists to point at), and for every release created
+    # before this column existed. Deliberately a plain string, not an
+    # FK: a predecessor must survive its row being purged (retention)
+    # without breaking the successor's history.
+    predecessor_release_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # queued | done | refused | failed -- exactly Job.status's own
     # vocabulary, synced from the wrapped Job at the same moment the Job
     # itself transitions (see dispatcher.py's per-job completion hook and

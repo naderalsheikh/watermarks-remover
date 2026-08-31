@@ -1091,6 +1091,110 @@ def test_unattested_signed_pdf_stays_refused_and_records_none(client):
     assert body["release_result"]["attestation"] == "none"
 
 
+def test_rerun_release_links_its_predecessor_everywhere(client):
+    """SHOULD-4 (review 2026-08-30): a re-run of a refused release is
+    exactly the supersession event the custody record should disclose.
+    Before this, the re-run produced a NEW Release row with no reference
+    to the one it replaced -- two independent rows for the same document,
+    with only chronology hinting that one superseded the other (and the
+    audit chain can't carry it: its events commit to their predecessor
+    EVENT, not to the business record they supersede).
+
+    The full scenario, end to end: refused first release -> re-run with
+    the attestation -> the new release's audit event, Release row,
+    release_result.json and SIGNED release_packet.json all carry the
+    predecessor reference.
+    """
+    doc = _upload(client, "signed.pdf")
+    matter = doc["_matter"]
+    first = client.post(
+        f"/v1/matters/{matter}/documents/{doc['id']}/releases",
+        json={"profile_id": "counterparty_deal_room"},
+    ).json()
+    assert first["job"]["status"] == "refused"
+    original_release_id = first["release"]["id"]
+
+    # A first release must carry NO predecessor (null on the row, absent
+    # from the artifacts) -- a fabricated link would be worse than none.
+    assert first["release"]["predecessor_release_id"] is None
+    assert "predecessor_release_id" not in first["release_result"]
+
+    # The re-run, exactly what the job page's re-run panel sends.
+    rerun = client.post(
+        f"/v1/matters/{matter}/documents/{doc['id']}/releases",
+        json={
+            "profile_id": "counterparty_deal_room",
+            "signature_break_attestation": True,
+            "predecessor_release_id": original_release_id,
+        },
+    )
+    assert rerun.status_code == 200, rerun.text
+    rerun_body = rerun.json()
+    assert rerun_body["job"]["status"] == "done", rerun_body["job"].get("error")
+    new_release_id = rerun_body["release"]["id"]
+
+    # The Release row carries the link.
+    assert rerun_body["release"]["predecessor_release_id"] == original_release_id
+    fetched = client.get(f"/v1/matters/{matter}/releases/{new_release_id}").json()
+    assert fetched["predecessor_release_id"] == original_release_id
+
+    # release_result.json carries it -- the always-produced artifact, and
+    # the ONLY structured one the refused predecessor ever produced.
+    assert rerun_body["release_result"]["predecessor_release_id"] == original_release_id
+
+    # The audit chain commits to it: the re-run's release.created event
+    # names the predecessor inside the hash-covered payload.
+    audit = client.get(f"/v1/matters/{matter}/audit").json()
+    created = [
+        e for e in audit["events"]
+        if e["action"] == "release.created"
+        and (e["payload"] or {}).get("release_id") == new_release_id
+    ]
+    assert created, "release.created event missing for the re-run"
+    assert created[0]["payload"]["predecessor_release_id"] == original_release_id
+    assert audit["chain_ok"], audit["chain_detail"]
+
+    # The signed packet carries it: part of the canonical bytes the
+    # Ed25519 signature covers, and the signature verifies with the real
+    # offline verifier over the real public key.
+    bundle, packet = _bundle_packet(client, doc, rerun_body["job"])
+    assert packet["predecessor_release_id"] == original_release_id
+    import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        pk = client.get("/v1/custody-public-key").json()
+        key_file = td_path / "pub.pem"
+        key_file.write_text(pk["public_key_pem"])
+        zip_path = td_path / "packet.zip"
+        zip_path.write_bytes(bundle.content)
+        verifier = _load_verifier()
+        report = verifier.verify_release_packet(
+            zip_path, public_keys=verifier._load_public_keys([key_file])
+        )
+        assert report.signature_status == "verified", report.to_text()
+
+    # A predecessor from a DIFFERENT document refuses loudly (400), not
+    # silently recording a link into another document's history.
+    other_doc = _upload(client, "spa.docx", matter=matter)
+    cross = client.post(
+        f"/v1/matters/{other_doc['_matter']}/documents/{other_doc['id']}/releases",
+        json={"profile_id": "counterparty_deal_room",
+              "predecessor_release_id": original_release_id},
+    )
+    assert cross.status_code == 400, cross.text
+    assert "different document" in cross.json()["detail"]
+
+    # And a nonexistent predecessor 404s (via _release's matter-scoped
+    # lookup) rather than being recorded as an unverifiable string.
+    bogus = client.post(
+        f"/v1/matters/{matter}/documents/{doc['id']}/releases",
+        json={"profile_id": "counterparty_deal_room",
+              "predecessor_release_id": "nosuchrelease000"},
+    )
+    assert bogus.status_code == 404, bogus.text
+
+
 def test_macro_docm_job_refuses(client):
     doc = _upload(client, "macro.docm")
     r = client.post(

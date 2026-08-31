@@ -59,6 +59,7 @@ function release(partial: Partial<Release> = {}): Release {
     status: "refused",
     created_utc: "2026-08-01T00:00:00Z",
     finished_utc: "2026-08-01T00:01:00Z",
+    predecessor_release_id: null,
     ...partial,
   } as Release;
 }
@@ -90,6 +91,7 @@ describe("initialRerunState", () => {
       purpose: "Production set 3",
       intendedExternal: false,
       attestation: true,
+      predecessorId: "r1",
     });
   });
 
@@ -126,6 +128,7 @@ describe("initialRerunState", () => {
       purpose: "",
       intendedExternal: true,
       attestation: false,
+      predecessorId: null,
     });
   });
 
@@ -171,7 +174,36 @@ describe("buildRerunPayload", () => {
       intended_external: false,
       reason: "Production set 3",
       signature_break_attestation: true,
+      predecessor_release_id: "r1",
     });
+  });
+
+  it("names the immediate predecessor, never a transitive one", () => {
+    // Re-running a re-run (A refused -> B re-run -> this panel re-runs
+    // B): the new release must point at B -- the release it actually
+    // supersedes -- not inherit B's own link back to A. The custody
+    // record's supersession chain is one hop per release, by design.
+    const rerunOfRerun = release({
+      id: "r2",
+      predecessor_release_id: "r1",
+    });
+    const state = initialRerunState(job({ attestation: false }), rerunOfRerun, PROFILES);
+    expect(state.predecessorId).toBe("r2");
+    expect(buildRerunPayload(state).predecessor_release_id).toBe("r2");
+  });
+
+  it("omits predecessor_release_id entirely for a legacy job (no Release row to name)", () => {
+    // No Release row exists -> the re-run of a legacy job IS a first
+    // release from the custody record's point of view. "no field" is
+    // the backend's own first-release shape; sending null would be a
+    // distinct third shape nothing consumes.
+    const state = initialRerunState(
+      job({ release_id: null, profile_id: null, policy_id: "counterparty" }),
+      null,
+      PROFILES,
+    );
+    const payload = buildRerunPayload(state);
+    expect("predecessor_release_id" in payload).toBe(false);
   });
 
   it("sends ReleaseBody's own defaults when nothing was prefilled", () => {
@@ -186,6 +218,7 @@ describe("buildRerunPayload", () => {
       purpose: "",
       intendedExternal: true,
       attestation: false,
+      predecessorId: null,
     });
     expect(payload.recipient_type).toBe("other");
     expect(payload.intended_external).toBe(true);
@@ -201,6 +234,7 @@ describe("buildRerunPayload", () => {
       purpose: "Re-run after refusal",
       intendedExternal: true,
       attestation: false,
+      predecessorId: "r1",
     });
     expect(payload.reason).toBe(payload.purpose);
     expect(payload.reason).toBe("Re-run after refusal");

@@ -293,6 +293,10 @@ export type Release = {
   status: JobStatus;
   created_utc: string;
   finished_utc: string | null;
+  // SHOULD-4 (review 2026-08-30): the release this one re-runs
+  // (supersedes), when this row is a re-run. null for a first release
+  // and for every row created before the field existed.
+  predecessor_release_id: string | null;
 };
 
 // GET /v1/matters/{id}/releases/{id}/result — release_result.json's own

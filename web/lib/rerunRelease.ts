@@ -19,7 +19,11 @@
 import type { Job, Release, ReleaseProfile } from "@/lib/types";
 
 // The panel's editable state -- the shape the page keeps in useState
-// and the shape buildRerunPayload turns into the POST body.
+// and the shape buildRerunPayload turns into the POST body. predecessorId
+// is NOT editable state (SHOULD-4, review 2026-08-30): it rides along
+// from the original Release row -- an input to the custody record, not an
+// operator choice, so the panel never renders it and the operator can't
+// change it.
 export type RerunState = {
   profileId: string;
   recipientType: string;
@@ -27,6 +31,7 @@ export type RerunState = {
   purpose: string;
   intendedExternal: boolean;
   attestation: boolean;
+  predecessorId: string | null;
 };
 
 // A release-wrapped refused/failed job (job.release_id set) prefills
@@ -49,6 +54,14 @@ export function initialRerunState(
 ): RerunState {
   const profileId =
     release?.profile_id ?? job.profile_id ?? pickPrefilledProfile(job.policy_id, profiles);
+  // The re-run's predecessor: the Release row this panel is re-running
+  // right now -- the IMMEDIATE one, never the original row's own
+  // predecessor (re-running a re-run of A->B produces C pointing at B,
+  // the release C actually supersedes, not a transitive link back to A).
+  // null for a legacy job (no Release row exists to point at) -- the
+  // backend treats "no field" as "not a re-run", exactly what a legacy
+  // re-run honestly is.
+  const predecessorId = release?.id ?? null;
   if (release) {
     return {
       profileId,
@@ -57,6 +70,7 @@ export function initialRerunState(
       purpose: release.purpose ?? "",
       intendedExternal: release.intended_external ?? true,
       attestation: job.attestation,
+      predecessorId,
     };
   }
   return {
@@ -66,6 +80,7 @@ export function initialRerunState(
     purpose: "",
     intendedExternal: true,
     attestation: job.attestation,
+    predecessorId,
   };
 }
 
@@ -92,6 +107,10 @@ export function pickPrefilledProfile(
 // backend would have defaulted it to anyway. reason rides along with
 // purpose, the same one-shared-field decision ReleasePanel already
 // made (two backend fields, one operator question: "why").
+// predecessor_release_id (SHOULD-4, review 2026-08-30) is omitted when
+// null: "no field" is the backend's own first-release shape, and a
+// legacy re-run IS a first release from the custody record's point of
+// view.
 export function buildRerunPayload(state: RerunState): {
   profile_id: string;
   recipient_type: string;
@@ -100,6 +119,7 @@ export function buildRerunPayload(state: RerunState): {
   intended_external: boolean;
   reason: string;
   signature_break_attestation: boolean;
+  predecessor_release_id?: string;
 } {
   return {
     profile_id: state.profileId,
@@ -109,6 +129,9 @@ export function buildRerunPayload(state: RerunState): {
     intended_external: state.intendedExternal,
     reason: state.purpose,
     signature_break_attestation: state.attestation,
+    ...(state.predecessorId
+      ? { predecessor_release_id: state.predecessorId }
+      : {}),
   };
 }
 
