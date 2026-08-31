@@ -208,7 +208,7 @@ function AccessView({ matterId }: { matterId: string }) {
       <Link href={`/matters/view?id=${matterId}`} className="text-sm text-muted hover:text-foreground">
         ← Back to matter
       </Link>
-      <h1 className="mb-1 mt-2 text-2xl font-semibold tracking-tight">Access</h1>
+      <h1 className="font-serif mb-1 mt-2 text-2xl font-semibold tracking-tight">Access</h1>
       <p className="mb-6 text-sm text-muted">
         {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
       </p>

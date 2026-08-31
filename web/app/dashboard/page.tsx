@@ -133,7 +133,7 @@ export default function DashboardPage() {
       <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
         <div className="mb-8 flex items-end justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Operator overview</h1>
+            <h1 className="font-serif text-2xl font-semibold tracking-tight">Operator overview</h1>
             <p className="mt-1 text-sm text-muted">
               Server-computed totals across every matter you can read — not an estimate from
               loaded pages.
@@ -166,11 +166,11 @@ export default function DashboardPage() {
                 href="/matters"
                 className="rounded-md border border-border px-4 py-3 shadow-card hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
               >
-                <p className="text-2xl font-semibold">{data.totals.matters}</p>
+                <p className="font-serif text-2xl font-semibold">{data.totals.matters}</p>
                 <p className="text-sm text-muted">Matters</p>
               </Link>
               <div className="rounded-md border border-border px-4 py-3 shadow-card">
-                <p className="text-2xl font-semibold">{data.totals.documents}</p>
+                <p className="font-serif text-2xl font-semibold">{data.totals.documents}</p>
                 <p className="text-sm text-muted">Documents</p>
               </div>
               {/* The card's destination is the cross-matter problem-jobs
@@ -182,13 +182,13 @@ export default function DashboardPage() {
                 href="/matters/jobs"
                 className="rounded-md border border-red-600/40 px-4 py-3 shadow-card hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
               >
-                <p className="text-2xl font-semibold">
+                <p className="font-serif text-2xl font-semibold">
                   {data.totals.jobs.failed + data.totals.jobs.refused}
                 </p>
                 <p className="text-sm text-muted">Failed / refused jobs</p>
               </Link>
               <div className="rounded-md border border-border px-4 py-3 shadow-card">
-                <p className="text-2xl font-semibold">{data.totals.jobs.done}</p>
+                <p className="font-serif text-2xl font-semibold">{data.totals.jobs.done}</p>
                 <p className="text-sm text-muted">Completed jobs</p>
               </div>
             </section>

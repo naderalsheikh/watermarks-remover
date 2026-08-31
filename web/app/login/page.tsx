@@ -47,7 +47,9 @@ export default function LoginPage() {
     <main className="flex flex-1 items-center justify-center px-6">
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
-          <h1 className="text-xl font-semibold tracking-tight">CounselClear</h1>
+          <h1 className="font-serif text-xl font-medium tracking-tight">
+            Counsel<em className="italic">Clear</em>
+          </h1>
           {/* PR 44: was "Legal-document sanitization & custody" -- same
               conservative rewrite as layout.tsx's metadata description,
               matching the Release Gate framing every surface past this

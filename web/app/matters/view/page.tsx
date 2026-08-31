@@ -1093,7 +1093,7 @@ function MatterView({
           )}
         </div>
       </div>
-      <h1 className="mb-1 mt-2 flex items-center gap-2 text-2xl font-semibold tracking-tight">
+      <h1 className="font-serif mb-1 mt-2 flex items-center gap-2 text-2xl font-semibold tracking-tight">
         {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
         {matterQ.data?.is_demo && (
           <span className="rounded border border-border px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-muted">

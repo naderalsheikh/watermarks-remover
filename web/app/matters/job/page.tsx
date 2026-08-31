@@ -747,7 +747,7 @@ function JobView({
           <>
             <div className="mb-6">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-2xl font-semibold tracking-tight capitalize">
+                <h1 className="font-serif text-2xl font-semibold tracking-tight capitalize">
                   {/* job.kind is always "sanitize" for a release-wrapped
                       job (inspect never gets one) -- "Sanitize job" would
                       undersell what this page is actually about once a

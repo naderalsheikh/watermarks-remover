@@ -190,7 +190,7 @@ function AuditView({ matterId }: { matterId: string }) {
       </Link>
       <div className="mb-6 mt-2 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="mb-1 text-2xl font-semibold tracking-tight">Audit log</h1>
+          <h1 className="font-serif mb-1 text-2xl font-semibold tracking-tight">Audit log</h1>
           <p className="text-sm text-muted">
             {matterQ.data?.name ?? (matterQ.loading ? "Loading…" : "Matter")}
           </p>
