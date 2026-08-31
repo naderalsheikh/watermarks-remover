@@ -1,0 +1,70 @@
+# Per-Dockerfile override (BuildKit convention: <dockerfile-name>.dockerignore
+# in the context root takes precedence over the context-root .dockerignore,
+# for this Dockerfile's build only). service/.dockerignore stays unchanged
+# and still applies to the other 6 Dockerfiles in this context.
+#
+# Two problems, one file, same root cause:
+#
+# 1. Build defect: service/.dockerignore only whitelists scripts/, but
+#    Dockerfile.counselclear also COPYs requirements-app.txt and app/ --
+#    both outside that whitelist, so the build fails at the first COPY
+#    (see docs/commercial-surface-manifest.md §4). This file's base
+#    whitelist adds both.
+# 2. Commercial-surface exposure: scripts/ contains adapters that exist
+#    to interface with CtrlRegen (no LICENSE -- all-rights-reserved) and
+#    reverse-SynthID (non-commercial Research License). They were never
+#    vendored, but they shipped inside this image via the blanket
+#    `COPY scripts` (see docs/commercial-surface-manifest.md §0.1, §2.1,
+#    §2.3, §3 for the full classification and verification). Nothing in
+#    service/app/ imports any of the files denied below -- the product
+#    path depends only on image_meta.py/engine_api.py themselves, not on
+#    these standalone adapter/CLI/server files (verified by grep before
+#    this change; see the commit message).
+#
+# NOT addressed here: the member-level items in commercial-surface-manifest.md
+# §2.3 (specific functions/flags inside image_meta.py, engine_api.py,
+# text_detectors.py, rewrite_text.py -- e.g. run_synthid_score,
+# remove_pixel, MarkLLMTextDetector). Those modules are shared product
+# code and stay; removing individual members is a code change, not a
+# build-context change, and is deliberately out of scope for this pass.
+
+*
+!requirements-app.txt
+!app/
+!app/**
+!scripts/
+!scripts/**
+
+# File-level QUARANTINE items (commercial-surface-manifest.md §2.1):
+# dedicated adapter/harness CLIs, their pin files, and host bootstrap
+# scripts. Nothing in service/app/ imports any of these.
+scripts/clean_ctrlregen.py
+scripts/score_synthid.py
+scripts/synthid_score_server.py
+scripts/markdiffusion_harness.py
+scripts/detect_text_watermark.py
+scripts/bench_synthid_text.py
+scripts/requirements-ctrlregen.txt
+scripts/requirements-synthid-scorer.txt
+scripts/requirements-markllm.txt
+scripts/requirements-markdiffusion.txt
+scripts/setup_ctrlregen.sh
+scripts/setup_ctrlregen.ps1
+scripts/setup_synthid.sh
+scripts/setup_synthid.ps1
+scripts/setup_markllm.sh
+scripts/setup_markdiffusion.sh
+
+# Legacy wr-core CLI/server surface (commercial-surface-manifest.md
+# §2.3): standalone entry points for the upstream-utility tool, not
+# used by the CounselClear app. clean_image.py/inspect_image.py import
+# FROM image_meta.py (which stays) -- nothing imports these files
+# themselves.
+scripts/clean_image.py
+scripts/inspect_image.py
+scripts/server.py
+scripts/ui.html
+
+# Never ship build/runtime junk even though it sits under scripts/ or app/
+**/__pycache__/
+*.pyc
