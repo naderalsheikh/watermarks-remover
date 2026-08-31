@@ -177,6 +177,10 @@ export type CrossMatterJobRow = {
   profile_id: string | null;
   detail: string;
   created_utc: string;
+  // MINOR-6 (review 2026-08-30): truthful per-row signal from the
+  // backend (the principal holds "admin" on this job's matter) —
+  // gates the "View audit" link, which points at an admin-gated page.
+  can_view_audit: boolean;
 };
 
 // One row of the dashboard's RECENT ACTIVITY feed (the cross-matter

@@ -3610,6 +3610,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             for r in s.query(MatterAcl.matter_id).filter_by(user_id=user, perm="read").distinct()
         ]
         if matter_ids:
+            # MINOR-6 (review 2026-08-30): the row's "View audit" link
+            # pointed at an admin-gated page with no per-row permission
+            # signal, so the frontend couldn't honestly hide it for
+            # read-only matters. The admin subset of the SAME read-
+            # scoped matter list the route already computes -- one
+            # query, same rows -- so the flag is data the route
+            # actually has, never a guess the frontend would be faking
+            # a permission check with.
+            admin_matter_ids = {
+                r[0]
+                for r in s.query(MatterAcl.matter_id)
+                .filter_by(user_id=user, perm="admin")
+                .distinct()
+            }
             # Same demo-matter exclusion as the dashboard: real data, but
             # a shared walkthrough sample shouldn't inflate an operator's
             # cross-matter problem list.
@@ -3619,6 +3633,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             }
             if demo_ids:
                 matter_ids = [m for m in matter_ids if m not in demo_ids]
+        else:
+            admin_matter_ids = set()
         if not matter_ids:
             return {"jobs": [], "total": 0, "offset": offset, "limit": limit}
 
@@ -3653,6 +3669,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     ),
                     "detail": job.error[:300] or job.status,
                     "created_utc": job.created_utc,
+                    # MINOR-6 (review 2026-08-30): truthful per-row admin
+                    # grant for this principal (admin on the job's
+                    # matter), so the jobs list can gate its "View
+                    # audit" link on data that actually exists -- the
+                    # audit page is admin-gated server-side either way;
+                    # this only stops the link from promising a page a
+                    # read-only principal will 403 on.
+                    "can_view_audit": job.matter_id in admin_matter_ids,
                 }
                 for job, doc_name, matter_name in rows
             ],

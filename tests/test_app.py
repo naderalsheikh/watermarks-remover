@@ -462,6 +462,46 @@ def test_jobs_export_returns_every_job_as_csv_and_the_route_is_not_shadowed(clie
     assert all(row[10] == "" and row[11] == "" for row in rows[1:])
 
 
+def test_cross_matter_jobs_flag_can_view_audit_by_real_admin_grant(tmp_path, monkeypatch):
+    """MINOR-6 (review 2026-08-30): the jobs list's "View audit" link
+    pointed at an admin-gated page with no per-row permission signal.
+    The route now truthfully reports can_view_audit from the principal's
+    OWN admin grants (same ACL the audit page's own 403 checks), so the
+    frontend can hide the link for read-only rows instead of promising
+    a page that will refuse them. The flag must never be a constant --
+    the same job row is admin-viewable for one principal and not for
+    another."""
+    from app.config import Config
+    from app.security import issue_session
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw-jobs-audit-flag")
+    cfg = Config(tmp_path / "data")
+    c = TestClient(create_app(cfg.data_root))
+    assert c.post("/v1/auth/login", json={"password": "pw-jobs-audit-flag"}).status_code == 200
+
+    m = c.post("/v1/matters", json={"name": "m"}).json()["id"]
+    doc = _upload(c, "signed.pdf", matter=m)
+    refused = c.post(
+        f"/v1/matters/{m}/documents/{doc['id']}/releases",
+        json={"profile_id": "counterparty_deal_room"},
+    ).json()
+    assert refused["job"]["status"] == "refused"
+
+    # The operator (matter creator) holds admin: its row flags true.
+    rows = c.get("/v1/jobs").json()["jobs"]
+    assert rows and all(j["can_view_audit"] is True for j in rows)
+
+    # A read-only principal sees the SAME rows (read scope) but the flag
+    # flips false -- and the audit page itself would 403 them, so the
+    # flag is the truthful per-row statement, not a frontend guess.
+    reader = "oidc:reader"
+    c.put(f"/v1/matters/{m}/acl", json={"user_id": reader, "perm": "read"})
+    c.cookies.set("cc_session", issue_session(cfg, reader))
+    reader_rows = c.get("/v1/jobs").json()["jobs"]
+    assert reader_rows and all(j["can_view_audit"] is False for j in reader_rows)
+    assert c.get(f"/v1/matters/{m}/audit").status_code == 403  # the gate the flag describes
+
+
 def test_jobs_export_is_read_gated_not_admin_gated(tmp_path, monkeypatch):
     """Unlike audit/summary export (admin), jobs export matches the plain
     jobs-list route: read is enough, and a principal with no grant at all
