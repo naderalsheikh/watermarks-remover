@@ -328,6 +328,122 @@ def test_missing_original_sha256_field_fails_schema(tmp_path):
     assert any("original_sha256" in e for e in report.errors)
 
 
+# --- schema_version / schema_sha256: proof an artifact was built against
+# --- a published contract (PR 63) --------------------------------------------
+#
+# Emitters stamp every artifact with schema_version (the published
+# schema's own version) and schema_sha256 (sha256 of the published
+# schema FILE's bytes). The verifier recomputes the latter against the
+# schema file shipped alongside it -- so a bundle built against a
+# different contract than the one the operator is verifying with fails
+# loudly instead of re-hashing clean.
+
+
+def _schema_file_bytes(name: str) -> bytes:
+    return (verifier.SCHEMA_DIR / name).read_bytes()
+
+
+def test_schema_pinned_packet_adds_schema_cross_checks(tmp_path):
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    packet["schema_version"] = 1
+    packet["schema_sha256"] = _sha256(_schema_file_bytes("release_packet.schema.json"))
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+    manifest = json.loads(files["manifest.json"])
+    manifest["schema_version"] = 1
+    manifest["schema_sha256"] = _sha256(_schema_file_bytes("manifest.schema.json"))
+    files["manifest.json"] = json.dumps(manifest, sort_keys=True).encode()
+    report = json.loads(files["report.json"])
+    report["schema_version"] = 1
+    report["schema_sha256"] = _sha256(_schema_file_bytes("report.schema.json"))
+    files["report.json"] = json.dumps(report, sort_keys=True).encode()
+    # Re-pin every content hash: the packet declares the sha256 of every
+    # sibling file, and all three just changed.
+    packet = json.loads(files["release_packet.json"])
+    packet["hashes"]["manifest_json_sha256"] = _sha256(files["manifest.json"])
+    packet["hashes"]["report_json_sha256"] = _sha256(files["report.json"])
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert report.valid, report.to_text()
+    names = {cc.name for cc in report.cross_checks}
+    assert "schema_sha256 (release_packet.json vs published schema)" in names
+    assert "schema_sha256 (manifest.json vs published schema)" in names
+    assert "schema_sha256 (report.json vs published schema)" in names
+    assert all(cc.status == "match" for cc in report.cross_checks if "schema_sha256" in cc.name)
+
+
+def test_packet_schema_hash_mismatch_fails_verification(tmp_path):
+    """The adversarial case the whole mechanism exists for: a bundle
+    whose artifacts declare a schema hash that is NOT the published
+    contract's -- e.g. built against a modified schema, or a schema
+    hash hand-edited into the packet -- must fail, not pass silently."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    packet["schema_version"] = 1
+    packet["schema_sha256"] = "f" * 64  # not the published file's hash
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid
+    check = next(
+        cc for cc in report.cross_checks if cc.name == "schema_sha256 (release_packet.json vs published schema)"
+    )
+    assert check.status == "mismatch"
+
+
+def test_packet_without_schema_pins_still_verifies(tmp_path):
+    """Backward compatibility, same discipline as attestation/
+    predecessor_release_id: a packet issued before schema pinning must
+    keep verifying. Absence is reported honestly ("unavailable"), never
+    silently ignored and never a failure."""
+    dir_path = _write_dir(tmp_path, _packet_files())
+    report = verifier.verify_release_packet(dir_path)
+    assert report.valid, report.to_text()
+    pin_checks = [cc for cc in report.cross_checks if "schema_sha256" in cc.name]
+    assert pin_checks and all(cc.status == "unavailable" for cc in pin_checks)
+
+
+def test_packet_missing_schema_version_with_hash_declared_fails_schema(tmp_path):
+    """schema_version present is REQUIRED whenever the schema pin is
+    claimed at all: a hash without its version is half a claim -- the
+    verifier would have to guess which contract was meant. Absent both
+    (pre-pin packet), fine; absent version with a hash, schema failure."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    packet["schema_sha256"] = _sha256(_schema_file_bytes("release_packet.schema.json"))
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid
+    assert not report.schema_ok
+    assert any("schema_version" in e for e in report.errors)
+
+
+def test_declared_schema_hashes_match_published_schema_files():
+    """The verifier's cross-check is only as honest as the schemas
+    shipped next to it: pin that the hashes the EMITTERS stamp into
+    artifacts are exactly the sha256 of the schema files in this repo,
+    both sides computed independently (emitter registry vs this test's
+    own read of the published file)."""
+    sys.path.insert(0, str(verifier.SCHEMA_DIR.parent))
+    try:
+        import schemas_meta
+    finally:
+        sys.path.remove(str(verifier.SCHEMA_DIR.parent))
+
+    for artifact, schema_name in (
+        ("manifest", "manifest.schema.json"),
+        ("report", "report.schema.json"),
+        ("release_packet", "release_packet.schema.json"),
+    ):
+        expected = _sha256(_schema_file_bytes(schema_name))
+        assert schemas_meta.SCHEMA_SHA256[artifact] == expected, artifact
+        assert schemas_meta.SCHEMA_VERSION[artifact] == 1, artifact
+
+
+
 def test_original_sha256_checked_against_included_original_file(tmp_path):
     original_bytes = b"the untouched original document bytes"
     files = _packet_files(original_sha256=_sha256(original_bytes))

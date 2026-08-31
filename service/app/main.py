@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import custody as custody_mod  # WORM storage only — never parses documents
+import schemas_meta  # published-schema registry: pins artifacts to contracts (PR 63)
 from common import MAX_INPUT_BYTES  # a size constant, not a parser
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -3167,6 +3168,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         deriv_bytes_by_name = {name: (deriv_dir / name).read_bytes() for name in deriv_names}
         report = {
             "report_version": 1,
+            # PR 63: the published contract this report was built against
+            # -- schema version + sha256 of the published schema file's
+            # bytes, recomputable offline by the verifier.
+            "schema_version": schemas_meta.SCHEMA_VERSION["report"],
+            "schema_sha256": schemas_meta.SCHEMA_SHA256["report"],
             "verification": (job.result_json or {}).get("manifest", {}).get("verification"),
             "findings_before": (job.result_json or {}).get("manifest", {}).get("findings_before"),
             "action_records": (job.result_json or {}).get("manifest", {}).get("action_records", []),
@@ -3237,6 +3243,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "spec_version": "1.0",
             "packet_id": job.id,
             "release_id": release.id if release else None,
+            # PR 63: the published contract this packet was built against,
+            # stamped BEFORE signing below so it lands inside the signed
+            # canonical bytes -- a custody fact the signature must cover,
+            # the same way attestation/legal_justifications are. (The
+            # pin names the schema the EMITTER built against; it is not
+            # an assertion that the verifier's own schema is this one --
+            # the verifier recomputes and compares, and a mismatch fails
+            # the packet rather than re-hashing clean.)
+            "schema_version": schemas_meta.SCHEMA_VERSION["release_packet"],
+            "schema_sha256": schemas_meta.SCHEMA_SHA256["release_packet"],
             # Nullable as a whole (mirrors release_id): absent for a
             # legacy, unwrapped job. Otherwise the same recipient/purpose/
             # intent context release_result.json already carries -- a

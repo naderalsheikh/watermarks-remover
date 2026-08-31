@@ -14,6 +14,8 @@ Two artifact shapes, three entry points:
 - `verify_release_packet()` -- a full release packet (.zip or extracted
   directory): derivative + manifest.json + report.json + certificate.html
   + release_packet.json + README.txt. Only exists for a `done` release.
+  Also schema-pin-checks every member that declares schema_version +
+  schema_sha256 (PR 63; see "Schema pins" below).
 - `verify_release_result()` -- `release_result.json` on its own (a bare
   file, or a directory containing it and optionally a sibling
   certificate.html): the lightweight artifact PR 39's Release object
@@ -62,6 +64,15 @@ statement about what this release does not yet do). Exit code 1: at
 least one check failed (a missing file, a hash mismatch, a schema
 problem, or a cross-check disagreement).
 
+Schema pins (PR 63): every artifact an emitter stamps with
+schema_version + schema_sha256 names the published contract it was
+built against. When present, the pin's hash is recomputed against the
+schema file shipped alongside this verifier and a disagreement fails
+the packet -- a bundle built against a different contract can never
+re-hash clean against the published one. An artifact with no pin
+predates pinning: reported as "unavailable", never a failure, so
+pre-PR-63 packets keep verifying.
+
 Top-line wording: a packet or result carrying a `release_id` (PR 39's
 Release-aware artifacts -- which is every one this tool now produces)
 is reported as INTERNALLY CONSISTENT / INTERNALLY INCONSISTENT, never
@@ -101,6 +112,7 @@ ORIGIN, not its timestamp.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import io
 import json
@@ -135,6 +147,92 @@ _FALLBACK_RELEASE_PACKET_FIELDS = (
 )
 
 REQUIRED_SIBLING_FILES = ("manifest.json", "report.json", "certificate.html", "README.txt")
+
+
+def _published_schema_sha256(schema_name: str) -> str | None:
+    """sha256 of the shipped schema file's bytes, or None when the
+    schema file isn't deployed alongside this verifier. The pin's whole
+    meaning is 'the artifact was built against THIS published contract',
+    so the comparison target is the file shipped here, recomputed -- never
+    a hash hardcoded in this tool, which could drift from the file it
+    claims to describe. Stdlib-only, same as the rest of this module."""
+    try:
+        return _sha256((SCHEMA_DIR / schema_name).read_bytes())
+    except OSError:
+        return None
+
+
+# Which artifact members get a schema-pin cross-check, and against which
+# published schema. Keys are packet member names; the artifact json is
+# parsed from those members. report.json is only produced for a done
+# release's packet, and manifest.json likewise only exists for a
+# sanitize job with a bundle -- an absent member is "unavailable", not
+# a failure, mirroring how the packet-vs-result agreement treats fields
+# not present on both sides.
+_SCHEMA_PINNED_MEMBERS = {
+    "release_packet.json": "release_packet.schema.json",
+    "manifest.json": "manifest.schema.json",
+    "report.json": "report.schema.json",
+}
+
+
+def _schema_pin_cross_checks(
+    artifacts: dict[str, dict],
+) -> tuple[list[CrossCheck], list[str]]:
+    """One cross-check per member declaring a schema pin: the artifact's
+    schema_sha256 vs this verifier's own recomputation from the
+    published schema file. Returns (cross_checks, errors) -- errors
+    carries the schema-pin violations that belong to the required-field
+    check (a declared hash without its schema_version is half a claim;
+    the verifier must not guess which contract was meant), while the
+    check proper reports match/mismatch/unavailable.
+
+    Backward compatibility, same discipline as attestation/
+    predecessor_release_id: an artifact carrying no pin at all
+    predates pinning and reports "unavailable" -- never a failure."""
+    checks: list[CrossCheck] = []
+    errors: list[str] = []
+    for member, schema_name in _SCHEMA_PINNED_MEMBERS.items():
+        artifact = artifacts.get(member)
+        if not isinstance(artifact, dict):
+            continue
+        declared = artifact.get("schema_sha256")
+        version = artifact.get("schema_version")
+        label = f"{member} vs published schema"
+        if declared is None and version is None:
+            checks.append(
+                CrossCheck(
+                    f"schema_sha256 ({label})",
+                    "unavailable",
+                    "artifact predates schema pinning (no schema_version/schema_sha256 declared)",
+                )
+            )
+            continue
+        if version is None:
+            errors.append(
+                f"{member} declares schema_sha256 without schema_version -- "
+                "the pin is incomplete; refusing to guess which contract was meant"
+            )
+            continue
+        expected = _published_schema_sha256(schema_name)
+        if expected is None:
+            checks.append(
+                CrossCheck(
+                    f"schema_sha256 ({label})",
+                    "unavailable",
+                    f"published schema file {schema_name} not shipped with this verifier",
+                )
+            )
+            continue
+        status = "match" if declared == expected else "mismatch"
+        detail = "" if status == "match" else (
+            "artifact was built against a different contract than the published "
+            f"{schema_name} shipped with this verifier"
+        )
+        checks.append(
+            CrossCheck(f"schema_sha256 ({label})", status, detail)
+        )
+    return checks, errors
 
 # PR 39: release_result.json's own required fields -- a much smaller,
 # derivative-free artifact than release_packet.json, produced for EVERY
@@ -304,7 +402,7 @@ class VerificationReport:
             lines.append(f"  {fc.name}: {marker}" + (f" -- {fc.detail}" if fc.detail else ""))
         if self.cross_checks:
             lines.append("")
-            lines.append("Cross-checks (release_packet.json vs. manifest.json):")
+            lines.append("Cross-checks (release_packet.json vs. manifest.json and published schemas):")
             for cc in self.cross_checks:
                 marker = {"match": "ok", "mismatch": "MISMATCH", "unavailable": "not checkable"}[cc.status]
                 lines.append(f"  {cc.name}: {marker}" + (f" -- {cc.detail}" if cc.detail else ""))
@@ -804,6 +902,24 @@ def verify_release_packet(
             schema_ok = False
             errors.append(f"release_packet.json missing required field: {field_name!r}")
 
+    # PR 63: schema-pin cross-checks. The packet's own schema_ok already
+    # ran, so the pin check on release_packet.json itself only adds
+    # signal; manifest.json/report.json members are parsed here (they are
+    # only parse-required later for their own checks -- a malformed one
+    # must not crash the pin check, it surfaces in its own file check /
+    # cross-check below).
+    pinned_artifacts: dict[str, dict] = {"release_packet.json": manifest}
+    for member in ("manifest.json", "report.json"):
+        if member in files:
+            # A malformed member is not the pin check's failure to report;
+            # it surfaces in its own hash/cross-check paths below.
+            with contextlib.suppress(json.JSONDecodeError):
+                pinned_artifacts[member] = json.loads(files[member])
+    pin_checks, pin_errors = _schema_pin_cross_checks(pinned_artifacts)
+    if pin_errors:
+        schema_ok = False
+        errors.extend(pin_errors)
+
     file_checks: list[FileCheck] = []
 
     def _check_hash(display_name: str, arcnames: list[str], expected: str | None) -> None:
@@ -873,6 +989,7 @@ def verify_release_packet(
             file_checks.append(FileCheck(req, "missing", "required file absent from packet"))
 
     cross_checks: list[CrossCheck] = []
+    cross_checks.extend(pin_checks)
     if schema_ok and "manifest.json" in files:
         try:
             inner_manifest = json.loads(files["manifest.json"])

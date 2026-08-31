@@ -2,11 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://counselclear.local/schemas/report.v1.schema.json",
   "title": "CounselClear Release Packet Report v1",
+  "version": 1,
   "type": "object",
   "required": ["report_version", "verification", "findings_before", "action_records"],
   "additionalProperties": false,
   "properties": {
     "report_version": { "const": 1 },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "_comment_optional": "not in required -- reports issued before 2026-08-31 carry no schema pin and must keep validating; names the published contract this report was built against"
+    },
+    "schema_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "_comment_optional": "not in required -- reports issued before 2026-08-31 carry no schema pin and must keep validating; sha256 of the published report.schema.json file's bytes, recomputed by the offline verifier against the schema shipped next to it"
+    },
     "verification": {
       "type": ["object", "null"]
     },

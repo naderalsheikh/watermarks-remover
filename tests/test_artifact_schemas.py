@@ -7,6 +7,7 @@ and release_result.json.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -148,6 +149,31 @@ def test_emit_manifest_matches_published_schema():
     jsonschema.validate(manifest, _schema("manifest.schema.json"))
 
 
+def test_emit_manifest_carries_schema_pin():
+    """PR 63: the manifest doesn't just match the published schema, it
+    NAMES it -- schema_version + schema_sha256 stamped by the emitter,
+    checked against the published file here independently (the same
+    recomputation tools/counselclear_verify_release_packet.py performs
+    offline)."""
+    manifest = emit_manifest(
+        original_name="SPA.docx",
+        original_sha256="a" * 64,
+        original_bytes=123,
+        derivative_name_="SPA.external.docx",
+        derivative_sha256="b" * 64,
+        derivative_bytes=100,
+        policy_id="external_sharing",
+        actions=[],
+        processor={"git_sha": "unknown", "tools": {}},
+        findings_before=[],
+        verification={"pass": True, "checks": []},
+    )
+    assert manifest["schema_version"] == 1
+    assert manifest["schema_sha256"] == hashlib.sha256(
+        (SCHEMA_DIR / "manifest.schema.json").read_bytes()
+    ).hexdigest()
+
+
 def test_real_release_artifacts_match_published_schemas(client):
     matter_id = _matter(client)
     document_id = _upload(client, matter_id, "spa.docx")
@@ -173,6 +199,21 @@ def test_real_release_artifacts_match_published_schemas(client):
     jsonschema.validate(report, _schema("report.schema.json"))
     jsonschema.validate(release_packet, _schema("release_packet.schema.json"))
     assert report["report_version"] == 1
+    # PR 63: every artifact in the bundle names the published contract
+    # it was built against -- version + file hash, checked here against
+    # the same published files the schemas above came from.
+    assert manifest["schema_version"] == 1
+    assert manifest["schema_sha256"] == hashlib.sha256(
+        (SCHEMA_DIR / "manifest.schema.json").read_bytes()
+    ).hexdigest()
+    assert report["schema_version"] == 1
+    assert report["schema_sha256"] == hashlib.sha256(
+        (SCHEMA_DIR / "report.schema.json").read_bytes()
+    ).hexdigest()
+    assert release_packet["schema_version"] == 1
+    assert release_packet["schema_sha256"] == hashlib.sha256(
+        (SCHEMA_DIR / "release_packet.schema.json").read_bytes()
+    ).hexdigest()
     expected = [
         {
             "subtype": "comments_and_notes",

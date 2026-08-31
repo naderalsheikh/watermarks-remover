@@ -23,6 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from schemas_meta import SCHEMA_SHA256, SCHEMA_VERSION
+
 MANIFEST_VERSION = 1
 PRODUCT = "counselclear"
 
@@ -136,6 +138,13 @@ def emit_manifest(
     manifest: dict[str, Any] = {
         "manifest_version": MANIFEST_VERSION,
         "product": PRODUCT,
+        # PR 63: the published contract this record was built against --
+        # the schema's own version plus sha256 of the published schema
+        # file's bytes, so an offline verifier holding the same schemas
+        # can prove it (and a bundle built against a different contract
+        # fails loudly instead of re-hashing clean).
+        "schema_version": SCHEMA_VERSION["manifest"],
+        "schema_sha256": SCHEMA_SHA256["manifest"],
         "original": {
             "filename": Path(original_name).name,
             "sha256": original_sha256,
