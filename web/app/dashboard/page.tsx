@@ -164,12 +164,12 @@ export default function DashboardPage() {
             <section className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
               <Link
                 href="/matters"
-                className="rounded-md border border-border px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                className="rounded-md border border-border px-4 py-3 shadow-card hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
               >
                 <p className="text-2xl font-semibold">{data.totals.matters}</p>
                 <p className="text-sm text-muted">Matters</p>
               </Link>
-              <div className="rounded-md border border-border px-4 py-3">
+              <div className="rounded-md border border-border px-4 py-3 shadow-card">
                 <p className="text-2xl font-semibold">{data.totals.documents}</p>
                 <p className="text-sm text-muted">Documents</p>
               </div>
@@ -180,14 +180,14 @@ export default function DashboardPage() {
                   paths. */}
               <Link
                 href="/matters/jobs"
-                className="rounded-md border border-red-600/40 px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                className="rounded-md border border-red-600/40 px-4 py-3 shadow-card hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
               >
                 <p className="text-2xl font-semibold">
                   {data.totals.jobs.failed + data.totals.jobs.refused}
                 </p>
                 <p className="text-sm text-muted">Failed / refused jobs</p>
               </Link>
-              <div className="rounded-md border border-border px-4 py-3">
+              <div className="rounded-md border border-border px-4 py-3 shadow-card">
                 <p className="text-2xl font-semibold">{data.totals.jobs.done}</p>
                 <p className="text-sm text-muted">Completed jobs</p>
               </div>
@@ -227,7 +227,7 @@ export default function DashboardPage() {
                       key={t.value}
                       onClick={() => setTab(t.value)}
                       aria-pressed={tab === t.value}
-                      className={`rounded px-2 py-1.5 text-xs ${
+                      className={`rounded-md px-2 py-1.5 text-xs ${
                         tab === t.value
                           ? "bg-accent text-white"
                           : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -249,7 +249,7 @@ export default function DashboardPage() {
                   items right now.
                 </div>
               ) : (
-                <ul className="divide-y divide-border rounded-md border border-border">
+                <ul className="divide-y divide-border rounded-md border border-border shadow-card">
                   {visibleAttention.map((item) => {
                     const meta = ATTENTION_META[item.type];
                     const showOpenMatter = item.type !== "stale";
@@ -342,7 +342,7 @@ export default function DashboardPage() {
                   {recentEmptyStateText(data.admin_matters, data.totals.matters)}
                 </div>
               ) : (
-                <ul className="divide-y divide-border rounded-md border border-border">
+                <ul className="divide-y divide-border rounded-md border border-border shadow-card">
                   {data.recent.map((e, i) => (
                     <li key={`${e.at}:${e.action}:${i}`}>
                       {/* Deep-links to the most specific thing the event's

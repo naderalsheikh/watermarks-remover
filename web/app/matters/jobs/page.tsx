@@ -80,7 +80,7 @@ function JobsListInner() {
             key={t.value}
             onClick={() => setStatus(t.value)}
             aria-pressed={status === t.value}
-            className={`rounded px-2 py-1.5 text-xs ${
+            className={`rounded-md px-2 py-1.5 text-xs ${
               status === t.value
                 ? "bg-accent text-white"
                 : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -117,7 +117,7 @@ function JobsListInner() {
               Loaded {jobs.length} of {total} jobs.
             </p>
           )}
-          <ul className="divide-y divide-border rounded-md border border-border">
+          <ul className="divide-y divide-border rounded-md border border-border shadow-card">
             {jobs.map((j) => (
               <li key={j.job_id ?? `${j.matter_id}:${j.created_utc}`} className="px-4 py-3">
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
@@ -150,12 +150,21 @@ function JobsListInner() {
                   >
                     Open matter
                   </Link>
-                  <Link
-                    href={`/matters/audit?id=${j.matter_id}`}
-                    className="text-muted hover:text-foreground hover:underline"
-                  >
-                    View audit
-                  </Link>
+                  {/* Admin-gated like the job page's own audit link
+                      (hasMatterPerm(perms, "admin")): the audit page
+                      403s a read-only principal, so the link is hidden
+                      unless the backend row truthfully says this
+                      principal holds admin on that job's matter
+                      (can_view_audit, MINOR-6 review 2026-08-30) --
+                      never a link promising a page it can't open. */}
+                  {j.can_view_audit && (
+                    <Link
+                      href={`/matters/audit?id=${j.matter_id}`}
+                      className="text-muted hover:text-foreground hover:underline"
+                    >
+                      View audit
+                    </Link>
+                  )}
                 </div>
               </li>
             ))}
@@ -180,7 +189,7 @@ export default function JobsAcrossMattersPage() {
   return (
     <>
       <Header />
-      <Suspense fallback={<div className="flex-1 px-6 py-8 text-sm text-muted">Loading…</div>}>
+      <Suspense fallback={<div className="flex-1 px-6 py-8"><div className="h-8 w-40 animate-pulse rounded-md bg-black/[0.06] dark:bg-white/[0.06]" /></div>}>
         <JobsListInner />
       </Suspense>
     </>

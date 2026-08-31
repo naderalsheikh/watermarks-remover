@@ -276,7 +276,7 @@ function AuditView({ matterId }: { matterId: string }) {
                 <button
                   onClick={() => setCategoryFilter("all")}
                   aria-pressed={categoryFilter === "all"}
-                  className={`rounded px-2 py-1.5 text-xs ${
+                  className={`rounded-md px-2 py-1.5 text-xs ${
                     categoryFilter === "all"
                       ? "bg-accent text-white"
                       : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -289,7 +289,7 @@ function AuditView({ matterId }: { matterId: string }) {
                     key={cat}
                     onClick={() => setCategoryFilter(cat)}
                     aria-pressed={categoryFilter === cat}
-                    className={`rounded px-2 py-1.5 text-xs ${
+                    className={`rounded-md px-2 py-1.5 text-xs ${
                       categoryFilter === cat
                         ? "bg-accent text-white"
                         : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
@@ -317,7 +317,7 @@ function AuditView({ matterId }: { matterId: string }) {
                   PREV/ROW HASH columns) to squeeze into the viewport and
                   wrap into unreadably tall cells on a phone instead of the
                   wrapper's overflow-x-auto actually engaging. */}
-              <div className="overflow-x-auto rounded-md border border-border">
+              <div className="overflow-x-auto rounded-md border border-border shadow-card">
                 <table className="w-full min-w-[1100px] border-collapse text-left">
                   <thead>
                     <tr className="border-b border-border text-xs uppercase tracking-wide text-muted">
@@ -378,7 +378,7 @@ export default function AuditPage() {
   return (
     <>
       <Header />
-      <Suspense fallback={<div className="flex-1 px-6 py-8 text-sm text-muted">Loading…</div>}>
+      <Suspense fallback={<div className="flex-1 px-6 py-8"><div className="h-8 w-40 animate-pulse rounded-md bg-black/[0.06] dark:bg-white/[0.06]" /></div>}>
         <AuditInner />
       </Suspense>
     </>
