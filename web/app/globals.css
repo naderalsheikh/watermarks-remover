@@ -5,7 +5,9 @@
   --foreground: #171717;
   --border: #e5e7eb;
   --muted: #6b7280;
-  --accent: #1d4ed8;
+  /* Ink navy, not Tailwind's stock blue-700 -- see docs/design/accent-color.md
+     for the contrast math and rationale. 11:1 against white. */
+  --accent: #233876;
   --shadow-card: 0 1px 2px rgb(23 23 23 / 0.04), 0 1px 3px rgb(23 23 23 / 0.06);
   --shadow-card-hover: 0 2px 4px rgb(23 23 23 / 0.05), 0 3px 8px rgb(23 23 23 / 0.08);
   --focus-ring-color: var(--accent);
@@ -21,15 +23,24 @@
   --color-accent: var(--accent);
   --shadow-card: var(--shadow-card);
   --shadow-card-hover: var(--shadow-card-hover);
+  --font-serif: var(--font-display-serif), ui-serif, Georgia, serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
+    /* zinc-950, matching the zinc-800 border below instead of a neutral
+       that doesn't belong to the same gray family. */
+    --background: #09090b;
     --foreground: #ededed;
     --border: #27272a;
     --muted: #9ca3af;
-    --accent: #60a5fa;
+    /* Same navy hue as light mode, lifted for legibility on near-black.
+       4.9:1 as a white-on-fill button color (was 2.5:1, a real contrast
+       failure), 4.1:1 as standalone link/border text -- see
+       docs/design/accent-color.md; one hue cannot clear 4.5:1 against
+       both pure white and near-black at once, so fill contrast (the
+       higher-stakes CTA case) was prioritized. */
+    --accent: #5570c4;
     --shadow-card: 0 1px 2px rgb(0 0 0 / 0.5), 0 1px 3px rgb(0 0 0 / 0.4);
     --shadow-card-hover: 0 2px 4px rgb(0 0 0 / 0.5), 0 3px 8px rgb(0 0 0 / 0.45);
   }

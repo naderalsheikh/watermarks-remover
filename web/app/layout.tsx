@@ -1,5 +1,15 @@
 import type { Metadata } from "next";
+import { Newsreader } from "next/font/google";
 import "./globals.css";
+
+// Serif for the wordmark and page headings only -- body copy stays the
+// system sans stack. Self-hosted by next/font, so no external font request.
+const displaySerif = Newsreader({
+  subsets: ["latin"],
+  weight: ["500", "600"],
+  style: ["normal", "italic"],
+  variable: "--font-display-serif",
+});
 
 export const metadata: Metadata = {
   title: "CounselClear",
@@ -13,7 +23,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className="h-full antialiased">
+    <html lang="en" className={`h-full antialiased ${displaySerif.variable}`}>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
