@@ -88,6 +88,15 @@ _sign = sign_hmac_sha256
 # docs/counselclear-release-packet-signing.md for the full decision.
 
 PACKET_SIGNATURE_SIGNED_FIELDS = "release_packet.v1.canonical"
+# RFC 3161 TSA anchoring (2026-09-01): the anchor's digest is the sha256
+# of the packet's own signature bytes, so it cannot exist before the
+# signature that defines it -- the release flow signs the packet BEFORE
+# the anchor is stamped, with the anchor excluded from the signed
+# content, and this marker records that. The offline verifier recomputes
+# the same bytes from the marker (never by guessing which shape a packet
+# used). Must stay in sync with the verifier's constant; the sync test
+# pins it.
+PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR = "release_packet.v1.canonical-excluding-anchor"
 
 
 def _assert_canonical_scalar_types(node: object, path: str = "packet") -> None:
@@ -124,13 +133,20 @@ def _assert_canonical_scalar_types(node: object, path: str = "packet") -> None:
     )
 
 
-def packet_canonical_bytes(packet: dict) -> bytes:
+def packet_canonical_bytes(packet: dict, *, exclude_anchor: bool = False) -> bytes:
     """The exact bytes the signature covers: the packet dict minus its
     own ``signature`` block, re-serialized with a fixed canonical form.
     The packet FILE is written indent=2/sort_keys for humans; the
-    signature deliberately does not cover that formatting — only the
-    parsed content — so the verifier can reproduce these bytes from any
+    signature deliberately does not cover that formatting -- only the
+    parsed content -- so the verifier can reproduce these bytes from any
     parse of the file regardless of how it was pretty-printed.
+
+    exclude_anchor=True is the RFC 3161 TSA release flow: the anchor is
+    stamped AFTER signing (its digest is the signature's own sha256,
+    which cannot precede the signature), so the signed content excludes
+    it and the signature block's signed_fields marker records that fact
+    (PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR). The offline
+    verifier recomputes the same bytes from the marker.
 
     Stability: the packet schema carries strings, ints, nulls, booleans
     and nested dicts/lists only (no floats), so json.dumps with
@@ -145,6 +161,8 @@ def packet_canonical_bytes(packet: dict) -> bytes:
     and a deliberately-injected float is rejected.
     """
     content = {k: v for k, v in packet.items() if k != "signature"}
+    if exclude_anchor:
+        content.pop("anchor", None)
     _assert_canonical_scalar_types(content)
     return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
@@ -166,19 +184,24 @@ def custody_key_id(cfg: Config) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
-def sign_release_packet(cfg: Config, packet: dict) -> dict:
+def sign_release_packet(cfg: Config, packet: dict, *, exclude_anchor: bool = False) -> dict:
     """Sign *packet* (which must not yet carry a ``signature`` block)
     and return that block: algorithm/key_id/signed_fields/digest/value.
 
+    exclude_anchor=True signs the RFC 3161 TSA release shape: the anchor
+    is stamped AFTER signing (its digest is the signature's own sha256),
+    so the canonical bytes exclude it and signed_fields records that
+    fact -- see PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR.
+
     The digest is the sha256 of the canonical bytes (belt-and-suspenders
-    alongside the raw Ed25519 value — a verifier can confirm the signed
+    alongside the raw Ed25519 value -- a verifier can confirm the signed
     digest matches its own recomputation before the signature check, so
     a canonicalization drift surfaces as a digest mismatch rather than
     an opaque Ed25519 failure).
     """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    canonical = packet_canonical_bytes(packet)
+    canonical = packet_canonical_bytes(packet, exclude_anchor=exclude_anchor)
     digest = hashlib.sha256(canonical).hexdigest()
     key = cfg.ensure_custody_signing_key()
     if not isinstance(key, Ed25519PrivateKey):
@@ -187,7 +210,9 @@ def sign_release_packet(cfg: Config, packet: dict) -> dict:
     return {
         "algorithm": "ed25519",
         "key_id": custody_key_id(cfg),
-        "signed_fields": PACKET_SIGNATURE_SIGNED_FIELDS,
+        "signed_fields": (
+            PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR if exclude_anchor else PACKET_SIGNATURE_SIGNED_FIELDS
+        ),
         "digest": f"sha256:{digest}",
         "value": value,
     }

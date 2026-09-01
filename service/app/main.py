@@ -71,6 +71,7 @@ from .security import (
 )
 from .storage import StorageError as StorageError_
 from .storage import original_key, storage_from_config
+from .tsa import anchor_enabled, request_anchor
 
 # scripts.policies.NO_DECISION_MARKER, literal here for the same PR 17
 # reason as POLICIES below: main.py must not import the engine. Used only
@@ -3331,21 +3332,45 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # hashes, not just the hashes to themselves -- so a recipient
         # with only the public key can confirm nothing was altered after
         # issuance and that the packet is the operator's, without ever
-        # being able to forge one. Ordering is load-bearing: the anchor
-        # is set BEFORE signing because it is part of the signed content,
-        # which makes anchor.digest unsatisfiable -- a digest of the
-        # signed bytes cannot appear inside those bytes -- so the
-        # binding digest stays None here and lives in the signature
-        # block's own digest field one key over; anchor.reference
-        # carries the key_id, which is a property of the key, not of
-        # the signature, and is therefore stable pre-signing. See
+        # being able to forge one. See
         # docs/counselclear-release-packet-signing.md.
-        release_packet["anchor"] = {
-            "type": "ed25519-operator",
-            "digest": None,
-            "reference": custody_key_id(cfg),
-        }
-        release_packet["signature"] = sign_release_packet(cfg, release_packet)
+        #
+        # RFC 3161 TSA anchoring (2026-09-01,
+        # docs/rfc3161-anchor-implementation-proposal.md §2-§4): after
+        # signing, the packet's Ed25519 signature bytes are timestamped
+        # by the configured TSA (COUNSELCLEAR_TSA_URL; app/tsa.py). The
+        # token cannot precede the signature it binds -- the anchor
+        # digest IS the signature's own sha256 -- so with anchoring
+        # enabled the signature is computed over the packet EXCLUDING
+        # the anchor (signed_fields records that), and the anchor is
+        # stamped in afterwards. The nesting is content <- Ed25519
+        # signature <- TSA token, each link independently verified by
+        # the offline verifier. On ANY TSA failure the packet falls
+        # back to the operator anchor EXACTLY as before: the anchor
+        # goes back inside the signed bytes and the packet is re-signed
+        # with the historical marker, so an outage never fails or
+        # changes a release (see test_tsa_anchor_client.py for the
+        # never-blocks contract).
+        if anchor_enabled():
+            release_packet["signature"] = sign_release_packet(cfg, release_packet, exclude_anchor=True)
+            sig_bytes = bytes.fromhex(release_packet["signature"]["value"])
+            anchor = request_anchor(sig_bytes)
+            if anchor["type"] == "rfc3161-tsa":
+                release_packet["anchor"] = anchor
+            else:
+                release_packet["anchor"] = {
+                    "type": "ed25519-operator",
+                    "digest": None,
+                    "reference": custody_key_id(cfg),
+                }
+                release_packet["signature"] = sign_release_packet(cfg, release_packet)
+        else:
+            release_packet["anchor"] = {
+                "type": "ed25519-operator",
+                "digest": None,
+                "reference": custody_key_id(cfg),
+            }
+            release_packet["signature"] = sign_release_packet(cfg, release_packet)
         release_packet_bytes = json.dumps(release_packet, indent=2, sort_keys=True).encode("utf-8")
 
         buf = io.BytesIO()

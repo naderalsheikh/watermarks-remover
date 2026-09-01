@@ -145,9 +145,6 @@ def test_http_error_degrades_to_unanchored(mock_tsa):
 def test_tsa_refusal_status_degrades_to_unanchored(mock_tsa):
     """status != granted (rejection, or a token-less response) is a
     failure to anchor, not an error to propagate."""
-    # PKIStatusInfo with status=2 (rejection): INTEGER 2
-    refusal = bytes.fromhex("3003020102")
-    body = bytes.fromhex("3003020102") + bytes.fromhex("30") + b"\x00" * 0
     # full TimeStampResp: SEQUENCE { status SEQUENCE { INTEGER 2 } }
     resp = bytes.fromhex("3005") + bytes.fromhex("3003020102") + bytes.fromhex("3000")
     srv = mock_tsa({"body": resp})

@@ -899,6 +899,199 @@ def test_bundle_packet_tampered_metadata_fails_offline_verification(client, tmp_
     assert "signature check FAILED" in text
 
 
+def _fake_tsa_anchor(rsa_key, cert_der):
+    """A request_anchor stand-in that builds a REAL TimeStampToken over
+    the signature bytes it is handed (asn1crypto/cryptography, test-only)
+    -- so the end-to-end path can be exercised without a live TSA, and
+    the offline verifier can actually verify the resulting token."""
+    from asn1crypto import cms, core, tsp
+    from asn1crypto import x509 as asn1x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    def _anchor(signature_bytes, *, tsa_url=None, timeout_s=5.0):
+        digest = hashlib.sha256(signature_bytes).digest()
+        tstinfo = tsp.TSTInfo(
+            {
+                "version": "v1",
+                "policy": "2.16.840.1.114412.7.1",
+                "message_imprint": tsp.MessageImprint(
+                    {"hash_algorithm": {"algorithm": "sha256"}, "hashed_message": digest}
+                ),
+                "serial_number": 0x1234567890ABCDEF,
+                "gen_time": core.GeneralizedTime("20260901033557Z"),
+            }
+        )
+        econtent = tstinfo.dump()
+        signed_attrs = cms.CMSAttributes(
+            [
+                cms.CMSAttribute({"type": "content_type", "values": ["1.2.840.113549.1.9.16.1.4"]}),
+                cms.CMSAttribute(
+                    {"type": "message_digest", "values": [core.OctetString(hashlib.sha256(econtent).digest())]}
+                ),
+            ]
+        )
+        signature = rsa_key.sign(signed_attrs.untag().dump(), padding.PKCS1v15(), hashes.SHA256())
+        cert = asn1x509.Certificate.load(cert_der)
+        signer_info = cms.SignerInfo(
+            {
+                "version": "v1",
+                "sid": cms.SignerIdentifier(
+                    {
+                        "issuer_and_serial_number": cms.IssuerAndSerialNumber(
+                            {
+                                "issuer": cert["tbs_certificate"]["issuer"],
+                                "serial_number": cert["tbs_certificate"]["serial_number"],
+                            }
+                        )
+                    }
+                ),
+                "digest_algorithm": {"algorithm": "sha256", "parameters": core.Null()},
+                "signed_attrs": signed_attrs,
+                "signature_algorithm": {"algorithm": "1.2.840.113549.1.1.1", "parameters": core.Null()},
+                "signature": signature,
+            }
+        )
+        token = cms.ContentInfo(
+            {
+                "content_type": "signed_data",
+                "content": cms.SignedData(
+                    {
+                        "version": "v3",
+                        "digest_algorithms": [{"algorithm": "sha256"}],
+                        "encap_content_info": cms.EncapsulatedContentInfo(
+                            {"content_type": "1.2.840.113549.1.9.16.1.4", "content": cms.ParsableOctetString(econtent)}
+                        ),
+                        "certificates": [cert],
+                        "signer_infos": [signer_info],
+                    }
+                ),
+            }
+        ).dump()
+        import base64
+
+        return {
+            "type": "rfc3161-tsa",
+            "digest": digest.hex(),
+            "reference": base64.b64encode(token).decode("ascii"),
+        }
+
+    return _anchor
+
+
+def _test_rsa_key_and_cert():
+    """A fresh RSA keypair + self-signed certificate for the fake TSA."""
+    from datetime import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test TSA Responder")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(0x1234567890ABCDEF)
+        .not_valid_before(datetime(2026, 1, 1))
+        .not_valid_after(datetime(2027, 1, 1))
+        .sign(key, hashes.SHA256())
+    )
+    return key, cert.public_bytes(serialization.Encoding.DER)
+
+
+def test_job_bundle_tsa_success_stamps_rfc3161_anchor(client, tmp_path, monkeypatch):
+    """The RFC 3161 release flow end to end: job_bundle signs the packet
+    with the anchor EXCLUDED from the signed bytes (signed_fields records
+    it), the TSA call succeeds, the anchor carries the token, and the
+    offline verifier -- with the custody public key AND the TSA's
+    certificate pinned via --tsa-cert -- says VERIFIED on both the
+    signature and the anchor."""
+    from app import main as main_mod
+
+    rsa_key, cert_der = _test_rsa_key_and_cert()
+    monkeypatch.setattr(main_mod, "request_anchor", _fake_tsa_anchor(rsa_key, cert_der))
+
+    doc, job = _run_done_sanitize(client)
+    bundle, packet = _bundle_packet(client, doc, job)
+
+    assert packet["signature"]["signed_fields"] == "release_packet.v1.canonical-excluding-anchor"
+    anchor = packet["anchor"]
+    assert anchor["type"] == "rfc3161-tsa"
+    assert anchor["digest"] == hashlib.sha256(bytes.fromhex(packet["signature"]["value"])).hexdigest()
+    import base64
+
+    token = base64.b64decode(anchor["reference"])
+    assert token[:2] == b"0\x82"  # a real DER ContentInfo, not a placeholder
+
+    # The exact dance a recipient performs: public key + TSA cert pin.
+    pk = client.get("/v1/custody-public-key").json()
+    key_file = tmp_path / "pub.pem"
+    key_file.write_text(pk["public_key_pem"])
+    tsa_file = tmp_path / "tsa.der"
+    tsa_file.write_bytes(cert_der)
+    zip_path = tmp_path / "packet.zip"
+    zip_path.write_bytes(bundle.content)
+
+    verifier = _load_verifier()
+    keys = verifier._load_public_keys([key_file])
+    tsa_certs = verifier._load_tsa_certs([tsa_file])
+    report = verifier.verify_release_packet(zip_path, public_keys=keys, tsa_certs=tsa_certs)
+    assert report.valid, report.to_text()
+    assert report.signature_status == "verified"
+    assert report.anchor is not None and report.anchor.status == "verified"
+    assert "Externally anchored: yes (rfc3161-tsa)" in report.to_text()
+
+
+def test_job_bundle_tsa_failure_falls_back_to_operator_anchor(client, tmp_path, monkeypatch):
+    """A TSA outage must never change a release: when the TSA call fails,
+    job_bundle ships the packet EXACTLY as before -- operator anchor
+    inside the signed bytes, the historical signed_fields marker -- and
+    the offline verifier accepts it without any TSA pins."""
+    from app import main as main_mod
+    from app.tsa import UNANCHORED
+
+    monkeypatch.setattr(main_mod, "request_anchor", lambda *a, **k: dict(UNANCHORED))
+
+    doc, job = _run_done_sanitize(client)
+    bundle, packet = _bundle_packet(client, doc, job)
+
+    assert packet["signature"]["signed_fields"] == "release_packet.v1.canonical"
+    assert packet["anchor"] == {"type": "ed25519-operator", "digest": None, "reference": packet["signature"]["key_id"]}
+
+    pk = client.get("/v1/custody-public-key").json()
+    key_file = tmp_path / "pub.pem"
+    key_file.write_text(pk["public_key_pem"])
+    zip_path = tmp_path / "packet.zip"
+    zip_path.write_bytes(bundle.content)
+
+    verifier = _load_verifier()
+    keys = verifier._load_public_keys([key_file])
+    report = verifier.verify_release_packet(zip_path, public_keys=keys)
+    assert report.valid, report.to_text()
+    assert report.signature_status == "verified"
+    assert report.anchor is None  # operator anchor: no TSA section at all
+    assert "NOT EXTERNALLY ANCHORED" in report.to_text()
+
+
+def test_anchor_enabled_obeys_disable_env_values(monkeypatch):
+    """Zero-egress deployments opt out of the external TSA call with an
+    empty/off/none COUNSELCLEAR_TSA_URL; anything else (including unset)
+    enables it."""
+    from app.tsa import anchor_enabled
+
+    monkeypatch.delenv("COUNSELCLEAR_TSA_URL", raising=False)
+    assert anchor_enabled() is True
+    for disabled in ("", "none", "off", "disabled", "  OFF  "):
+        monkeypatch.setenv("COUNSELCLEAR_TSA_URL", disabled)
+        assert anchor_enabled() is False, disabled
+    monkeypatch.setenv("COUNSELCLEAR_TSA_URL", "http://tsa.example.com")
+    assert anchor_enabled() is True
+
+
 def test_custody_signing_key_is_provisioned_0600_and_idempotent(client, tmp_path):
     """Key lifecycle: first use auto-provisions the key file at 0600
     (private key never world/group-readable), and a second read returns

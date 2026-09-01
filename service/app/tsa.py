@@ -24,6 +24,7 @@ import base64
 import hashlib
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_TSA_URL = "http://timestamp.digicert.com"
@@ -32,7 +33,23 @@ DEFAULT_TSA_URL = "http://timestamp.digicert.com"
 DEFAULT_TIMEOUT_S = 5.0
 RETRIES = 1  # §4.5: "a single retry" then fall through
 
+# Zero-egress deployments (docs/counselclear-strategy.md) opt out of the
+# external timestamp call entirely; an empty/off/none value disables the
+# feature so the release path never touches the network.
+_TSA_DISABLED_VALUES = {"", "none", "off", "disabled"}
+
 UNANCHORED = {"type": "ed25519-operator", "digest": None, "reference": None}
+
+
+def anchor_enabled() -> bool:
+    """Whether RFC 3161 anchoring is enabled for this deployment.
+    COUNSELCLEAR_TSA_URL set to empty/none/off/disabled disables it (the
+    zero-egress case); UNSET means the default TSA -- explicitly
+    distinguished from the empty string, which is an opt-out."""
+    value = os.environ.get("COUNSELCLEAR_TSA_URL")
+    if value is None:
+        return True
+    return value.strip().lower() not in _TSA_DISABLED_VALUES
 
 # OID 2.16.840.1.101.3.4.2.1 (SHA-256) in DER. The query carries explicit
 # NULL AlgorithmIdentifier parameters: the default DigiCert TSA rejects
@@ -163,18 +180,25 @@ def request_anchor(
     raises: the caller is the release path (§4.5).
     """
     url = tsa_url or os.environ.get("COUNSELCLEAR_TSA_URL") or DEFAULT_TSA_URL
+    # Only http(s) is ever acceptable for the timestamp endpoint -- a
+    # misconfigured file:/custom-scheme URL is a configuration error,
+    # treated as a failed attempt (fall through to unanchored), never
+    # opened. This is what keeps the urlopen below audited (S310).
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        return dict(UNANCHORED)
     digest = hashlib.sha256(signature_bytes).digest()
     query = build_timestamp_query(digest)
     token: bytes | None = None
-    for attempt in range(1 + RETRIES):
+    for _attempt in range(1 + RETRIES):
         try:
-            req = urllib.request.Request(
+            req = urllib.request.Request(  # noqa: S310 -- scheme restricted to http/https above
                 url,
                 data=query,
                 headers={"Content-Type": "application/timestamp-query"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310
                 if resp.status != 200:
                     continue
                 token = _extract_token(resp.read())

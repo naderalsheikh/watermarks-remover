@@ -95,10 +95,14 @@ Anchor status: a packet's anchor.type is "none" only for legacy packets
 (pre-PR 57); new packets carry "ed25519-operator" -- the deployment's
 custody key's signature over the packet's canonical bytes, checkable
 offline with --public-key. That is an OPERATOR signature (the producing
-system vouching for its own output), not an external timestamp
-authority, transparency log, or customer-held WORM copy -- those remain
-unimplemented (docs/release-packet-verification-and-anchoring-
-proposal.md §5/§6 surveys the options). This tool will never print
+system vouching for its own output). When RFC 3161 TSA anchoring
+succeeded at creation time (docs/rfc3161-anchor-implementation-
+proposal.md), the anchor is "rfc3161-tsa": a TimeStampToken whose
+messageImprint covers the sha256 of the packet's own Ed25519 signature
+bytes, verified offline against the TSA signing certificate pinned in
+this tool (--tsa-cert adds pins). A TSA token attests WHEN a digest
+existed, by the TSA's own clock -- it is not a transparency log and it
+does not make content unforgeable. This tool will never print
 "unforgeable", "independently timestamped", "court-proof", or
 "unimpeachable", and never the bare word "VALID" for a Release-aware
 artifact -- see that proposal's §7. The only claims it makes are the
@@ -332,6 +336,18 @@ def _anchor_note(anchor_type: str | None, *, artifact: str) -> str:
             f"  this {artifact} match what it itself declares -- not that its own\n"
             "  claims are independently timestamped or unforgeable."
         )
+    if anchor_type == "rfc3161-tsa":
+        return (
+            f"  RFC 3161 TSA anchor: the reference is a TimeStampToken whose\n"
+            f"  messageImprint is the sha256 of this {artifact}'s own Ed25519\n"
+            "  signature bytes. The token's RSA signature was checked against\n"
+            "  the TSA signing certificate pinned in this verifier; the token\n"
+            "  asserts that digest existed at its genTime -- a time asserted by\n"
+            "  the TSA's own clock, not this system's. A TSA timestamp attests\n"
+            "  WHEN a digest existed; it does not make the packet unforgeable,\n"
+            "  court-proof, or unimpeachable, and it does not vouch for the\n"
+            "  derivative's content or the audit chain."
+        )
     return f"  anchor reference: (type={anchor_type})"
 
 
@@ -380,6 +396,8 @@ class VerificationReport:
     # between two in-packet fields.
     signature_status: str | None = None
     signature_detail: str = ""
+    # RFC 3161 TSA anchor verification (rfc3161-tsa anchors only).
+    anchor: TSAAnchorCheck | None = None
 
     def to_text(self) -> str:
         lines: list[str] = []
@@ -426,11 +444,32 @@ class VerificationReport:
         # "no" for every self-attestation form: an operator signature
         # (ed25519-operator) is the producing system vouching for its
         # own output -- stronger self-attestation, not external
-        # anchoring. A future genuinely external anchor type gets the
-        # "yes" rendering; none exists yet.
-        _external = self.anchor_type not in (None, "none", "ed25519-operator")
-        lines.append(f"Externally anchored: {'yes (' + self.anchor_type + ')' if _external else 'no'}")
+        # anchoring. An rfc3161-tsa anchor is external only when it
+        # actually VERIFIED; a failed anchor claim is "CLAIMED", never
+        # silently rendered as established.
+        if self.anchor_type == "rfc3161-tsa":
+            if self.anchor is not None and self.anchor.status == "verified":
+                lines.append(
+                    f"Externally anchored: yes (rfc3161-tsa) -- TimeStampToken verified "
+                    f"under a pinned TSA certificate, genTime {self.anchor.gen_time}"
+                )
+            else:
+                lines.append("Externally anchored: CLAIMED (rfc3161-tsa) -- anchor NOT verified (see RFC 3161 TSA anchor section)")
+        elif self.anchor_type not in (None, "none", "ed25519-operator"):
+            lines.append(f"Externally anchored: yes ({self.anchor_type})")
+        else:
+            lines.append("Externally anchored: no")
         lines.append(_anchor_note(self.anchor_type, artifact="packet"))
+        if self.anchor is not None and self.anchor_type == "rfc3161-tsa":
+            lines.append("")
+            lines.append("RFC 3161 TSA anchor:")
+            marker = {
+                "verified": "VERIFIED",
+                "unrecognized_tsa_certificate": "UNRECOGNIZED TSA CERTIFICATE",
+                "cannot_verify": "CANNOT VERIFY ANCHOR",
+            }[self.anchor.status]
+            lines.append(f"  {marker}")
+            lines.append(f"  {self.anchor.detail}")
         if self.audit_chain is not None:
             lines.append(self.audit_chain.to_text())
             for cc in self.chain_hash_checks:
@@ -649,14 +688,23 @@ def _parse_public_key_pem(pem_text: str) -> bytes:
     return der[-32:]
 
 
-def _packet_canonical_bytes(packet: dict) -> bytes:
+def _packet_canonical_bytes(packet: dict, *, exclude_anchor: bool = False) -> bytes:
     """The canonical bytes the server's signature covers: the packet
     minus its own signature block, sort_keys, compact separators,
     ensure_ascii. Mirrors service/app/security.py::
     packet_canonical_bytes byte-for-byte;
     test_packet_canonical_bytes_matches_app_construction pins that sync.
+
+    exclude_anchor=True is the RFC 3161 release flow: the anchor is
+    stamped AFTER signing (its digest is the signature's own sha256, which
+    cannot precede the signature), so the signed content excludes it and
+    the signature block's signed_fields marker records that fact. The
+    verifier recomputes the same bytes from the marker (see
+    check_packet_signature), never from guessing.
     """
     content = {k: v for k, v in packet.items() if k != "signature"}
+    if exclude_anchor:
+        content.pop("anchor", None)
     return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
@@ -682,7 +730,18 @@ def check_packet_signature(packet: dict, public_keys: dict[str, bytes]) -> tuple
     try:
         pub = public_keys[key_id]
         value = bytes.fromhex(sig.get("value", ""))
-        canonical = _packet_canonical_bytes(packet)
+        # The signature declares WHICH bytes it covers: with the RFC 3161
+        # release flow the anchor is stamped after signing and excluded
+        # from the signed content; anything else is the historical shape
+        # with the anchor inside. An unknown marker is a mismatch, never
+        # silently treated as either shape.
+        signed_fields = sig.get("signed_fields")
+        if signed_fields == _SIGNED_FIELDS_EXCLUDING_ANCHOR:
+            canonical = _packet_canonical_bytes(packet, exclude_anchor=True)
+        elif signed_fields in (None, _SIGNED_FIELDS_CANONICAL):
+            canonical = _packet_canonical_bytes(packet)
+        else:
+            return "mismatch", f"signature names unknown signed_fields marker {signed_fields!r}"
         ok = ed25519_verify(pub, canonical, value)
     except (ValueError, TypeError):
         return "mismatch", "signature block malformed"
@@ -865,8 +924,816 @@ def cross_check_audit_chain(csv_path: Path, packet_manifest: dict) -> AuditChain
     return check
 
 
+# --- RFC 3161 TSA anchor verification (2026-09-01) ----------------------------
+#
+# docs/rfc3161-anchor-implementation-proposal.md §5: a release packet may
+# carry "anchor": {"type": "rfc3161-tsa", "digest": <sha256 hex of the
+# packet's own Ed25519 signature bytes>, "reference": <base64 DER
+# TimeStampToken>}. The token is a CMS SignedData whose messageImprint is
+# that same digest, signed by a timestamp authority -- so the nesting is
+# content <- Ed25519 signature <- TSA token, each link independently
+# verified. The anchor is stamped AFTER signing (its digest is the
+# signature's own sha256, which cannot precede the signature), and
+# signed_fields records that the anchor was excluded from the signed
+# bytes (see check_packet_signature).
+#
+# Three mandatory conditions from the proposal:
+#  A. The TSA's signing certificate is pinned BYTES-DIRECTLY in this
+#     verifier (_PINNED_TSA_SIGNING_CERT_DER_HEX). No chain validation,
+#     no validity windows, no EKU parsing. A token whose signing cert
+#     does not match a pin reports its own distinct finding
+#     ("unrecognized TSA certificate"), never a signature failure.
+#  B. Strict, fail-closed DER parsing: any non-canonical encoding
+#     (long-form length where short-form suffices, BER indefinite
+#     length, anything outside the exact expected shape) yields
+#     "cannot verify anchor", never a lenient best-effort parse.
+#  C. Differential fuzz testing against asn1crypto/cryptography (test-
+#     only dependencies): tests/test_rfc3161_anchor_verification.py
+#     mutates the real captured token byte-wise and asserts agreement on
+#     accept/reject with the library stack for every mutation.
+#
+# The specific trap the proposal calls out: the CMS signature is computed
+# over signedAttrs re-tagged as a SET OF (0x31), NOT over the TSTInfo
+# content directly. This parser reconstructs the re-tagged signedAttrs,
+# verifies the RSA signature over THOSE bytes, and separately confirms
+# signedAttrs' contentType attribute is id-ct-TSTInfo and its
+# messageDigest attribute equals sha256 of the actual eContent -- a token
+# whose signature covers the content directly is rejected.
+#
+# Everything here is stdlib-only, like the rest of this module: the DER
+# walk, the CMS/TSTInfo grammar, and the RSA-PKCS1v15-SHA256 verification
+# (full expected-EM reconstruction and byte-for-byte comparison -- never
+# scanning for the 0x00 separator). asn1crypto and cryptography appear
+# ONLY in tests as the differential oracle.
+
+# The signing certificate of the default TSA (timestamp.digicert.com,
+# "DigiCert SHA256 RSA4096 Timestamp Responder 2025 1", serial
+# 0x0a80ef184b8df10582d1c476a7957468), captured from the fixture token.
+# Pinned as raw bytes, per condition A: the token's signing certificate
+# must equal this exactly. When the TSA rotates its signing cert this
+# constant must be updated -- accept that cost (proposal §5.1).
+_PINNED_TSA_SIGNING_CERT_DER_HEX = (
+    "308206ed308204d5a00302010202100a80ef184b8df10582d1c476a795746830"
+    "0d06092a864886f70d01010b05003069310b3009060355040613025553311730"
+    "15060355040a130e44696769436572742c20496e632e3141303f060355040313"
+    "38446967694365727420547275737465642047342054696d655374616d70696e"
+    "67205253413430393620534841323536203230323520434131301e170d323530"
+    "3630343030303030305a170d3336303930333233353935395a3063310b300906"
+    "035504061302555331173015060355040a130e44696769436572742c20496e63"
+    "2e313b3039060355040313324469676943657274205348413235362052534134"
+    "3039362054696d657374616d7020526573706f6e646572203230323520313082"
+    "0222300d06092a864886f70d01010105000382020f003082020a0282020100d0"
+    "46ac2d12c69ed0eaae6056b32b57ba6f51ff86700a01dfca37cc1942306332a8"
+    "99df14d671fb0bc0ebd1c54c17706c7c0148e78ba6f3e767c64dfafa3c744dbf"
+    "a4fbcec7f563f137214f2480d91e102a9543eddbcd661eb05b647a912bbd449b"
+    "7fe10860b92b2ca77aa899eeccaf15727d03bdb0cc7a6405a314360ecc38bc48"
+    "e84f51694b9e1d340a597ca63ad47025772b7134cf3d3d95d43ffe705965112b"
+    "e21fc623a0f16f6528cab3748a3b540d51d15dd9a770e38c0370a807f8944913"
+    "9420d0d3f7ca24b28b9331814e9c7a1187afbce8bb5ce738cf2875b92aa0afa5"
+    "276e4b0870526a2db9085c83db70d980f7c3ac92492bbedea53c0c3fa78a0349"
+    "166b7a2c01ef1f7292b8d2e864b7351dfd8934c54be10d4ea5bc9ba4c7b8e987"
+    "1e340d0b7cdb27a9c9e925e22d2bf0e129b3f14d3b86a17ef024d76844e4556c"
+    "f4755559c3b9278755995ce2c7803bee9ddac0b6ebf3d03dd3f9d61a35cc1a7e"
+    "c5421992948503cbd67685281cb5a7a965377420b2146d6ba12ae01e348796af"
+    "31ca62e78c26d22d9e3d90f9a4f22cb28b33432178fffdc3a0ad8eeb951c9395"
+    "a0827f0eda49444ec27bbbcc447a11a27e02588bee88d3752e4f58fb167aea56"
+    "b3b3690a1524e79e4ad3de95d61134c992177be8220305b4d1a1f3ac372121cd"
+    "9b421a69d08a0a451ed8b9f024a6bc4c8970094355c29a709f80f7fcfb79a702"
+    "03010001a382019530820191300c0603551d130101ff04023000301d0603551d"
+    "0e04160414e43bfcf231edfdfdd7f3917163195043cf618ce8301f0603551d23"
+    "041830168014ef6f534ae9e4067c7acae29056f62fd449eccb4e300e0603551d"
+    "0f0101ff04040302078030160603551d250101ff040c300a06082b0601050507"
+    "030830819506082b06010505070101048188308185302406082b060105050730"
+    "018618687474703a2f2f6f6373702e64696769636572742e636f6d305d06082b"
+    "060105050730028651687474703a2f2f636163657274732e6469676963657274"
+    "2e636f6d2f446967694365727454727573746564473454696d655374616d7069"
+    "6e6752534134303936534841323536323032354341312e637274305f0603551d"
+    "1f045830563054a052a050864e687474703a2f2f63726c332e64696769636572"
+    "742e636f6d2f446967694365727454727573746564473454696d655374616d70"
+    "696e6752534134303936534841323536323032354341312e63726c3020060355"
+    "1d20041930173008060667810c010402300b06096086480186fd6c0701300d06"
+    "092a864886f70d01010b05000382020100652aadf11c2704b9ae6041ecd10844"
+    "9e63407221f8e4f6224fdb358ba50ab56f85111a7c1605d1190fd801abd7cd68"
+    "d9858fa121f3f6264437f14fb0b493c15416a361fadb2181be0ee8b82383c2bc"
+    "7a50b8fa8582aa753f30bf6515f8a6f3ff722666527b617c010fd474a14eb63e"
+    "d83139aa3cef66cec920882dd060850fd92dc742f1c6d450eef9652a5b875a22"
+    "a4e85c513f250fc400181f6572d6534ce24cde91df281004731405a0796ddacf"
+    "6c5e8c458b34de1e286c4327c58397f1505129ed6e367cd055378b9e2da71e45"
+    "ff42abd79cd6fe6240c5931506b4c4da88b47dc23c54c6eda1102669ab253577"
+    "421b5fa5aaf3f815bad0e88c120579196a01cb84553d1c2ac6fecc9344b2e101"
+    "eceeff72ebd341ab2733d01670841f5639f3aefc22099f39104f0b524a918684"
+    "b7639d0e1e0698ed3fe5c1de9402b6fe04e540920da83afa25fc326075d277e5"
+    "74f17d4950fbc1e082df25d98bfbae86a770920571ba2305cc6545c186d0b221"
+    "a7a1af45e40680c818c506d5d52dc2ad6a99cc1b7547dc4980a7f8ec27715517"
+    "7f9dd525434e68c58cb6cd159516317b99caf80b7e0c8f7a1c09571c02f94a57"
+    "d8c49ecb6b9e22ef531c55644feba6d6fb21113696c90a3c82606da3f9b769c6"
+    "8ff50b2e2e3dc53701654f1ab6e7e4f84305fdc5ae882ecf3864fbe6a68beaf7"
+    "42bc796c86d8dd3573822148ec6ab7cd67"
+)
+# Extra pins come from --tsa-cert (repeatable; PEM or DER). The embedded
+# default is always in the set; operator-configured TSAs (proposal §6)
+# add theirs via the flag.
+_DEFAULT_TSA_PINS = (bytes.fromhex(_PINNED_TSA_SIGNING_CERT_DER_HEX),)
+
+# The signature-block marker that records WHICH bytes were signed. When
+# the release flow signs the packet before the anchor exists (RFC 3161
+# anchoring), the anchor is excluded from the signed content and
+# signed_fields carries the -excluding-anchor marker; otherwise the
+# anchor is part of the signed bytes exactly as before.
+_SIGNED_FIELDS_CANONICAL = "release_packet.v1.canonical"
+_SIGNED_FIELDS_EXCLUDING_ANCHOR = "release_packet.v1.canonical-excluding-anchor"
+
+_OID_ID_SIGNEDDATA = (1, 2, 840, 113549, 1, 7, 2)
+_OID_ID_CT_TSTINFO = (1, 2, 840, 113549, 1, 9, 16, 1, 4)
+_OID_SHA256 = (2, 16, 840, 1, 101, 3, 4, 2, 1)
+_OID_RSA_ENCRYPTION = (1, 2, 840, 113549, 1, 1, 1)
+_OID_ATTR_CONTENT_TYPE = (1, 2, 840, 113549, 1, 9, 3)
+_OID_ATTR_MESSAGE_DIGEST = (1, 2, 840, 113549, 1, 9, 4)
+_OID_SKI = (2, 5, 29, 14)
+
+
+class _DerError(ValueError):
+    """A strict-DER violation -- any of these fails the anchor check with
+    "cannot verify anchor", never a lenient best-effort parse."""
+
+
+def _der_read_tlv(buf: bytes, off: int) -> tuple[int, int, int]:
+    """Read one TLV at `off`: (tag, value_start, value_end). Strict
+    canonical-DER length rules: short form whenever possible, minimal
+    long-form octets otherwise, no indefinite (0x80) or reserved (0xFF)
+    lengths, no high-tag-number form. Raises _DerError on anything else.
+    The caller (the canonical walk / grammar walkers) enforces structure;
+    this enforces encoding."""
+    if off + 1 >= len(buf):
+        raise _DerError("truncated element")
+    tag = buf[off]
+    if tag & 0x1F == 0x1F:
+        raise _DerError("high-tag-number form")
+    l0 = buf[off + 1]
+    if l0 in (0x80, 0xFF):
+        raise _DerError("indefinite/reserved length")
+    if l0 < 0x80:
+        ln, hdr = l0, 2
+    else:
+        n = l0 & 0x7F
+        if n == 0 or n > 4 or off + 2 + n > len(buf):
+            raise _DerError("length too long")
+        ln = int.from_bytes(buf[off + 2 : off + 2 + n], "big")
+        if ln < 0x80 or (n > 1 and ln < 1 << (8 * (n - 1))):
+            raise _DerError("non-minimal length encoding")
+        hdr = 2 + n
+    end = off + hdr + ln
+    if end > len(buf):
+        raise _DerError("element overruns buffer")
+    return tag, off + hdr, end
+
+
+def _rfc3161_oid_arcs(val: bytes) -> tuple[int, ...]:
+    """Decode an OID value into its arcs. The canonical walk has already
+    validated minimal base-128 encoding; this is pure decoding. The first
+    subidentifier combines arcs 0 and 1 (40*x + y, X.690 §8.19), so it
+    must be split before comparison."""
+    subs = []
+    cur = count = 0
+    for b in val:
+        cur = (cur << 7) | (b & 0x7F)
+        count += 1
+        if not (b & 0x80):
+            subs.append(cur)
+            cur = count = 0
+    first = subs[0]
+    if first < 40:
+        return (0, first) + tuple(subs[1:])
+    if first < 80:
+        return (1, first - 40) + tuple(subs[1:])
+    return (2, first - 80) + tuple(subs[1:])
+
+
+def _rfc3161_check_oid(val: bytes) -> None:
+    if not val:
+        raise _DerError("empty OID")
+    arcs, cur, count, byte_counts = [], 0, 0, []
+    for b in val:
+        cur = (cur << 7) | (b & 0x7F)
+        count += 1
+        if not (b & 0x80):
+            arcs.append(cur)
+            byte_counts.append(count)
+            cur = count = 0
+    if count != 0 or len(arcs) < 2:
+        raise _DerError("malformed OID")
+    for arc, bc in zip(arcs, byte_counts):
+        if bc > 1 and arc < (1 << (7 * (bc - 1))):
+            raise _DerError("non-minimal OID arc")
+
+
+def _rfc3161_check_calendar(y: int, m: int, d: int, hh: int, mm: int, ss: int) -> None:
+    from datetime import datetime
+
+    try:
+        datetime(y, m, d, hh, mm, ss)
+    except ValueError as e:
+        raise _DerError(f"invalid time value: {e}") from e
+
+
+def _rfc3161_check_utctime(val: bytes) -> None:
+    if len(val) != 13 or not val[:12].isdigit() or val[12:13] != b"Z":
+        raise _DerError("non-canonical UTCTime")
+    yy = 2000 + int(val[0:2]) if int(val[0:2]) < 50 else 1900 + int(val[0:2])
+    _rfc3161_check_calendar(yy, int(val[2:4]), int(val[4:6]), int(val[6:8]), int(val[8:10]), int(val[10:12]))
+
+
+def _rfc3161_check_generalized_time(val: bytes) -> None:
+    if len(val) != 15 or not val[:14].isdigit() or val[14:15] != b"Z":
+        raise _DerError("non-canonical GeneralizedTime")
+    _rfc3161_check_calendar(
+        int(val[0:4]), int(val[4:6]), int(val[6:8]), int(val[8:10]), int(val[10:12]), int(val[12:14])
+    )
+
+
+_DER_PRINTABLE = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 '()+,-./:=?")
+
+
+def _rfc3161_canonical_walk(data: bytes) -> None:
+    """Strict canonical-DER walk over EVERY byte of the token (condition
+    B): minimal length encodings, no indefinite/reserved lengths, exact
+    consumption, canonical BOOLEAN/INTEGER/OID, canonical+valid times,
+    BIT STRING unused-bits <= 7, charset-valid strings. SET-OF ordering is
+    deliberately NOT enforced: the real DigiCert token's certificates
+    appear in descending order, so enforcing X.690 sorting would reject
+    the genuine fixture (the test-only oracle library agrees)."""
+
+    def walk(buf: bytes, lo: int, hi: int) -> None:
+        i = lo
+        while i < hi:
+            if i + 1 >= len(buf):
+                raise _DerError("truncated element")
+            tag = buf[i]
+            if tag & 0x1F == 0x1F:
+                raise _DerError("high-tag-number form")
+            l0 = buf[i + 1]
+            if l0 in (0x80, 0xFF):
+                raise _DerError("indefinite/reserved length")
+            if l0 < 0x80:
+                ln, hdr = l0, 2
+            else:
+                n = l0 & 0x7F
+                if n == 0 or n > 4 or i + 2 + n > len(buf):
+                    raise _DerError("length too long")
+                ln = int.from_bytes(buf[i + 2 : i + 2 + n], "big")
+                if ln < 0x80 or (n > 1 and ln < 1 << (8 * (n - 1))):
+                    raise _DerError("non-minimal length encoding")
+                hdr = 2 + n
+            end = i + hdr + ln
+            if end > len(buf) or end > hi:
+                raise _DerError("element overruns its structure")
+            val = buf[i + hdr : end]
+            if tag == 0x01:
+                if val not in (b"\x00", b"\xff"):
+                    raise _DerError("non-canonical BOOLEAN")
+            elif tag == 0x02:
+                if not val:
+                    raise _DerError("empty INTEGER")
+                if len(val) > 1 and (
+                    (val[0] == 0x00 and not (val[1] & 0x80)) or (val[0] == 0xFF and (val[1] & 0x80))
+                ):
+                    raise _DerError("non-minimal INTEGER")
+            elif tag == 0x05:
+                if val:
+                    raise _DerError("NULL with content")
+            elif tag == 0x06:
+                _rfc3161_check_oid(val)
+            elif tag == 0x03:
+                if not val or val[0] > 7:
+                    raise _DerError("invalid BIT STRING unused bits")
+            elif tag == 0x17:
+                _rfc3161_check_utctime(val)
+            elif tag == 0x18:
+                _rfc3161_check_generalized_time(val)
+            elif tag == 0x0C:
+                try:
+                    val.decode("utf-8")
+                except UnicodeDecodeError as e:
+                    raise _DerError("invalid UTF-8") from e
+            elif tag == 0x13:
+                if not all(chr(b) in _DER_PRINTABLE for b in val):
+                    raise _DerError("invalid PrintableString")
+            elif tag == 0x16:
+                if any(b > 0x7F for b in val):
+                    raise _DerError("invalid IA5String")
+            elif tag == 0x1E:
+                if len(val) % 2:
+                    raise _DerError("odd BMPString length")
+                try:
+                    val.decode("utf-16-be")
+                except UnicodeDecodeError as e:
+                    raise _DerError("invalid BMPString") from e
+            if tag & 0x20:
+                walk(buf, i + hdr, end)
+            i = end
+
+    walk(data, 0, len(data))
+
+
+def _rfc3161_children(buf: bytes) -> list[tuple[int, bytes, bytes]]:
+    """Split a buffer into its child TLVs: (tag, value, raw TLV bytes).
+    Every child is read with strict length rules; a malformed child
+    raises _DerError."""
+    out: list[tuple[int, bytes, bytes]] = []
+    i = 0
+    while i < len(buf):
+        tag = buf[i]
+        if tag & 0x1F == 0x1F:
+            raise _DerError("high-tag-number form")
+        l0 = buf[i + 1] if i + 1 < len(buf) else 0x80
+        if l0 in (0x80, 0xFF):
+            raise _DerError("indefinite/reserved length")
+        if l0 < 0x80:
+            ln, hdr = l0, 2
+        else:
+            n = l0 & 0x7F
+            if n == 0 or n > 4 or i + 2 + n > len(buf):
+                raise _DerError("length too long")
+            ln = int.from_bytes(buf[i + 2 : i + 2 + n], "big")
+            if ln < 0x80 or (n > 1 and ln < 1 << (8 * (n - 1))):
+                raise _DerError("non-minimal length encoding")
+            hdr = 2 + n
+        end = i + hdr + ln
+        if end > len(buf):
+            raise _DerError("element overruns buffer")
+        out.append((tag, buf[i + hdr : end], buf[i:end]))
+        i = end
+    return out
+
+
+def _rfc3161_require_algorithm(val: bytes, expected: tuple[int, ...], what: str, name: str) -> None:
+    """AlgorithmIdentifier ::= SEQUENCE { algorithm OID, parameters ANY
+    OPTIONAL }. The expected OID must match; parameters must be absent or
+    an explicit NULL (real-world tokens vary between the two -- the
+    proposal's trap list). Anything else fails closed."""
+    kids = _rfc3161_children(val)
+    if len(kids) not in (1, 2) or kids[0][0] != 0x06:
+        raise _DerError(f"malformed {what} AlgorithmIdentifier")
+    if _rfc3161_oid_arcs(kids[0][1]) != expected:
+        raise _DerError(f"{what} is not {name}")
+    if len(kids) == 2 and not (kids[1][0] == 0x05 and kids[1][1] == b""):
+        raise _DerError(f"{what} parameters must be NULL or absent")
+
+
+def _rfc3161_parse_spki(val: bytes) -> tuple[int, int]:
+    """SubjectPublicKeyInfo -> (RSA modulus n, exponent e). Only RSA
+    (rsaEncryption) is supported; anything else fails closed (no ECDSA in
+    this pass, per the proposal's scope)."""
+    kids = _rfc3161_children(val)
+    if len(kids) != 2 or kids[0][0] != 0x30 or kids[1][0] != 0x03:
+        raise _DerError("malformed SubjectPublicKeyInfo")
+    _rfc3161_require_algorithm(kids[0][1], _OID_RSA_ENCRYPTION, "SPKI algorithm", "RSA")
+    bit = kids[1][1]
+    if not bit or bit[0] != 0:
+        raise _DerError("subjectPublicKey must have zero unused bits")
+    rsa_seq = _rfc3161_children(bit[1:])
+    if len(rsa_seq) != 1 or rsa_seq[0][0] != 0x30:
+        raise _DerError("malformed RSAPublicKey")
+    rsa_kids = _rfc3161_children(rsa_seq[0][1])
+    if len(rsa_kids) != 2 or rsa_kids[0][0] != 0x02 or rsa_kids[1][0] != 0x02:
+        raise _DerError("malformed RSAPublicKey")
+    n = int.from_bytes(rsa_kids[0][1], "big")
+    e = int.from_bytes(rsa_kids[1][1], "big")
+    if n.bit_length() < 2048:
+        raise _DerError("RSA modulus too small")
+    if not (3 <= e <= 2**32):
+        raise _DerError("implausible RSA exponent")
+    return n, e
+
+
+def _rfc3161_parse_ski_extension(val: bytes) -> bytes | None:
+    """The subjectKeyIdentifier from a certificate's extensions [3], or
+    None when the certificate carries no SKI extension."""
+    seq = _rfc3161_children(val)
+    if len(seq) != 1 or seq[0][0] != 0x30:
+        raise _DerError("malformed extensions")
+    for ext in _rfc3161_children(seq[0][1]):
+        ek = _rfc3161_children(ext[1])
+        if len(ek) < 2 or ek[0][0] != 0x06:
+            raise _DerError("malformed extension")
+        if _rfc3161_oid_arcs(ek[0][1]) != _OID_SKI:
+            continue
+        vi = 1
+        if ek[vi][0] == 0x01:  # critical BOOLEAN DEFAULT FALSE
+            vi += 1
+        if vi >= len(ek) or ek[vi][0] != 0x04:
+            raise _DerError("malformed SKI extension value")
+        inner = _rfc3161_children(ek[vi][1])
+        if len(inner) != 1 or inner[0][0] != 0x04:
+            raise _DerError("malformed KeyIdentifier")
+        return inner[0][1]
+    return None
+
+
+def _rfc3161_parse_cert(der: bytes) -> dict:
+    """Parse exactly the fields of an X.509 certificate this verifier
+    needs -- serialNumber and issuer (for sid resolution), SPKI (for RSA
+    verification) and the SKI extension (for the SKI sid form). No
+    validity-window, chain, or EKU checks, per condition A."""
+    tag, vs, ve = _der_read_tlv(der, 0)
+    if ve != len(der) or tag != 0x30:
+        raise _DerError("certificate is not a SEQUENCE")
+    kids = _rfc3161_children(der[vs:ve])
+    if len(kids) != 3 or kids[0][0] != 0x30:
+        raise _DerError("malformed certificate")
+    tbs = _rfc3161_children(kids[0][1])
+    i = 0
+    if tbs[i][0] == 0xA0:  # version [0] EXPLICIT INTEGER, v1 certs omit it
+        i += 1
+    if i >= len(tbs) or tbs[i][0] != 0x02:
+        raise _DerError("certificate serialNumber missing")
+    serial_raw = tbs[i][2]
+    i += 1
+    if i >= len(tbs) or tbs[i][0] != 0x30:
+        raise _DerError("certificate signature algorithm missing")
+    i += 1
+    if i >= len(tbs) or tbs[i][0] != 0x30:
+        raise _DerError("certificate issuer missing")
+    issuer_raw = tbs[i][2]
+    i += 1
+    if i + 2 >= len(tbs) or tbs[i][0] != 0x30 or tbs[i + 1][0] != 0x30:
+        raise _DerError("certificate validity/subject missing")
+    i += 2
+    if i >= len(tbs) or tbs[i][0] != 0x30:
+        raise _DerError("certificate SPKI missing")
+    n, e = _rfc3161_parse_spki(tbs[i][1])
+    i += 1
+    ski = None
+    while i < len(tbs):
+        if tbs[i][0] == 0xA3:  # extensions [3] EXPLICIT
+            ski = _rfc3161_parse_ski_extension(tbs[i][1])
+        elif tbs[i][0] not in (0xA1, 0xA2):  # issuerUniqueID / subjectUniqueID
+            raise _DerError("unexpected tbsCertificate field")
+        i += 1
+    return {"serial": serial_raw, "issuer": issuer_raw, "n": n, "e": e, "ski": ski}
+
+
+def _rfc3161_parse_tstinfo(econtent: bytes) -> tuple[bytes, str]:
+    """Parse TSTInfo by FIELD PRESENCE, never fixed position: accuracy,
+    ordering, nonce, tsa [0] and extensions [1] are OPTIONAL (ordering is
+    DEFAULT FALSE and omitted in DER), so a positional parser breaks on
+    real tokens. `econtent` is the DER-encoded TSTInfo (a full SEQUENCE
+    TLV -- the double-wrap the proposal warns about). Returns
+    (hashed_message, gen_time_iso)."""
+    tag, vs, ve = _der_read_tlv(econtent, 0)
+    if ve != len(econtent) or tag != 0x30:
+        raise _DerError("TSTInfo is not a SEQUENCE")
+    kids = _rfc3161_children(econtent[vs:ve])
+    if len(kids) < 5:
+        raise _DerError("TSTInfo too short")
+    if kids[0][0] != 0x02 or int.from_bytes(kids[0][1], "big", signed=True) != 1:
+        raise _DerError("TSTInfo version is not v1")
+    if kids[1][0] != 0x06:
+        raise _DerError("TSTInfo policy is not an OID")
+    mi = kids[2]
+    if mi[0] != 0x30:
+        raise _DerError("messageImprint is not a SEQUENCE")
+    mi_kids = _rfc3161_children(mi[1])
+    if len(mi_kids) != 2 or mi_kids[0][0] != 0x30 or mi_kids[1][0] != 0x04:
+        raise _DerError("malformed messageImprint")
+    _rfc3161_require_algorithm(mi_kids[0][1], _OID_SHA256, "messageImprint hash algorithm", "SHA-256")
+    hashed = mi_kids[1][1]
+    if kids[3][0] != 0x02:
+        raise _DerError("TSTInfo serialNumber is not an INTEGER")
+    if kids[4][0] != 0x18:
+        raise _DerError("genTime is not a GeneralizedTime")
+    gen = kids[4][1]
+    if len(gen) != 15 or not gen[:14].isdigit() or gen[14:15] != b"Z":
+        raise _DerError("non-canonical genTime")
+    for tag, _val, _raw in kids[5:]:  # optional fields, presence-based
+        if tag not in (0x30, 0x01, 0x02, 0xA0, 0xA1):
+            raise _DerError("unexpected TSTInfo field")
+    gen_time = (
+        f"{gen[0:4].decode()}-{gen[4:6].decode()}-{gen[6:8].decode()}"
+        f"T{gen[8:10].decode()}:{gen[10:12].decode()}:{gen[12:14].decode()}+00:00"
+    )
+    return hashed, gen_time
+
+
+def _rfc3161_parse_token(token_der: bytes) -> dict:
+    """Strict parse of a TimeStampToken (ContentInfo wrapping a CMS
+    SignedData). Raises _DerError on any deviation from the exact
+    expected shape."""
+    tag, vs, ve = _der_read_tlv(token_der, 0)
+    if ve != len(token_der):
+        raise _DerError("trailing data after ContentInfo")
+    if tag != 0x30:
+        raise _DerError("token is not a SEQUENCE")
+    kids = _rfc3161_children(token_der[vs:ve])
+    if len(kids) != 2 or kids[0][0] != 0x06:
+        raise _DerError("ContentInfo must be SEQUENCE { OID, [0] }")
+    if _rfc3161_oid_arcs(kids[0][1]) != _OID_ID_SIGNEDDATA:
+        raise _DerError("contentType is not id-signedData")
+    if kids[1][0] != 0xA0:
+        raise _DerError("content is not [0]")
+    sd_kids = _rfc3161_children(kids[1][1])
+    if len(sd_kids) != 1 or sd_kids[0][0] != 0x30:
+        raise _DerError("content [0] must wrap one SignedData")
+    return _rfc3161_parse_signed_data(sd_kids[0][1])
+
+
+def _rfc3161_parse_signed_data(val: bytes) -> dict:
+    kids = _rfc3161_children(val)
+    if len(kids) != 5:
+        raise _DerError("SignedData must have exactly five children")
+    if kids[0][0] != 0x02 or int.from_bytes(kids[0][1], "big", signed=True) != 3:
+        raise _DerError("SignedData version is not v3")
+    if kids[1][0] != 0x31:
+        raise _DerError("digestAlgorithms is not a SET")
+    for alg in _rfc3161_children(kids[1][1]):
+        # Shape-only: AlgorithmIdentifier ::= SEQUENCE { OID, parameters
+        # OPTIONAL } with NULL-or-absent parameters. The OID VALUE is
+        # advisory metadata (the SignerInfo's digestAlgorithm governs the
+        # actual signature), so only the shape is constrained -- but the
+        # shape is constrained: a tag mutation inside the entry fails
+        # closed, matching the oracle's re-encode check.
+        if alg[0] != 0x30:
+            raise _DerError("digestAlgorithms entry is not an AlgorithmIdentifier")
+        a_kids = _rfc3161_children(alg[1])
+        if len(a_kids) not in (1, 2) or a_kids[0][0] != 0x06:
+            raise _DerError("malformed digestAlgorithm entry")
+        if len(a_kids) == 2 and not (a_kids[1][0] == 0x05 and a_kids[1][1] == b""):
+            raise _DerError("digestAlgorithm entry parameters must be NULL or absent")
+    if kids[2][0] != 0x30:
+        raise _DerError("encapContentInfo is not a SEQUENCE")
+    eci = _rfc3161_children(kids[2][1])
+    if len(eci) != 2 or eci[0][0] != 0x06:
+        raise _DerError("malformed encapContentInfo")
+    if _rfc3161_oid_arcs(eci[0][1]) != _OID_ID_CT_TSTINFO:
+        raise _DerError("eContentType is not id-ct-TSTInfo")
+    if eci[1][0] != 0xA0:
+        raise _DerError("eContent is not [0]")
+    wrap = _rfc3161_children(eci[1][1])
+    if len(wrap) != 1 or wrap[0][0] != 0x04:
+        raise _DerError("eContent [0] must wrap one OCTET STRING")
+    econtent = wrap[0][1]
+    if kids[3][0] != 0xA0:
+        raise _DerError("certificates is not [0]")
+    certs = _rfc3161_children(kids[3][1])
+    for c in certs:
+        if c[0] != 0x30:
+            raise _DerError("certificate is not an X.509 SEQUENCE")
+    if kids[4][0] != 0x31:
+        raise _DerError("signerInfos is not a SET")
+    sis = _rfc3161_children(kids[4][1])
+    if len(sis) != 1 or sis[0][0] != 0x30:
+        raise _DerError("expected exactly one SignerInfo")
+    return {"econtent": econtent, "certs": certs, "si": _rfc3161_parse_signer_info(sis[0][1])}
+
+
+def _rfc3161_parse_signer_info(val: bytes) -> dict:
+    kids = _rfc3161_children(val)
+    if len(kids) != 6:
+        raise _DerError("SignerInfo must have exactly six children")
+    if kids[0][0] != 0x02:
+        raise _DerError("SignerInfo version is not an INTEGER")
+    version = int.from_bytes(kids[0][1], "big", signed=True)
+    sid = kids[1]
+    if sid[0] == 0x30:  # issuerAndSerialNumber
+        iasn = _rfc3161_children(sid[1])
+        if len(iasn) != 2 or iasn[0][0] != 0x30 or iasn[1][0] != 0x02:
+            raise _DerError("malformed issuerAndSerialNumber")
+        if version != 1:
+            raise _DerError("SignerInfo version must be v1 for issuerAndSerialNumber")
+        sid_info = ("iasn", iasn[0][2], iasn[1][2])
+    elif sid[0] == 0x80:  # subjectKeyIdentifier [0] IMPLICIT
+        if version != 3:
+            raise _DerError("SignerInfo version must be v3 for subjectKeyIdentifier")
+        sid_info = ("ski", sid[1])
+    else:
+        raise _DerError("unrecognized SignerIdentifier form")
+    if kids[2][0] != 0x30:
+        raise _DerError("digestAlgorithm is not a SEQUENCE")
+    _rfc3161_require_algorithm(kids[2][1], _OID_SHA256, "signer digest algorithm", "SHA-256")
+    if kids[3][0] != 0xA0:
+        raise _DerError("signedAttrs is not [0]")
+    attrs = _rfc3161_parse_attributes(kids[3][1], kids[3][2])
+    if kids[4][0] != 0x30:
+        raise _DerError("signatureAlgorithm is not a SEQUENCE")
+    _rfc3161_require_algorithm(kids[4][1], _OID_RSA_ENCRYPTION, "signer signature algorithm", "RSA")
+    if kids[5][0] != 0x04:
+        raise _DerError("signature is not an OCTET STRING")
+    return {"sid": sid_info, "attrs": attrs, "signature": kids[5][1]}
+
+
+def _rfc3161_parse_attributes(val: bytes, raw_tlv: bytes) -> dict:
+    """Parse signedAttrs. Returns {"by_oid": {oid: [[value TLV, ...], ...]},
+    "retagged": the DER-re-tagged SET OF (0x31) the CMS signature covers.
+    The [0] IMPLICIT tag is swapped for the universal SET tag 0x31 with
+    the SAME length encoding -- the exact construction RFC 5652 signs
+    (verified byte-for-byte against the test-only oracle library's untag().dump())."""
+    by_oid: dict[tuple[int, ...], list[list[tuple[int, bytes, bytes]]]] = {}
+    for tag, aval, araw in _rfc3161_children(val):
+        if tag != 0x30:
+            raise _DerError("attribute is not a SEQUENCE")
+        akids = _rfc3161_children(aval)
+        if len(akids) != 2 or akids[0][0] != 0x06 or akids[1][0] != 0x31:
+            raise _DerError("malformed attribute")
+        oid = _rfc3161_oid_arcs(akids[0][1])
+        by_oid.setdefault(oid, []).append(_rfc3161_children(akids[1][1]))
+    return {"by_oid": by_oid, "retagged": b"\x31" + raw_tlv[1:]}
+
+
+def _rfc3161_resolve_signer(parsed: dict, si: dict) -> tuple[bytes, dict] | None:
+    """Resolve the signer certificate via the SignerIdentifier CHOICE:
+    issuerAndSerialNumber (exact DER bytes of issuer + serial) or
+    subjectKeyIdentifier (the certificate's SKI extension). Exactly one
+    match required -- zero or several fail closed."""
+    sid = si["sid"]
+    if sid[0] == "iasn":
+        _form, issuer_raw, serial_raw = sid
+        for _tag, _val, raw in parsed["certs"]:
+            info = _rfc3161_parse_cert(raw)
+            if info["issuer"] == issuer_raw and info["serial"] == serial_raw:
+                return raw, info
+        return None
+    _form, ski = sid
+    matches = []
+    for _tag, _val, raw in parsed["certs"]:
+        info = _rfc3161_parse_cert(raw)
+        if info["ski"] == ski:
+            matches.append((raw, info))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _rsa_pkcs1v15_sha256_verify(n: int, e: int, signature: bytes, message: bytes) -> bool:
+    """RSA PKCS#1 v1.5 with SHA-256, stdlib-only: reconstruct the full
+    expected encoded message (EM) and compare byte-for-byte. Never scan
+    for the 0x00 separator and trust what follows -- the trap the
+    proposal warns about. Returns False on any malformed input, never
+    raises."""
+    k = (n.bit_length() + 7) // 8
+    if len(signature) != k or not (3 <= e <= 2**32):
+        return False
+    s = int.from_bytes(signature, "big")
+    if s <= 0 or s >= n:
+        return False
+    em = pow(s, e, n).to_bytes(k, "big")
+    digest = hashlib.sha256(message).digest()
+    # DigestInfo for SHA-256: SEQUENCE { SEQUENCE { OID, NULL }, OCTET STRING }
+    digest_info = bytes.fromhex("3031300d060960864801650304020105000420") + digest
+    ps_len = k - 3 - len(digest_info)
+    if ps_len < 8:
+        return False
+    expected = b"\x00\x01" + b"\xff" * ps_len + b"\x00" + digest_info
+    return em == expected
+
+
+@dataclass
+class TSAAnchorCheck:
+    """Outcome of verifying a packet's rfc3161-tsa anchor claim.
+
+    status:
+      "verified"                  -- token parses strictly, signer cert is
+                                     pinned, messageImprint matches, RSA
+                                     signature verifies over signedAttrs
+      "unrecognized_tsa_certificate" -- everything else intact, but the
+                                     signer cert matches no pin -- its own
+                                     distinct finding (condition A)
+      "cannot_verify"             -- any strict-DER violation, structural
+                                     deviation, digest mismatch, or
+                                     signature failure (conditions B)
+    """
+
+    status: str
+    detail: str
+    gen_time: str | None = None
+
+
+def verify_tsa_anchor(token_der: bytes, expected_digest: bytes, pinned_certs: list[bytes]) -> TSAAnchorCheck:
+    """Verify a TimeStampToken against the digest it must timestamp.
+    Never raises: any failure -- hostile garbage included -- returns a
+    fail-closed TSAAnchorCheck."""
+    try:
+        _rfc3161_canonical_walk(token_der)
+        parsed = _rfc3161_parse_token(token_der)
+        si = parsed["si"]
+        signer = _rfc3161_resolve_signer(parsed, si)
+        if signer is None:
+            return TSAAnchorCheck(
+                "cannot_verify",
+                "cannot verify anchor: no certificate in the token matches the signer identifier",
+            )
+        cert_raw, cert_info = signer
+        if cert_raw not in pinned_certs:
+            return TSAAnchorCheck(
+                "unrecognized_tsa_certificate",
+                f"unrecognized TSA certificate: the token's signing certificate "
+                f"(sha256 {_sha256(cert_raw)}) is not any certificate this verifier pins",
+            )
+        # The signature is over the DER-re-tagged signedAttrs (0x31) --
+        # never over the TSTInfo content directly (the proposal's trap).
+        if not _rsa_pkcs1v15_sha256_verify(cert_info["n"], cert_info["e"], si["signature"], si["attrs"]["retagged"]):
+            return TSAAnchorCheck(
+                "cannot_verify",
+                "cannot verify anchor: token signature does not verify under the signer certificate",
+            )
+        ct_attr = si["attrs"]["by_oid"].get(_OID_ATTR_CONTENT_TYPE, [])
+        md_attr = si["attrs"]["by_oid"].get(_OID_ATTR_MESSAGE_DIGEST, [])
+        if len(ct_attr) != 1 or len(ct_attr[0]) != 1 or ct_attr[0][0][0] != 0x06:
+            return TSAAnchorCheck("cannot_verify", "cannot verify anchor: signedAttrs contentType missing or malformed")
+        if _rfc3161_oid_arcs(ct_attr[0][0][1]) != _OID_ID_CT_TSTINFO:
+            return TSAAnchorCheck("cannot_verify", "cannot verify anchor: signedAttrs contentType is not id-ct-TSTInfo")
+        if len(md_attr) != 1 or len(md_attr[0]) != 1 or md_attr[0][0][0] != 0x04:
+            return TSAAnchorCheck("cannot_verify", "cannot verify anchor: signedAttrs messageDigest missing or malformed")
+        if md_attr[0][0][1] != hashlib.sha256(parsed["econtent"]).digest():
+            return TSAAnchorCheck(
+                "cannot_verify",
+                "cannot verify anchor: signedAttrs messageDigest does not match the timestamped content",
+            )
+        hashed, gen_time = _rfc3161_parse_tstinfo(parsed["econtent"])
+        if hashed != expected_digest:
+            return TSAAnchorCheck(
+                "cannot_verify",
+                "cannot verify anchor: token messageImprint does not match the packet's signature digest",
+            )
+        return TSAAnchorCheck(
+            "verified",
+            f"TimeStampToken verified under the pinned TSA certificate; token genTime {gen_time}",
+            gen_time,
+        )
+    except _DerError as e:
+        return TSAAnchorCheck("cannot_verify", f"cannot verify anchor: {e}")
+    except Exception as e:  # never crash on hostile input -- fail closed
+        return TSAAnchorCheck("cannot_verify", f"cannot verify anchor: {type(e).__name__}")
+
+
+def _check_packet_anchor(packet: dict, pinned_certs: list[bytes]) -> TSAAnchorCheck | None:
+    """Verify the packet's rfc3161-tsa anchor claim end to end: the
+    declared digest must equal sha256 of the packet's own Ed25519
+    signature value (recomputed, never trusted), the reference must
+    decode to a token, and the token must verify against that digest.
+    Returns None when the packet carries no rfc3161-tsa anchor."""
+    anchor = packet.get("anchor")
+    if not isinstance(anchor, dict) or anchor.get("type") != "rfc3161-tsa":
+        return None
+    sig = packet.get("signature")
+    if not isinstance(sig, dict) or not isinstance(sig.get("value"), str):
+        return TSAAnchorCheck(
+            "cannot_verify", "cannot verify anchor: packet carries no signature to bind the token to"
+        )
+    try:
+        sig_bytes = bytes.fromhex(sig["value"])
+    except ValueError:
+        return TSAAnchorCheck("cannot_verify", "cannot verify anchor: packet signature value is not valid hex")
+    if len(sig_bytes) != 64:
+        return TSAAnchorCheck("cannot_verify", "cannot verify anchor: packet signature value is not 64 bytes")
+    expected = hashlib.sha256(sig_bytes).digest()
+    declared = anchor.get("digest")
+    if not isinstance(declared, str) or declared.lower() != expected.hex():
+        return TSAAnchorCheck(
+            "cannot_verify",
+            "cannot verify anchor: declared anchor digest does not match sha256 of the packet's signature bytes",
+        )
+    reference = anchor.get("reference")
+    if not isinstance(reference, str):
+        return TSAAnchorCheck("cannot_verify", "cannot verify anchor: anchor reference is missing")
+    import base64
+
+    try:
+        token_der = base64.b64decode(reference, validate=True)
+    except (ValueError, TypeError):
+        return TSAAnchorCheck("cannot_verify", "cannot verify anchor: anchor reference is not valid base64")
+    return verify_tsa_anchor(token_der, expected, pinned_certs)
+
+
+def _load_tsa_certs(paths: list[Path]) -> list[bytes]:
+    """--tsa-cert files: DER certificate bytes, or a PEM body (base64
+    between the BEGIN/END lines). Raises SystemExit on an unreadable or
+    malformed file -- an operator error to fix, like a bad public key."""
+    import base64
+    import re as _re
+
+    certs: list[bytes] = []
+    for p in paths:
+        try:
+            data = p.read_bytes()
+        except OSError as e:
+            raise SystemExit(f"--tsa-cert {p}: {e}") from e
+        if b"-----BEGIN CERTIFICATE-----" in data:
+            m = _re.search(
+                rb"-----BEGIN CERTIFICATE-----\s*(.*?)\s*-----END CERTIFICATE-----", data, _re.DOTALL
+            )
+            if not m:
+                raise SystemExit(f"--tsa-cert {p}: no CERTIFICATE PEM block found")
+            try:
+                data = base64.b64decode(b"".join(m.group(1).split()), validate=True)
+            except ValueError as e:
+                raise SystemExit(f"--tsa-cert {p}: PEM body is not valid base64") from e
+        certs.append(data)
+    return certs
+
+
 def verify_release_packet(
-    path: Path, audit_csv: Path | None = None, public_keys: dict[str, bytes] | None = None
+    path: Path,
+    audit_csv: Path | None = None,
+    public_keys: dict[str, bytes] | None = None,
+    tsa_certs: list[bytes] | None = None,
 ) -> VerificationReport:
     """The whole check, factored out of main() so tests (and a future
     static-web verifier reimplementing this in JS) can drive it directly.
@@ -877,7 +1744,11 @@ def verify_release_packet(
     the packet's Ed25519 signature is verified (MUST-2). A signature
     mismatch fails the packet; a missing key or an unsigned legacy
     packet downgrades to an explicit "NOT VERIFIED" line without
-    failing the rest of the (still meaningful) hash checks."""
+    failing the rest of the (still meaningful) hash checks.
+    tsa_certs: optional additional TSA signing certificate DER bytes to
+    pin beyond the embedded default (--tsa-cert) -- an rfc3161-tsa
+    anchor whose signer certificate is in none of the pins reports its
+    own distinct finding and fails the packet (condition A)."""
     try:
         files = _load_packet_files(path)
     except PacketLoadError as e:
@@ -1104,6 +1975,17 @@ def verify_release_packet(
     if schema_ok:
         signature_status, signature_detail = check_packet_signature(manifest, public_keys or {})
 
+    # RFC 3161 TSA anchor (rfc3161-tsa): the anchor's digest must equal
+    # sha256 of the packet's OWN signature value (recomputed, never
+    # trusted), and the token must verify against it under a pinned
+    # certificate. A claimed-but-unverifiable anchor fails the packet --
+    # the claim doesn't check out, like a hash or signature mismatch.
+    anchor_check: TSAAnchorCheck | None = None
+    if schema_ok:
+        anchor_check = _check_packet_anchor(
+            manifest, list(_DEFAULT_TSA_PINS) + list(tsa_certs or [])
+        )
+
     valid = (
         schema_ok
         and not errors
@@ -1112,6 +1994,7 @@ def verify_release_packet(
         and all(cc.status != "mismatch" for cc in chain_hash_checks)
         and signature_status != "mismatch"
         and not chain_failed
+        and (anchor_check is None or anchor_check.status == "verified")
     )
     return VerificationReport(
         valid=valid,
@@ -1125,6 +2008,7 @@ def verify_release_packet(
         chain_hash_checks=chain_hash_checks,
         signature_status=signature_status,
         signature_detail=signature_detail,
+        anchor=anchor_check,
     )
 
 
@@ -1244,7 +2128,10 @@ class CombinedReport:
 
 
 def verify_release_packet_and_result(
-    path: Path, audit_csv: Path | None = None, public_keys: dict[str, bytes] | None = None
+    path: Path,
+    audit_csv: Path | None = None,
+    public_keys: dict[str, bytes] | None = None,
+    tsa_certs: list[bytes] | None = None,
 ) -> CombinedReport:
     """When a directory contains BOTH release_packet.json and
     release_result.json (e.g. the Airlock CLI's own output for a done
@@ -1255,8 +2142,9 @@ def verify_release_packet_and_result(
     quietly. *path* must be a directory -- a bare release_packet.json
     .zip can never also contain a release_result.json alongside it.
     audit_csv threads through to the packet verifier's chain check;
-    public_keys threads through to its signature check (MUST-2)."""
-    packet_report = verify_release_packet(path, audit_csv=audit_csv, public_keys=public_keys)
+    public_keys threads through to its signature check (MUST-2);
+    tsa_certs threads through to its RFC 3161 anchor check."""
+    packet_report = verify_release_packet(path, audit_csv=audit_csv, public_keys=public_keys, tsa_certs=tsa_certs)
     result_report = verify_release_result(path)
 
     agreement: list[CrossCheck] = []
@@ -1398,6 +2286,15 @@ def main(argv: list[str] | None = None) -> int:
              " 'NOT VERIFIED (no key)' but still hash-checks",
     )
     ap.add_argument(
+        "--tsa-cert", type=Path, default=None, action="append", dest="tsa_cert_paths",
+        help="optional (repeatable): a TSA signing certificate (PEM or DER) to pin"
+             " IN ADDITION to the embedded default (DigiCert). An rfc3161-tsa anchor"
+             " signed by a TSA this verifier does not recognize reports"
+             " 'unrecognized TSA certificate' and fails the packet until that TSA's"
+             " certificate is pinned here -- an operator-configured TSA (proposal"
+             " §6) is added this way",
+    )
+    ap.add_argument(
         "--verify-signature", action="store_true", default=False,
         help="strict signature mode: escalate signature downgrades to FAILURES --"
              " a packet that is unsigned, has no key available, or names an unknown"
@@ -1417,16 +2314,17 @@ def main(argv: list[str] | None = None) -> int:
     #   3. otherwise -> the full packet verifier alone.
     path = args.path
     public_keys = _load_public_keys(args.public_key_paths) if args.public_key_paths else None
+    tsa_certs = _load_tsa_certs(args.tsa_cert_paths) if args.tsa_cert_paths else None
     has_both = path.is_dir() and (path / "release_packet.json").is_file() and (path / "release_result.json").is_file()
     is_result = path.name == "release_result.json" or (
         path.is_dir() and (path / "release_result.json").is_file() and not (path / "release_packet.json").is_file()
     )
     if has_both:
-        report = verify_release_packet_and_result(path, audit_csv=args.audit_csv, public_keys=public_keys)
+        report = verify_release_packet_and_result(path, audit_csv=args.audit_csv, public_keys=public_keys, tsa_certs=tsa_certs)
     elif is_result:
         report = verify_release_result(path)
     else:
-        report = verify_release_packet(path, audit_csv=args.audit_csv, public_keys=public_keys)
+        report = verify_release_packet(path, audit_csv=args.audit_csv, public_keys=public_keys, tsa_certs=tsa_certs)
     if args.verify_signature:
         # Strict mode can only be satisfied by the packet verifier -- a
         # bare release_result.json is never signed (signature_ref only
