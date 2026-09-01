@@ -1103,10 +1103,10 @@ def _rfc3161_oid_arcs(val: bytes) -> tuple[int, ...]:
             cur = count = 0
     first = subs[0]
     if first < 40:
-        return (0, first) + tuple(subs[1:])
+        return (0, first, *tuple(subs[1:]))
     if first < 80:
-        return (1, first - 40) + tuple(subs[1:])
-    return (2, first - 80) + tuple(subs[1:])
+        return (1, first - 40, *tuple(subs[1:]))
+    return (2, first - 80, *tuple(subs[1:]))
 
 
 def _rfc3161_check_oid(val: bytes) -> None:
@@ -1122,7 +1122,7 @@ def _rfc3161_check_oid(val: bytes) -> None:
             cur = count = 0
     if count != 0 or len(arcs) < 2:
         raise _DerError("malformed OID")
-    for arc, bc in zip(arcs, byte_counts):
+    for arc, bc in zip(arcs, byte_counts, strict=True):
         if bc > 1 and arc < (1 << (7 * (bc - 1))):
             raise _DerError("non-minimal OID arc")
 
@@ -1528,7 +1528,7 @@ def _rfc3161_parse_attributes(val: bytes, raw_tlv: bytes) -> dict:
     the SAME length encoding -- the exact construction RFC 5652 signs
     (verified byte-for-byte against the test-only oracle library's untag().dump())."""
     by_oid: dict[tuple[int, ...], list[list[tuple[int, bytes, bytes]]]] = {}
-    for tag, aval, araw in _rfc3161_children(val):
+    for tag, aval, _araw in _rfc3161_children(val):
         if tag != 0x30:
             raise _DerError("attribute is not a SEQUENCE")
         akids = _rfc3161_children(aval)
