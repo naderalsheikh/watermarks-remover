@@ -18,3 +18,8 @@ alembic==1.16.5
 argon2-cffi==25.1.0
 python-multipart==0.0.32
 httpx==0.28.1
+# Differential-testing oracle for the hand-rolled RFC 3161 DER/CMS parser
+# in tools/counselclear_verify_release_packet.py (tests only — the shipped
+# verifier itself stays stdlib-only, per its own import-discipline tests).
+# Same test-only-oracle pattern as cryptography in the Ed25519 cross-check.
+asn1crypto==1.5.1
