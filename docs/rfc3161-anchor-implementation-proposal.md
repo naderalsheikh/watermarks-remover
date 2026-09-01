@@ -105,39 +105,95 @@ those are different findings and shouldn't be collapsed into one.
    (unlike `tools/counselclear_verify_release_packet.py`, which stays
    stdlib-only per its own discipline — see §5).
 
-## 5. Verifier changes (stdlib-only constraint stays)
+## 5. Verifier changes (stdlib-only constraint stays) — DECIDED: hand-roll
 
-This is the one place this proposal's stdlib-only-verifier discipline
-gets genuinely tested: RFC 3161 token verification means parsing a CMS
-SignedData structure and checking an RSA/ECDSA signature over it —
-nothing in Python's stdlib does that. Options, in order of preference:
+**Decision: hand-roll the parsing and signature verification, matching
+the tool's existing Ed25519 precedent** (`ed25519_verify`, cross-tested
+against `cryptography` in `test_signature_cross_checks_against_cryptography`)
+— the trust premise is load-bearing, not stylistic: requiring
+`pip install` for a recipient with no reason to trust CounselClear's
+own supply chain, in an IT environment where that install may not even
+be possible, defeats the tool's reason to exist.
 
-1. **Vendor the minimal ASN.1 parsing needed**, by hand, scoped
-   narrowly to exactly the TimeStampToken fields this verifier reads
-   (messageImprint hash, genTime, signing cert, signature) — more code
-   than importing a library, but keeps the "no third-party dependency"
-   property that makes this tool trustworthy to run against a
-   downloaded packet with nothing but a stock Python install. This is
-   real, non-trivial work (CMS/PKCS7 structures are not simple) and is
-   the most defensible choice given what this specific tool is *for*
-   (a recipient with no reason to trust CounselClear's own tooling
-   ecosystem, running it standalone).
-2. **Accept a dependency for the verifier specifically**, breaking the
-   stdlib-only rule for this one check, clearly flagged in the tool's
-   own output/docs as a departure from its established discipline.
+**But this is not a like-for-like extension of the Ed25519 precedent,
+and treating it as one is the mistake to avoid.** `ed25519_verify`
+parses nothing — its inputs are fixed-width (32/64 bytes) and its
+entire structural surface is two length checks. RFC 3161's
+`TimeStampToken` is the opposite: the whole input is attacker-supplied,
+variable-length, nested ASN.1/CMS structure, and the security property
+lives in the *parsing decisions*, not the modexp. This was checked
+against an independent second opinion (Opus) specifically because of
+that gap, and the hand-roll recommendation stands only with three
+conditions, all mandatory:
 
-This is a real design fork this proposal is flagging, not resolving —
-worth your call before implementation starts, since it changes what
-"stdlib-only" means for this tool going forward.
+1. **Pin the TSA's signing certificate bytes directly in the
+   verifier — do not validate a certificate chain.** No path building,
+   no validity-window checks, no EKU (`id-kp-timeStamping`) parsing.
+   Compare the token's signing cert against the pinned bytes exactly.
+   This deletes the genuinely intractable part of the problem. Cost:
+   the verifier needs an update when the TSA rotates its signing cert
+   — accept that cost. A cert that doesn't match the pin is its own
+   honest, distinct finding ("unrecognized TSA certificate"), never
+   silently treated as a chain-validation failure or a pass.
+2. **Strict, fail-closed parsing.** Any deviation from the exact
+   expected DER shape (non-minimal length encoding, long-form where
+   short-form suffices, BER indefinite-length, anything else
+   non-canonical) returns "cannot verify anchor" — never a lenient
+   best-effort parse. Confirm before implementation that the chosen
+   TSA (§6) actually emits strict canonical DER; some TSAs emit
+   indefinite-length CMS, which would be a real finding to know about
+   up front, not something to special-case around.
+3. **Differential fuzz testing, not a handful of hand-picked cases.**
+   The Ed25519 test's 3-case cross-check (valid, tampered message,
+   tampered signature) is not enough rigor for a parser this size.
+   Mutate a captured real token byte-wise and assert the hand-rolled
+   parser agrees with `asn1crypto`/`cryptography` (test-only
+   dependencies, same pattern as the existing Ed25519 test) on
+   accept/reject across a large number of mutations, not three.
 
-## 6. TSA endpoint
+**The specific trap most likely to produce a silent-accept forgery**
+(the worst possible failure mode for this exact code shape): the CMS
+signature is computed over `signedAttrs` — a DER-re-tagged `SET OF`
+(tag `0x31`) — not over the TSTInfo content directly. A verifier that
+checks the signature against TSTInfo bytes directly, instead of
+reconstructing and checking `signedAttrs` (and separately confirming
+`signedAttrs`' own `messageDigest` attribute equals SHA-256 of the
+actual `eContent`, and that `contentType` is `id-ct-TSTInfo`), will
+accept a forged token. This is the single highest-priority thing to
+get right, ahead of anything else in this list.
 
-Configurable via an env var (e.g. `COUNSELCLEAR_TSA_URL`), not
-hardcoded — a public/free TSA is fine to default to for development
-and this proposal's own testing, but a production deployment should be
-free to point at a TSA the operator has a real (paid, SLA-backed)
-relationship with. Document the default clearly as "not vetted for
-production reliability" in whatever ships as the default.
+Other concrete traps a naive first pass is likely to hit:
+
+- `eContent` double-wraps: an OCTET STRING containing the DER-encoded
+  TSTInfo, not TSTInfo directly.
+- TSTInfo's `accuracy`, `nonce`, `tsa [0]`, and `extensions [1]` fields
+  are OPTIONAL, and `ordering` is DEFAULT FALSE (omitted entirely in
+  DER when false) — positional/fixed-offset parsing breaks on real
+  tokens; the parser must handle presence/absence of each field.
+- PKCS#1 v1.5 verification: reconstruct the full expected encoded
+  message (EM) and compare it byte-for-byte; never scan for the `0x00`
+  separator and trust what follows. Handle the SHA-256
+  `AlgorithmIdentifier` parameters field both when absent and when
+  present as an explicit NULL — real-world tokens vary.
+- Explicitly check `messageImprint.hashAlgorithm` is SHA-256 — an
+  unchecked hash-algorithm field is a downgrade path.
+- `SignerIdentifier` is a CHOICE (`issuerAndSerialNumber` vs.
+  `subjectKeyIdentifier`); `certificates` is a `SET` — the parser must
+  handle both forms deterministically, not assume one.
+
+## 6. TSA endpoint — DECIDED: DigiCert's public TSA as the default
+
+Configurable via an env var (`COUNSELCLEAR_TSA_URL`), not hardcoded —
+a production deployment should be free to point at a TSA the operator
+has a real (paid, SLA-backed) relationship with.
+
+**Default: `http://timestamp.digicert.com`.** Long-established, widely
+used across code-signing tooling, and — given §5's constraint 3
+(differential fuzz testing against a captured real token) — a stable,
+unlikely-to-disappear source for that fixture matters as much as
+reliability for actual anchoring calls. Documented clearly in whatever
+ships as the default: "not vetted for production reliability; operators
+should configure their own TSA relationship."
 
 ## 7. Tests
 
