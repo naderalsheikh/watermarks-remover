@@ -343,18 +343,26 @@ def _schema_file_bytes(name: str) -> bytes:
     return (verifier.SCHEMA_DIR / name).read_bytes()
 
 
+def _schema_version(name: str) -> int:
+    return int(json.loads(_schema_file_bytes(name))["version"])
+
+
 def test_schema_pinned_packet_adds_schema_cross_checks(tmp_path):
     files = _packet_files()
     packet = json.loads(files["release_packet.json"])
-    packet["schema_version"] = 1
+    # Version comes from the published file, not a frozen literal: a pin
+    # is (version, hash-of-that-version's-bytes) and the two must agree.
+    # Hardcoding 1 here while hashing the current file produced exactly
+    # the incoherent pin the verifier is supposed to reject.
+    packet["schema_version"] = _schema_version("release_packet.schema.json")
     packet["schema_sha256"] = _sha256(_schema_file_bytes("release_packet.schema.json"))
     files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
     manifest = json.loads(files["manifest.json"])
-    manifest["schema_version"] = 1
+    manifest["schema_version"] = _schema_version("manifest.schema.json")
     manifest["schema_sha256"] = _sha256(_schema_file_bytes("manifest.schema.json"))
     files["manifest.json"] = json.dumps(manifest, sort_keys=True).encode()
     report = json.loads(files["report.json"])
-    report["schema_version"] = 1
+    report["schema_version"] = _schema_version("report.schema.json")
     report["schema_sha256"] = _sha256(_schema_file_bytes("report.schema.json"))
     files["report.json"] = json.dumps(report, sort_keys=True).encode()
     # Re-pin every content hash: the packet declares the sha256 of every
@@ -440,7 +448,36 @@ def test_declared_schema_hashes_match_published_schema_files():
     ):
         expected = _sha256(_schema_file_bytes(schema_name))
         assert schemas_meta.SCHEMA_SHA256[artifact] == expected, artifact
-        assert schemas_meta.SCHEMA_VERSION[artifact] == 1, artifact
+        # The registry's version is the schema file's own claim about
+        # itself, never a literal here: the point of the pin is that the
+        # emitter and the published file cannot drift apart, which a
+        # hardcoded 1 would hide the moment a contract changed.
+        assert schemas_meta.SCHEMA_VERSION[artifact] == _schema_version(schema_name), artifact
+
+
+def test_superseded_schema_versions_stay_verifiable():
+    """A contract change must not retroactively invalidate artifacts
+    issued under the previous one. Every version below the currently
+    published one keeps its exact bytes under schemas/archive/, and the
+    verifier resolves a pin by its DECLARED version -- so a manifest
+    pinned to v1 still re-hashes clean after the file becomes v2."""
+    for schema_name in ("manifest.schema.json", "report.schema.json", "release_packet.schema.json"):
+        current = _schema_version(schema_name)
+        stem = schema_name.removesuffix(".schema.json")
+        for version in range(1, current):
+            archived = verifier.SCHEMA_DIR / "archive" / f"{stem}.v{version}.schema.json"
+            assert archived.is_file(), f"{schema_name} v{version} bytes were not archived"
+            assert json.loads(archived.read_bytes())["version"] == version
+            assert verifier._published_schema_sha256(schema_name, version) == _sha256(
+                archived.read_bytes()
+            )
+        # The current version still resolves to the live file, and an
+        # unknown future version resolves to nothing rather than being
+        # reported as a mismatch against a contract this tool never held.
+        assert verifier._published_schema_sha256(schema_name, current) == _sha256(
+            _schema_file_bytes(schema_name)
+        )
+        assert verifier._published_schema_sha256(schema_name, current + 99) is None
 
 
 

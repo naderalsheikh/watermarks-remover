@@ -90,6 +90,96 @@ NO_DECISION_MARKER = "no operator decision was supplied"
 OPERATOR_KEPT_MARKER = "reviewed and kept by operator"
 APPROVED_BUT_NO_OP_MARKER = "approved, but this subtype has no strip action under this policy"
 
+# Actions that leave a finding sitting in the derivative rather than
+# removing it. scripts.policies._RETAINING_ACTIONS / custody.py's copy,
+# literal here for the same PR 17 reason as the markers above (main.py
+# must not import the engine) and kept in sync by the same class of test.
+RETAINING_ACTIONS = ("keep", "flag", "inspect_only")
+
+
+def _retention_limitations(manifest: dict, actions: list[str]) -> list[str]:
+    """Every finding that SURVIVES into the derivative, as a limitation.
+
+    The defect this replaces (found by the 2026-09-02 custody test case):
+    limitations were derived by scanning the manifest's flat ``actions``
+    strings for three marker substrings -- the approve-default keeps. A
+    policy ``flag`` outcome carries no marker, so a manifest that recorded
+    ``hidden_text:flag: flagged by policy; finding remains in derivative``
+    with an ``unspecified`` legal basis produced ZERO limitations, and the
+    certificate printed "No limitations flagged for this job" above a
+    "Verification: passed" line. An external reader could not have known
+    the same record said a flagged condition had knowingly been retained
+    with no operator justification. A retained finding is definitionally a
+    limitation, so the derivation is now structural: every action_record
+    carrying ``retained_finding`` produces one, whatever its wording.
+
+    ``actions`` is the fallback for a v1 manifest predating
+    ``retained_finding`` -- those keep the old marker-matching behaviour
+    rather than silently reporting a pre-existing job as limitation-free.
+    """
+    records = [r for r in (manifest.get("action_records") or []) if isinstance(r, dict)]
+    structural = [r for r in records if r.get("retained_finding")]
+    if not structural and records:
+        # A v2 manifest whose records are all non-retaining is genuinely
+        # limitation-free on this axis; a v1 manifest has no flag at all,
+        # so fall back rather than assume. Distinguished by the schema pin.
+        if int(manifest.get("schema_version") or 1) < 2:
+            return _legacy_marker_limitations(actions)
+    elif not records:
+        return _legacy_marker_limitations(actions)
+
+    out: list[str] = []
+    for record in structural:
+        subtype = str(record.get("subtype") or "unknown")
+        action = str(record.get("action") or "unknown")
+        detail = str(record.get("detail") or "").strip()
+        legal = record.get("legal_justification")
+        basis = (legal or {}).get("basis") or "unspecified"
+        note = ((legal or {}).get("note") or "").strip()
+        if basis == "unspecified":
+            # The exact combination the test case caught: retained AND no
+            # operator justification. Named as such, not buried.
+            basis_clause = (
+                " NO OPERATOR LEGAL BASIS WAS SUPPLIED for retaining it "
+                "(legal basis: unspecified)."
+            )
+        else:
+            basis_clause = f" Operator legal basis: {basis}" + (f" — {note}" if note else "") + "."
+        out.append(
+            f"{subtype}: finding was present before sanitization and REMAINS IN "
+            f"THE DERIVATIVE under policy action '{action}'"
+            + (f" ({detail})" if detail else "")
+            + f".{basis_clause}"
+        )
+    return out
+
+
+def _legacy_marker_limitations(actions: list[str]) -> list[str]:
+    """Pre-``retained_finding`` derivation, kept verbatim for manifests
+    issued before the schema v2 flag existed. New manifests never take
+    this path."""
+    out: list[str] = []
+    no_decision = [a for a in actions if NO_DECISION_MARKER in a]
+    if no_decision:
+        out.append(
+            f"{len(no_decision)} finding(s) kept WITHOUT operator review "
+            f"({NO_DECISION_MARKER}): " + "; ".join(no_decision)
+        )
+    operator_kept = [a for a in actions if OPERATOR_KEPT_MARKER in a]
+    if operator_kept:
+        out.append(
+            f"{len(operator_kept)} finding(s) reviewed and explicitly kept by "
+            "the operator: " + "; ".join(operator_kept)
+        )
+    approved_no_op = [a for a in actions if APPROVED_BUT_NO_OP_MARKER in a]
+    if approved_no_op:
+        out.append(
+            f"{len(approved_no_op)} finding(s) approved by the operator but "
+            "structurally kept anyway (this policy has no strip action for "
+            "that subtype): " + "; ".join(approved_no_op)
+        )
+    return out
+
 
 def _escape_like(q: str) -> str:
     """Escape SQL LIKE/ILIKE wildcards in a user-supplied search string.
@@ -322,6 +412,8 @@ def _render_job_certificate_html(
     generated_by: str,
     release_context: dict | None = None,
     legal_justifications: list[dict] | None = None,
+    dispositions: list[dict] | None = None,
+    residual_metadata: dict | None = None,
     # "signature_break_attested" | "none" for a sanitize job, None for an
     # inspect job (section absent). Same vocabulary manifest.json's
     # attestation_kind and release_result.json's attestation carry, so a
@@ -349,8 +441,16 @@ def _render_job_certificate_html(
     def esc(v: object) -> str:
         return e(str(v))
 
+    # The empty state says what it is scoped to. Bare "No limitations
+    # flagged for this job", sitting next to "Verification: passed", read
+    # as a much broader clean bill of health than the record behind it
+    # supports -- and did so even while the same manifest disclosed a
+    # knowingly retained finding (see _retention_limitations).
     limitations_html = (
-        "<p>No limitations flagged for this job.</p>"
+        "<p>No finding was retained in the derivative, and no job-level limitation "
+        "was recorded, under this policy's own scope. This is a statement about "
+        "what this policy inspected and decided — not that the document is free "
+        "of risk this policy does not look for.</p>"
         if not limitations
         else "<ul>" + "".join(f"<li>{esc(item)}</li>" for item in limitations) + "</ul>"
     )
@@ -511,6 +611,78 @@ def _render_job_certificate_html(
             f"{'passed' if v_pass else 'FAILED'}</span></p><ul>{checks_html}</ul>"
         )
 
+    # Per-finding disposition ledger (manifest.dispositions, schema v2).
+    # Answers the question the flat actions list could not: for each
+    # finding that was PRESENT before sanitization, what did the policy
+    # decide, and what did the post-sanitize re-inspect then observe? A
+    # reader should never have to infer which stripping operation disposed
+    # of which pre-sanitize finding.
+    dispositions_html = ""
+    if dispositions:
+        _POSTCONDITION_LABEL = {
+            "removed_confirmed": ("chain-ok", "removed — confirmed absent on re-inspect"),
+            "retained_as_planned": ("chain-broken", "RETAINED in the derivative (see Limitations)"),
+            "retained_unplanned": ("chain-broken", "STILL PRESENT despite a removal action"),
+            "not_verifiable": ("", "not verifiable — no post-sanitize observation"),
+        }
+        rows = ""
+        for d in dispositions:
+            cls, label = _POSTCONDITION_LABEL.get(
+                str(d.get("postcondition")), ("", str(d.get("postcondition") or ""))
+            )
+            basis = d.get("legal_basis")
+            rows += (
+                f"<tr><td>{esc(d.get('subtype', ''))}</td>"
+                f"<td>{esc(d.get('action', ''))}</td>"
+                f"<td>{esc(d.get('reason') or '—')}</td>"
+                f"<td><span class=\"{cls}\">{esc(label)}</span></td>"
+                f"<td>{esc(basis or 'unspecified')}</td></tr>"
+            )
+        dispositions_html = (
+            "<h2>Finding dispositions</h2>"
+            f"<p>{len(dispositions)} finding type(s) were present before sanitization. "
+            "Each row states what the policy decided and what the post-sanitize "
+            "re-inspect observed. A row marked RETAINED is disclosed as a limitation "
+            "above and below.</p>"
+            "<table><thead><tr><th>Finding subtype</th><th>Policy action</th>"
+            "<th>Reason</th><th>Postcondition</th><th>Legal basis</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+        )
+
+    # Residual authoring metadata: what the policy removed beyond the
+    # findings, and -- the half that matters -- what it deliberately kept.
+    # A policy that is silent about RSIDs, persistent document ids and
+    # session timestamps leaves a reader unable to tell a decision from an
+    # oversight, which is the same class of defect as an unstated
+    # limitation.
+    residual_html = ""
+    if residual_metadata and (residual_metadata.get("stripped") or residual_metadata.get("retained")):
+        stripped = residual_metadata.get("stripped") or []
+        retained = residual_metadata.get("retained") or []
+        stripped_html = (
+            "<ul>" + "".join(f"<li>{esc(x)}</li>" for x in stripped) + "</ul>"
+            if stripped
+            else "<p>Nothing beyond the findings and identity fields listed above.</p>"
+        )
+        retained_html = (
+            "<ul>"
+            + "".join(
+                f"<li><strong>{esc(r.get('field', ''))}</strong> — {esc(r.get('reason', ''))}</li>"
+                for r in retained
+                if isinstance(r, dict)
+            )
+            + "</ul>"
+            if retained
+            else "<p>None.</p>"
+        )
+        residual_html = (
+            "<h2>Residual authoring metadata</h2>"
+            "<p>Authoring exhaust is not a finding: it is metadata this policy takes "
+            "an explicit position on. Both halves of that position are recorded.</p>"
+            f"<h3>Removed</h3>{stripped_html}"
+            f"<h3>Deliberately retained</h3>{retained_html}"
+        )
+
     disclaimer = (
         "This certificate records CounselClear's own recorded state for this single "
         "job — what ran, what the applied policy did, what was verified, and what "
@@ -573,6 +745,10 @@ Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
 
 <h2>Manifest actions</h2>
 {actions_html}
+
+{dispositions_html}
+
+{residual_html}
 
 {legal_justifications_html}
 
@@ -2138,8 +2314,27 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # Honest anchor, same discipline as the packet's: the
             # signature lives on the full release packet, and only
             # content the packet binds is signature-protected. "none"
-            # remains the truthful claim for THIS artifact's own bytes.
-            "anchor": {"type": "none", "digest": None, "reference": None},
+            # remains the truthful claim for THIS artifact's own bytes --
+            # but a recipient holding this file next to a release_packet.json
+            # carrying an RFC 3161 TSA anchor read the two as contradicting
+            # each other (2026-09-02 test case). The bare word was accurate
+            # and still misleading, so the field now says WHAT it scopes to
+            # and where the packet's own anchor lives. The type value itself
+            # is unchanged: the verifier's honest "NOT EXTERNALLY ANCHORED"
+            # note for this artifact keys off it and must not weaken.
+            "anchor": {
+                "type": "none",
+                "digest": None,
+                "reference": None,
+                "scope": "release_result_bytes",
+                "note": (
+                    "Describes this release_result.json's own bytes only. It is NOT a "
+                    "statement about the release packet: when anchoring is configured, "
+                    "the RFC 3161 timestamp is applied to release_packet.json's "
+                    "signature and is recorded in that file's own anchor field. Read "
+                    "the two fields as answering different questions, not as a conflict."
+                ),
+            },
         }
 
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/releases")
@@ -2922,25 +3117,32 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             policy_meta = next((p for p in POLICIES if p["id"] == policy_id), None)
             policy_description = policy_meta["description"] if policy_meta else None
 
-        limitations: list[str] = []
-        no_decision = [a for a in actions if NO_DECISION_MARKER in a]
-        if no_decision:
+        limitations: list[str] = _retention_limitations(manifest, actions)
+        dispositions: list[dict] = [
+            d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)
+        ] if job.kind == "sanitize" else []
+        # Cross-check, not decoration: the disposition ledger is built from
+        # the verifier's own before/after observation, while limitations
+        # come from the action records. If the ledger says a finding is
+        # still in the derivative and the limitations list is silent, the
+        # certificate would be back to overstating the absence of
+        # limitations -- the exact P1 the 2026-09-02 test case caught. Say
+        # so on the certificate rather than let the two views disagree
+        # quietly; the invariant is also asserted in
+        # tests/test_disposition_ledger.py so this branch stays unreachable
+        # in practice.
+        retained_rows = [
+            d for d in dispositions
+            if d.get("postcondition") in ("retained_as_planned", "retained_unplanned")
+        ]
+        if retained_rows and not limitations:
             limitations.append(
-                f"{len(no_decision)} finding(s) kept WITHOUT operator review "
-                f"({NO_DECISION_MARKER}): " + "; ".join(no_decision)
-            )
-        operator_kept = [a for a in actions if OPERATOR_KEPT_MARKER in a]
-        if operator_kept:
-            limitations.append(
-                f"{len(operator_kept)} finding(s) reviewed and explicitly kept by "
-                "the operator: " + "; ".join(operator_kept)
-            )
-        approved_no_op = [a for a in actions if APPROVED_BUT_NO_OP_MARKER in a]
-        if approved_no_op:
-            limitations.append(
-                f"{len(approved_no_op)} finding(s) approved by the operator but "
-                "structurally kept anyway (this policy has no strip action for "
-                "that subtype): " + "; ".join(approved_no_op)
+                f"{len(retained_rows)} finding(s) remain in the derivative per this "
+                "job's disposition ledger ("
+                + "; ".join(str(d.get("subtype") or "?") for d in retained_rows)
+                + ") but produced no action-record limitation. Treat the disposition "
+                "table below as authoritative and this certificate as internally "
+                "inconsistent."
             )
         if job.status in ("refused", "failed"):
             limitations.append(
@@ -3043,6 +3245,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             generated_by=generated_by,
             release_context=release_context,
             legal_justifications=legal_justifications,
+            dispositions=dispositions,
+            residual_metadata=(
+                manifest.get("residual_metadata") if job.kind == "sanitize" else None
+            ),
             attestation_kind=attestation_kind,
         )
         return body, policy_id, limitations

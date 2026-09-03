@@ -901,6 +901,51 @@ _PRIVACY_PROP_FIELDS = (
     ("Manager", "Manager"),
 )
 
+# --- Residual authoring exhaust (2026-09-02 custody review) -----------------
+#
+# DOCX_SCRUB_FIELDS above clears authoring IDENTITY. It never touched the
+# other half of the authoring record: the per-edit-session correlators and
+# session counters Word writes on its own. A derivative that had lost its
+# creator and Application still carried w:rsid* revision-save IDs,
+# w14/w15:docId, the original create/modify timestamps, the revision
+# number and the editing-minutes counter. Those are exactly what links two
+# documents to the same drafting session, or dates a "final" draft to the
+# night before -- under a policy whose stated wedge is decoupling visible
+# content from private authoring exhaust, leaving the policy SILENT about
+# them was the defect, not any single field.
+#
+# Scope decision (owner, 2026-09-02): strip the pure correlators and the
+# session counters, which have no rendering effect; deliberately RETAIN
+# dc:title, the word/character/paragraph statistics, and the Template
+# reference, which are either document-descriptive or load-bearing for
+# fidelity. What is retained is disclosed rather than left unstated --
+# see AUTHORING_EXHAUST_RETAINED and the manifest's residual_metadata.
+
+# Attributes Word stamps on paragraphs/runs to correlate edit sessions
+# across documents. Removed attribute-wise (never element-wise): they
+# carry no content and no rendering effect.
+_RSID_ATTR_RE = re.compile(rb'\s(?:w|w14):rsid[A-Za-z]*="[^"]*"')
+# The <w:rsids> table in settings.xml (the session catalogue itself) and
+# the persistent per-document identifiers.
+_RSIDS_BLOCK_RE = re.compile(rb"<w:rsids\b.*?</w:rsids>|<w:rsids\b[^>]*/>", re.S)
+_DOC_ID_RE = re.compile(rb"<w1[45]:docId\b[^>]*/>|<w1[45]:docId\b[^>]*>.*?</w1[45]:docId>", re.S)
+# Session counters and timestamps in docProps. Emptied, not deleted: the
+# element staying present with no value keeps the part schema-valid and
+# makes the blanking itself visible to anyone diffing the parts.
+_EXHAUST_PROP_FIELDS = (
+    ("dcterms:created", "dcterms:created"),
+    ("dcterms:modified", "dcterms:modified"),
+    ("cp:revision", "cp:revision"),
+    ("TotalTime", "TotalTime"),
+)
+# Deliberately retained under external_sharing/production, and disclosed as
+# such rather than silently left in place. Each entry is (field, why).
+AUTHORING_EXHAUST_RETAINED = (
+    ("dc:title", "the document's own heading, not provenance"),
+    ("Words/Characters/Lines/Paragraphs", "document statistics; describe the content itself"),
+    ("Template", "template reference; removing it changes how Word opens the file"),
+)
+
 _PII_VALUE_RE = re.compile(
     r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
     r"|\+?\d[\d\s().-]{7,}\d"
@@ -1074,6 +1119,33 @@ _DOCX_VANISH_RE = re.compile(rb"<w:vanish\b")
 # double-quote-only match let white-on-white text written with single
 # quotes (w:val='FFFFFF') hide from this exact privilege-risk detector.
 _DOCX_WHITE_RE = re.compile(rb'<w:color\b[^>]*w:val=(["\'])[Ff]{6}\1')
+# Body-bearing parts, i.e. parts that can carry actual text runs. Every
+# other word/*.xml part (styles.xml, numbering.xml, settings.xml,
+# theme/*.xml, fontTable.xml ...) is Word's formatting machinery: a white
+# w:color there is a style or numbering RULE, not concealed text.
+#
+# The distinction is not cosmetic. A finding string reading
+# "docx-hidden-text: vanish=0 white=119" counted every FFFFFF colour
+# declaration in the package and read, to a reviewer, as "119 pieces of
+# concealed text" -- when a normal Word document's styles.xml alone
+# accounts for most of them and the body may contain none at all. An
+# evidentiary tool must not let a style-level condition wear the language
+# of hidden content, so the two are counted and reported separately.
+_DOCX_BODY_PART_RE = re.compile(
+    r"^word/(document\d*\.xml|header\d*\.xml|footer\d*\.xml|footnotes\.xml"
+    r"|endnotes\.xml|comments\.xml|glossary/document\.xml)$"
+)
+# A white colour inside run properties, i.e. actually applied to a run of
+# text rather than declared in a style. Scoped to <w:rPr>...</w:rPr> so a
+# paragraph-mark colour (w:pPr/w:rPr) or a table style does not inflate it.
+_DOCX_APPLIED_WHITE_RE = re.compile(
+    rb"<w:rPr\b(?:(?!</w:rPr>).)*?<w:color\b[^>]*w:val=([\"'])[Ff]{6}\1",
+    re.S,
+)
+
+
+def _is_docx_body_part(name: str) -> bool:
+    return bool(_DOCX_BODY_PART_RE.match(name))
 _DOCX_HIGHLIGHT_RE = re.compile(rb"<w:highlight\b")
 _DOCX_COMMENT_MARKER_RE = re.compile(rb"<w:(?:commentRangeStart|commentRangeEnd|commentReference)\b")
 # Anything that makes a part worth an XML-aware pass on clean.
@@ -1118,6 +1190,10 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         comment_count = len(re.findall(rb"<w:comment\b", raw))
     ins = de = fmt_changes = vanish = white = highlight = markers = embeddings = 0
     row_dels = cell_revs = 0
+    white_applied = 0
+    vanish_parts: list[str] = []
+    white_applied_parts: list[str] = []
+    white_rule_parts: dict[str, int] = {}
     for info in zf.infolist():
         name = info.filename
         if name.startswith("word/embeddings/"):
@@ -1128,8 +1204,21 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         ins += len(_DOCX_INS_RE.findall(raw))
         de += len(_DOCX_DEL_RE.findall(raw))
         fmt_changes += len(_DOCX_FMT_CHANGE_RE.findall(raw))
-        vanish += len(_DOCX_VANISH_RE.findall(raw))
-        white += len(_DOCX_WHITE_RE.findall(raw))
+        part_vanish = len(_DOCX_VANISH_RE.findall(raw))
+        vanish += part_vanish
+        if part_vanish:
+            vanish_parts.append(name)
+        part_white = len(_DOCX_WHITE_RE.findall(raw))
+        white += part_white
+        if part_white:
+            white_rule_parts[name] = part_white
+        # Applied white counts ONLY inside a body-bearing part: a white run
+        # colour in styles.xml is a style definition, not text on the page.
+        if _is_docx_body_part(name):
+            part_applied = len(_DOCX_APPLIED_WHITE_RE.findall(raw))
+            white_applied += part_applied
+            if part_applied:
+                white_applied_parts.append(name)
         highlight += len(_DOCX_HIGHLIGHT_RE.findall(raw))
         markers += len(_DOCX_COMMENT_MARKER_RE.findall(raw))
         row_dels += len(_DOCX_ROW_DEL_RE.findall(raw))
@@ -1143,6 +1232,14 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         "hidden_vanish": vanish,
         "hidden_white": white,
         "hidden_highlight": highlight,
+        # Evidence for the white-font finding, so a reviewer can tell a
+        # style-level condition from concealed text without re-deriving it
+        # from the original package (which, once a derivative is the only
+        # artifact a recipient holds, they cannot do at all).
+        "hidden_white_applied_runs": white_applied,
+        "hidden_white_rule_parts": dict(sorted(white_rule_parts.items())),
+        "hidden_white_applied_parts": sorted(white_applied_parts),
+        "hidden_vanish_parts": sorted(vanish_parts),
         "comment_markers": markers,
         "embeddings": embeddings,
         "row_deletions": row_dels,
@@ -1166,7 +1263,26 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
             "(not auto-resolved by Accept All; review before sharing)"
         )
     if vanish or white or highlight:
-        findings.append(f"docx-hidden-text: vanish={vanish} white={white} highlight={highlight}")
+        # Say what was actually observed, with the detection basis, rather
+        # than a bare count that reads as "N pieces of concealed text".
+        # white_rules counts FFFFFF colour declarations anywhere in the
+        # package's word/*.xml parts -- overwhelmingly styles/numbering
+        # machinery in an ordinary document; white_applied_runs counts
+        # them inside run properties in a body-bearing part, which is the
+        # number that means "text a reader would not see".
+        basis = ""
+        if white:
+            where = ", ".join(sorted(white_rule_parts)[:4])
+            basis = (
+                f" (white_rules counts w:color=FFFFFF declarations across word/*.xml, "
+                f"style and numbering definitions included, in: {where}; "
+                f"white_applied_runs counts them inside w:rPr in a body-bearing part)"
+            )
+        findings.append(
+            f"docx-hidden-text: vanish={vanish} "
+            f"white_applied_runs={white_applied} white_rules={white} "
+            f"highlight={highlight}{basis}"
+        )
     if embeddings:
         findings.append(f"docx-embeddings: {embeddings} embedded object(s)")
     return report, findings
@@ -1648,6 +1764,27 @@ def _layer_a_body_part(fmt: str, name: str) -> bool:
     return True
 
 
+def _strip_authoring_exhaust(name: str, raw: bytes, counts: dict[str, int]) -> bytes:
+    """Remove edit-session correlators from one OOXML part.
+
+    Attribute- and element-scoped so it cannot touch text: RSIDs and docIds
+    have no rendering effect at all, which is why they can be removed
+    outright rather than flagged. Counts accumulate across parts so the
+    manifest carries one summary line instead of one per part -- the action
+    list is capped downstream, and a hundred per-part lines would push the
+    findings that need a human out of it.
+    """
+    out = raw
+    if name.endswith(".xml") and (name.startswith("word/") or name.startswith("ppt/")):
+        out, n = _RSID_ATTR_RE.subn(b"", out)
+        counts["rsid_attrs"] = counts.get("rsid_attrs", 0) + n
+        out, n = _RSIDS_BLOCK_RE.subn(b"", out)
+        counts["rsid_tables"] = counts.get("rsid_tables", 0) + n
+        out, n = _DOC_ID_RE.subn(b"", out)
+        counts["doc_ids"] = counts.get("doc_ids", 0) + n
+    return out
+
+
 def _scrub_ooxml_zip(
     data: bytes,
     fmt: str,
@@ -1657,11 +1794,13 @@ def _scrub_ooxml_zip(
     prop_fields: tuple[tuple[str, str], ...] | None = None,
     drop_custom_xml: bool = True,
     pii_blank_extra: bool = False,
+    strip_authoring_exhaust: bool = False,
 ) -> tuple[bytes, list[str]]:
     actions: list[str] = []
     budget = [0]
     layer_removed = 0
     layer_replaced = 0
+    exhaust_counts: dict[str, int] = {}
     kept: list[tuple[zipfile.ZipInfo, bytes]] = []
     with zipfile.ZipFile(io.BytesIO(data)) as zin:
         for info in zin.infolist():
@@ -1716,6 +1855,8 @@ def _scrub_ooxml_zip(
                     actions.append(f"drop part {name}")
                     continue
                 fields = DOCX_SCRUB_FIELDS if prop_fields is None else prop_fields
+                if strip_authoring_exhaust:
+                    fields = fields + _EXHAUST_PROP_FIELDS
                 text = raw.decode("utf-8", errors="replace")
                 new = text
                 for tag, label in fields:
@@ -1770,6 +1911,16 @@ def _scrub_ooxml_zip(
                     actions.append(f"drop Content_Types custom.xml override x{n}")
                     raw = new.encode("utf-8")
 
+            # 4b. Authoring exhaust (edit-session correlators). Must run
+            # BEFORE the Layer A block below: that block `continue`s out of
+            # the loop for every non-body part, and word/settings.xml --
+            # which holds the w:rsids session catalogue and the persistent
+            # w14/w15:docId -- is exactly such a part. Placed after the
+            # docProps pass so both halves of the authoring record (identity
+            # and correlators) are handled in one place in the flow.
+            if strip_authoring_exhaust:
+                raw = _strip_authoring_exhaust(name, raw, exhaust_counts)
+
             # 5. Layer A text runs
             if also_layer_a_text and name.endswith(".xml"):
                 if layer_a_scope == "body" and not _layer_a_body_part(fmt, name):
@@ -1813,6 +1964,13 @@ def _scrub_ooxml_zip(
     with zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         for info, raw in final:
             zout.writestr(info, raw)
+    if any(exhaust_counts.values()):
+        actions.append(
+            "scrub authoring exhaust: "
+            f"rsid attributes={exhaust_counts.get('rsid_attrs', 0)} "
+            f"rsid session tables={exhaust_counts.get('rsid_tables', 0)} "
+            f"persistent docIds={exhaust_counts.get('doc_ids', 0)}"
+        )
     if layer_removed or layer_replaced:
         actions.append(f"layer A text: removed={layer_removed} replaced={layer_replaced}")
     if not actions:
@@ -2200,6 +2358,7 @@ def clean_docx(
     prop_fields: tuple[tuple[str, str], ...] | None = None,
     drop_custom_xml: bool = True,
     pii_blank_extra: bool = False,
+    strip_authoring_exhaust: bool | None = None,
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _docx_legal_clean(
         data,
@@ -2207,6 +2366,12 @@ def clean_docx(
         strip_embeddings=strip_embeddings,
         strip_comments=strip_comments,
     )
+    # Defaults to the full-identity-scrub path (prop_fields is None ==
+    # external_sharing / production). privacy_only passes its own narrow
+    # field list and keeps the document byte-faithful apart from the named
+    # identity fields, so it must NOT gain a correlator strip by default.
+    if strip_authoring_exhaust is None:
+        strip_authoring_exhaust = prop_fields is None
     data, scrub_actions = _scrub_ooxml_zip(
         data,
         "docx",
@@ -2215,6 +2380,7 @@ def clean_docx(
         prop_fields=prop_fields,
         drop_custom_xml=drop_custom_xml,
         pii_blank_extra=pii_blank_extra,
+        strip_authoring_exhaust=strip_authoring_exhaust,
     )
     return data, legal_actions + scrub_actions
 

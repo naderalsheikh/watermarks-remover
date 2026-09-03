@@ -44,7 +44,11 @@
         "format_changes": 0,
         "hidden_highlight": 0,
         "hidden_vanish": 0,
+        "hidden_vanish_parts": [],
         "hidden_white": 0,
+        "hidden_white_applied_parts": [],
+        "hidden_white_applied_runs": 0,
+        "hidden_white_rule_parts": {},
         "insertions": 0,
         "row_deletions": 0
       },

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://counselclear.local/schemas/manifest.v2.schema.json",
-  "title": "CounselClear Manifest v2",
-  "version": 2,
+  "$id": "https://counselclear.local/schemas/manifest.v1.schema.json",
+  "title": "CounselClear Manifest v1",
+  "version": 1,
   "type": "object",
   "required": [
     "manifest_version",
@@ -64,32 +64,6 @@
     "processor": { "type": "object" },
     "actions": { "type": "array", "items": { "type": "string" } },
     "action_records": { "type": "array", "items": { "$ref": "#/$defs/action_record" } },
-    "residual_metadata": {
-      "type": "object",
-      "required": ["stripped", "retained"],
-      "additionalProperties": false,
-      "properties": {
-        "stripped": { "type": "array", "items": { "type": "string" } },
-        "retained": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["field", "reason"],
-            "additionalProperties": false,
-            "properties": {
-              "field": { "type": "string", "minLength": 1 },
-              "reason": { "type": "string" }
-            }
-          }
-        }
-      },
-      "_comment_optional": "schema v2; not in required. The policy's explicit position on authoring exhaust that is neither a finding nor identity metadata -- RSIDs, persistent document ids, session timestamps and counters. A policy that is SILENT about these is the defect; this field makes the silence impossible."
-    },
-    "dispositions": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/disposition" },
-      "_comment_optional": "schema v2; not in required -- v1 manifests carry no disposition ledger and must keep validating. One entry per subtype PRESENT before sanitization: finding -> policy decision -> post-sanitize observation, so no reader has to infer which stripping operation disposed of which pre-sanitize finding."
-    },
     "findings_before": { "type": "array", "items": { "type": "string" } },
     "verification": { "type": "object" },
     "timestamps": {
@@ -152,35 +126,7 @@
         "subtype": { "type": "string", "minLength": 1 },
         "action": { "type": "string", "minLength": 1 },
         "detail": { "type": "string" },
-        "legal_justification": { "$ref": "#/$defs/legal_justification" },
-        "retained_finding": {
-          "type": "boolean",
-          "_comment_optional": "schema v2; absent (== false) on v1 manifests. true means this record documents a finding that was PRESENT before sanitization and SURVIVES into the derivative. Every such record must produce a certificate limitation -- see main.py _build_certificate_html."
-        }
-      }
-    },
-    "disposition": {
-      "type": "object",
-      "required": ["subtype", "present_before", "action", "reason", "present_after", "postcondition"],
-      "additionalProperties": false,
-      "properties": {
-        "subtype": { "type": "string", "minLength": 1 },
-        "present_before": { "type": "boolean" },
-        "action": { "type": "string", "minLength": 1 },
-        "reason": { "type": ["string", "null"] },
-        "present_after": {
-          "type": ["boolean", "null"],
-          "_comment": "null when the post-sanitize re-inspect could not observe this subtype either way"
-        },
-        "postcondition": {
-          "enum": [
-            "removed_confirmed",
-            "retained_as_planned",
-            "retained_unplanned",
-            "not_verifiable"
-          ]
-        },
-        "legal_basis": { "type": ["string", "null"] }
+        "legal_justification": { "$ref": "#/$defs/legal_justification" }
       }
     }
   }

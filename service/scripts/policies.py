@@ -506,6 +506,23 @@ class ActionRecord:
     action: str
     detail: str
     legal_justification: dict[str, str] | None = None
+    # True when this record documents a finding that WAS PRESENT before
+    # sanitization and SURVIVES into the derivative (kept / flagged /
+    # inspect-only). The certificate's limitations list is derived from
+    # this flag, not from matching marker substrings inside ``detail``:
+    # string matching caught only the three approve-default markers, so a
+    # policy "flag" outcome -- a knowingly retained finding -- produced no
+    # limitation at all and the certificate could truthfully-looking claim
+    # "No limitations flagged for this job" while the same manifest said
+    # "finding remains in derivative". A retained finding is definitionally
+    # a limitation; this makes that structural rather than lexical.
+    #
+    # Deliberately NOT set on the "nothing was found, nothing was done"
+    # keeps (`text unchanged`, `av unchanged`, `privacy: image unchanged`):
+    # those are not retained findings and flagging them would produce the
+    # opposite defect -- limitations noise that trains a reader to skip the
+    # section.
+    retained_finding: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -515,6 +532,8 @@ class ActionRecord:
         }
         if self.legal_justification is not None:
             d["legal_justification"] = dict(self.legal_justification)
+        if self.retained_finding:
+            d["retained_finding"] = True
         return d
 
 
@@ -752,14 +771,30 @@ NO_DECISION_MARKER = "no operator decision was supplied"
 # the UI must be able to tell the two apart by string.
 OPERATOR_KEPT_MARKER = "reviewed and kept by operator"
 # A third, narrower case: _APPROVE_RESOLVES_TO maps every approve-default
-# subtype to the sharing-path action for that subtype -- for exactly one,
-# layer_a_non_body, that's itself "keep" (external_sharing's own row keeps
-# it). An operator who explicitly approves that subtype -- choosing strip,
-# not keep -- still ends up with reason "operator_approved" and action
-# "keep": a structural no-op the operator didn't ask for and wouldn't
-# expect from clicking "Approve". Confirmed by checking every
-# _APPROVE_RESOLVES_TO value directly, not assumed: layer_a_non_body is
-# the only subtype where this can happen.
+# subtype to the sharing-path action for that subtype. When that action is
+# itself non-removing, an operator who explicitly approves the subtype --
+# choosing strip, not keep -- gets reason "operator_approved" and a
+# structural no-op they did not ask for and would not expect from clicking
+# "Approve".
+#
+# This originally fired only for action == "keep", on the stated belief
+# that layer_a_non_body was "the only subtype where this can happen". That
+# was true of "keep" and false of the case as a whole: enumerating every
+# approve-default row against _APPROVE_RESOLVES_TO gives FOUR subtypes,
+# three of which resolve to "flag" and so produced no disclosure at all --
+#
+#   production: hidden_structure -> flag
+#               hidden_text      -> flag
+#               pdf_acroform     -> flag
+#               layer_a_non_body -> keep   (the only one previously covered)
+#
+# hidden_text is the one that matters: an operator approving it under
+# production is asking for concealed text to be removed, gets a flag, and
+# -- before this -- saw nothing on the certificate saying their approval
+# had not been acted on. The gate is the ACTION being non-removing, never
+# a hardcoded subtype list, so a policy edit that makes a fourth subtype
+# resolve this way is covered without touching this code.
+_NON_REMOVING_ACTIONS = frozenset({"keep", "flag", "inspect_only"})
 APPROVED_BUT_NO_OP_MARKER = "approved, but this subtype has no strip action under this policy"
 
 
@@ -785,6 +820,7 @@ def _surviving_finding_records(plan: ActionPlan, existing: set[tuple[str, str]])
                     f"kept: {NO_DECISION_MARKER} for this approve-default finding "
                     "(per-finding review is not yet available in this build)",
                     legal_justification=legal_justification,
+                    retained_finding=True,
                 )
             )
         elif reason == "operator_kept":
@@ -794,15 +830,24 @@ def _surviving_finding_records(plan: ActionPlan, existing: set[tuple[str, str]])
                     "keep",
                     f"kept: {OPERATOR_KEPT_MARKER} for this approve-default finding",
                     legal_justification=legal_justification,
+                    retained_finding=True,
                 )
             )
-        elif reason == "operator_approved" and action == "keep":
+        elif reason == "operator_approved" and action in _NON_REMOVING_ACTIONS:
+            # The record carries the action that actually ran, not a
+            # flattened "keep": a manifest that reported an approved-then-
+            # flagged finding as "keep" would be wrong about what the
+            # policy did, which is the same class of defect the marker
+            # exists to prevent.
             records.append(
                 ActionRecord(
                     st,
-                    "keep",
-                    f"kept: {APPROVED_BUT_NO_OP_MARKER} ({st})",
+                    action,
+                    f"{'kept' if action == 'keep' else action}: "
+                    f"{APPROVED_BUT_NO_OP_MARKER} ({st}); the operator approved this "
+                    "finding for removal and it was NOT removed",
                     legal_justification=legal_justification,
+                    retained_finding=True,
                 )
             )
         elif action == "flag":
@@ -812,6 +857,7 @@ def _surviving_finding_records(plan: ActionPlan, existing: set[tuple[str, str]])
                     "flag",
                     "flagged by policy; finding remains in derivative",
                     legal_justification=legal_justification,
+                    retained_finding=True,
                 )
             )
         elif action == "inspect_only":
@@ -821,6 +867,7 @@ def _surviving_finding_records(plan: ActionPlan, existing: set[tuple[str, str]])
                     "inspect_only",
                     "inspect-only policy; finding remains in original",
                     legal_justification=legal_justification,
+                    retained_finding=True,
                 )
             )
     return records
@@ -935,6 +982,10 @@ def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[Acti
                     if "accept-all" in m
                     else "comments_and_notes"
                     if "comment" in m.lower() or "notes" in m.lower()
+                    # "scrub authoring exhaust: ..." and "scrub <part> field
+                    # ..." are both authoring_props outcomes; the exhaust
+                    # line is matched first only because it is the more
+                    # specific string, not because the order matters.
                     else "authoring_props"
                     if "scrub" in m
                     else "layer_a_body"

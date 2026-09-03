@@ -34,6 +34,16 @@
       },
       "additionalProperties": false
     },
+    "subtypes_before": {
+      "type": "array",
+      "items": { "type": "string" },
+      "_comment_optional": "policy subtypes the pre-sanitize inspect found present; the input side of the manifest's disposition ledger"
+    },
+    "subtypes_after": {
+      "type": "array",
+      "items": { "type": "string" },
+      "_comment_optional": "policy subtypes the post-sanitize re-inspect observed; a subtype absent here is observed absent, not merely unmentioned"
+    },
     "hashes": {
       "type": "object",
       "properties": {

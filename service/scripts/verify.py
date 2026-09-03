@@ -496,4 +496,14 @@ def verify_derivative(
         "counts": counts,
         "page_count_delta_expected": page_delta_expected,
         "hashes": hashes,
+        # The raw observation behind check 1, kept rather than collapsed
+        # into its pass/fail: these two sets are what lets the manifest
+        # give every PRE-SANITIZE finding an explicit postcondition
+        # (custody.build_dispositions) instead of leaving a reader to
+        # infer which stripping operation disposed of which finding.
+        # ``subtypes_after`` is what the re-inspect actually observed, so
+        # a subtype absent from it is *observed absent*, not merely
+        # unmentioned.
+        "subtypes_before": sorted(before),
+        "subtypes_after": sorted(after),
     }

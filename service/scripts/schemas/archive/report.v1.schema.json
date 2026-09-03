@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://counselclear.local/schemas/report.v2.schema.json",
-  "title": "CounselClear Release Packet Report v2",
-  "version": 2,
+  "$id": "https://counselclear.local/schemas/report.v1.schema.json",
+  "title": "CounselClear Release Packet Report v1",
+  "version": 1,
   "type": "object",
   "required": ["report_version", "verification", "findings_before", "action_records"],
   "additionalProperties": false,
@@ -58,11 +58,7 @@
         "subtype": { "type": "string", "minLength": 1 },
         "action": { "type": "string", "minLength": 1 },
         "detail": { "type": "string" },
-        "legal_justification": { "$ref": "#/$defs/legal_justification" },
-        "retained_finding": {
-          "type": "boolean",
-          "_comment_optional": "schema v2; absent (== false) on v1 reports. Mirrors manifest.schema.json's field of the same name -- the finding was present before sanitization and survives into the derivative."
-        }
+        "legal_justification": { "$ref": "#/$defs/legal_justification" }
       }
     }
   }

@@ -32,6 +32,16 @@ import json
 from pathlib import Path
 
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
+# Superseded schema FILES, kept byte-for-byte under ``schemas/archive/`` as
+# ``<name>.v<N>.schema.json``. A pin's whole meaning is "this artifact was
+# built against THAT published contract", so a contract change must never
+# retroactively invalidate artifacts issued under the previous one: the
+# first post-pinning schema change (manifest v2, the retained_finding /
+# dispositions pass) would otherwise have made every packet ever issued
+# fail its own schema_sha256 recompute. Archiving the exact bytes is the
+# cheap half of the durability problem the README already names for the
+# signing key.
+SCHEMA_ARCHIVE_DIR = SCHEMA_DIR / "archive"
 
 # artifact name -> the published schema file describing it. The three
 # custody artifacts this pass pins; release_result.json deliberately
@@ -60,3 +70,27 @@ def schema_sha256_of(schema_name: str) -> str:
 
 SCHEMA_VERSION = {name: schema_version_of(fname) for name, fname in ARTIFACT_SCHEMAS.items()}
 SCHEMA_SHA256 = {name: schema_sha256_of(fname) for name, fname in ARTIFACT_SCHEMAS.items()}
+
+
+def schema_sha256_for_version(schema_name: str, version: int | None) -> str | None:
+    """sha256 of the published schema file for a DECLARED schema_version.
+
+    ``version`` is the artifact's own ``schema_version`` claim. The current
+    file answers for the current version; an older version resolves to its
+    archived bytes under ``schemas/archive/``. Returns None when neither is
+    available, which callers must report as "unavailable" rather than as a
+    failure -- the same discipline the verifier already applies to an
+    artifact carrying no pin at all.
+    """
+    fname = ARTIFACT_SCHEMAS.get(schema_name)
+    if fname is None:
+        return None
+    current = SCHEMA_DIR / fname
+    if version is None or not current.is_file():
+        return schema_sha256_of(fname) if current.is_file() else None
+    if int(version) == SCHEMA_VERSION.get(schema_name):
+        return schema_sha256_of(fname)
+    archived = SCHEMA_ARCHIVE_DIR / f"{schema_name}.v{int(version)}.schema.json"
+    if archived.is_file():
+        return hashlib.sha256(archived.read_bytes()).hexdigest()
+    return None

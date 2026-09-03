@@ -153,17 +153,45 @@ _FALLBACK_RELEASE_PACKET_FIELDS = (
 REQUIRED_SIBLING_FILES = ("manifest.json", "report.json", "certificate.html", "README.txt")
 
 
-def _published_schema_sha256(schema_name: str) -> str | None:
-    """sha256 of the shipped schema file's bytes, or None when the
-    schema file isn't deployed alongside this verifier. The pin's whole
-    meaning is 'the artifact was built against THIS published contract',
-    so the comparison target is the file shipped here, recomputed -- never
-    a hash hardcoded in this tool, which could drift from the file it
-    claims to describe. Stdlib-only, same as the rest of this module."""
+def _published_schema_sha256(schema_name: str, version: int | None = None) -> str | None:
+    """sha256 of the published schema file's bytes for a DECLARED
+    ``schema_version``, or None when that contract's file isn't deployed
+    alongside this verifier. The pin's whole meaning is 'the artifact was
+    built against THAT published contract', so the comparison target is
+    the file shipped here, recomputed -- never a hash hardcoded in this
+    tool, which could drift from the file it claims to describe.
+
+    Version resolution matters as soon as a contract changes: an artifact
+    pinned to manifest v1 must keep verifying after the current file
+    becomes v2, so a version older than the shipped file's own resolves
+    to its archived bytes under ``schemas/archive/<name>.v<N>.schema.json``
+    (kept byte-for-byte for exactly this). A version with no archived
+    file -- including one NEWER than this verifier ships -- resolves to
+    None and is reported "unavailable", never a mismatch: this verifier
+    cannot speak to a contract it does not hold. Stdlib-only, same as the
+    rest of this module."""
+    current = SCHEMA_DIR / schema_name
     try:
-        return _sha256((SCHEMA_DIR / schema_name).read_bytes())
+        current_bytes = current.read_bytes()
     except OSError:
+        current_bytes = None
+    if version is not None:
+        current_version = None
+        if current_bytes is not None:
+            try:
+                current_version = int(json.loads(current_bytes)["version"])
+            except (ValueError, KeyError, TypeError):
+                current_version = None
+        if current_version is not None and int(version) != current_version:
+            stem = schema_name.removesuffix(".schema.json")
+            archived = SCHEMA_DIR / "archive" / f"{stem}.v{int(version)}.schema.json"
+            try:
+                return _sha256(archived.read_bytes())
+            except OSError:
+                return None
+    if current_bytes is None:
         return None
+    return _sha256(current_bytes)
 
 
 # Which artifact members get a schema-pin cross-check, and against which
@@ -218,13 +246,14 @@ def _schema_pin_cross_checks(
                 "the pin is incomplete; refusing to guess which contract was meant"
             )
             continue
-        expected = _published_schema_sha256(schema_name)
+        expected = _published_schema_sha256(schema_name, version)
         if expected is None:
             checks.append(
                 CrossCheck(
                     f"schema_sha256 ({label})",
                     "unavailable",
-                    f"published schema file {schema_name} not shipped with this verifier",
+                    f"published schema {schema_name} v{version} not shipped with this "
+                    "verifier (neither the current file nor an archived copy)",
                 )
             )
             continue
@@ -328,7 +357,7 @@ def _anchor_note(anchor_type: str | None, *, artifact: str) -> str:
             "  externally timestamped or unforgeable by the operator's own key."
         )
     if anchor_type in (None, "none"):
-        return (
+        note = (
             f"  NOT EXTERNALLY ANCHORED. This {artifact}'s timestamp and content are\n"
             "  self-attested by the system that produced it. No independent party\n"
             "  has confirmed this content existed at the claimed time. The checks\n"
@@ -336,6 +365,20 @@ def _anchor_note(anchor_type: str | None, *, artifact: str) -> str:
             f"  this {artifact} match what it itself declares -- not that its own\n"
             "  claims are independently timestamped or unforgeable."
         )
+        if artifact == "release result":
+            # Scope the sentence to the artifact it is about. Unqualified, it
+            # read as "this release is not anchored" and appeared to
+            # contradict a release_packet.json sitting next to it carrying a
+            # verified RFC 3161 anchor (2026-09-02 test case). The two fields
+            # answer different questions; the tool must say so rather than
+            # leave a reader to reconcile them.
+            note += (
+                "\n  This describes THIS FILE only. The release packet is anchored\n"
+                "  separately, if at all: see release_packet.json's own anchor field\n"
+                "  (and the packet section of this report when both were verified\n"
+                "  together). A 'none' here is not a claim about the packet."
+            )
+        return note
     if anchor_type == "rfc3161-tsa":
         return (
             f"  RFC 3161 TSA anchor: the reference is a TimeStampToken whose\n"

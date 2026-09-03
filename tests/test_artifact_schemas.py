@@ -168,7 +168,12 @@ def test_emit_manifest_carries_schema_pin():
         findings_before=[],
         verification={"pass": True, "checks": []},
     )
-    assert manifest["schema_version"] == 1
+    # Version tracks the published file rather than a frozen literal: a
+    # contract change (manifest v2, the retained_finding / dispositions
+    # pass) must bump the schema and the pin together, and this test
+    # exists to prove the pin follows the file -- not to freeze a number
+    # that has to be hand-edited every time the contract moves.
+    assert manifest["schema_version"] == _schema("manifest.schema.json")["version"]
     assert manifest["schema_sha256"] == hashlib.sha256(
         (SCHEMA_DIR / "manifest.schema.json").read_bytes()
     ).hexdigest()
@@ -202,15 +207,15 @@ def test_real_release_artifacts_match_published_schemas(client):
     # PR 63: every artifact in the bundle names the published contract
     # it was built against -- version + file hash, checked here against
     # the same published files the schemas above came from.
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == _schema("manifest.schema.json")["version"]
     assert manifest["schema_sha256"] == hashlib.sha256(
         (SCHEMA_DIR / "manifest.schema.json").read_bytes()
     ).hexdigest()
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == _schema("report.schema.json")["version"]
     assert report["schema_sha256"] == hashlib.sha256(
         (SCHEMA_DIR / "report.schema.json").read_bytes()
     ).hexdigest()
-    assert release_packet["schema_version"] == 1
+    assert release_packet["schema_version"] == _schema("release_packet.schema.json")["version"]
     assert release_packet["schema_sha256"] == hashlib.sha256(
         (SCHEMA_DIR / "release_packet.schema.json").read_bytes()
     ).hexdigest()

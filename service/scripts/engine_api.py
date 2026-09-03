@@ -32,6 +32,7 @@ from common import (
     safe_write_text,
 )
 from container_meta import (
+    AUTHORING_EXHAUST_RETAINED,
     MAX_ZIP_DECOMPRESSED_BYTES,
     clean_container,
     detect_container_format,
@@ -791,6 +792,53 @@ def _layer_b_rewrite(
     }
 
 
+# Policies whose OOXML path strips edit-session correlators (see
+# container_meta._strip_authoring_exhaust). privacy_only deliberately does
+# not: it promises a byte-faithful document apart from the named identity
+# fields, so removing RSIDs there would break the promise it makes.
+_EXHAUST_STRIPPING_POLICIES = ("external_sharing", "production")
+
+
+def _residual_metadata(policy_id: str, fmt: str | None) -> dict[str, Any]:
+    """The policy's explicit position on authoring exhaust.
+
+    The 2026-09-02 review's fourth finding was not that the wrong fields
+    survived -- it was that the policy said NOTHING about them. A
+    derivative that had lost its creator and Application still carried
+    RSIDs, a persistent w14/w15:docId, the original create/modify
+    timestamps, the revision number and the editing-minutes counter, and a
+    reader had no way to tell whether that was a decision or an oversight.
+    Every custody manifest now states both halves: what was removed, and
+    what was deliberately kept and why.
+    """
+    if fmt not in ("docx", "pptx") or policy_id not in _EXHAUST_STRIPPING_POLICIES:
+        return {
+            "stripped": [],
+            "retained": [
+                {
+                    "field": "authoring exhaust (RSIDs, persistent docId, session "
+                    "timestamps and counters)",
+                    "reason": f"the {policy_id} policy does not strip authoring exhaust "
+                    f"for this format ({fmt or 'unknown'}); it remains in the derivative",
+                }
+            ],
+        }
+    return {
+        "stripped": [
+            "w:rsid* edit-session correlators (paragraph/run attributes and the "
+            "w:rsids session table in settings.xml)",
+            "w14:docId / w15:docId persistent document identifiers",
+            "dcterms:created / dcterms:modified original authoring timestamps",
+            "cp:revision save count",
+            "TotalTime editing-minutes counter",
+        ],
+        "retained": [
+            {"field": field, "reason": reason}
+            for field, reason in AUTHORING_EXHAUST_RETAINED
+        ],
+    }
+
+
 def clean_to_bundle(
     src: Path,
     out_dir: Path,
@@ -901,6 +949,22 @@ def clean_to_bundle(
     actions = [f"{r.subtype}:{r.action}: {r.detail}" for r in records] or list(
         result.finding_strings
     )
+    # One-to-one accounting for every PRE-SANITIZE finding: what was found,
+    # what the policy decided, and what the post-sanitize re-inspect then
+    # observed. verify_derivative already computed both sides; without this
+    # the manifest recorded them only as a collapsed pass/fail, so a
+    # finding that vanished as a side effect of a broader strip had no
+    # traceable disposition at all.
+    dispositions = custody_mod.build_dispositions(
+        plan_actions=plan.actions,
+        subtypes_before=verification.get("subtypes_before") or sorted(plan.present_subtypes),
+        subtypes_after=verification.get("subtypes_after"),
+        legal_by_subtype={
+            r.subtype: (r.legal_justification or {}).get("basis")
+            for r in records
+            if getattr(r, "legal_justification", None)
+        },
+    )
 
     proc = _processor()
     processor_dict: dict[str, Any] = {
@@ -947,6 +1011,8 @@ def clean_to_bundle(
         policy_id=policy_id,
         actions=actions,
         action_records=action_records,
+        dispositions=dispositions,
+        residual_metadata=_residual_metadata(policy_id, result.format),
         processor=processor_dict,
         findings_before=result.finding_strings,
         verification=verification,

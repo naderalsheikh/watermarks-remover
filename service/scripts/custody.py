@@ -109,6 +109,76 @@ def tool_presence(names: tuple[str, ...] = ("qpdf", "exiftool", "c2patool")) -> 
     return {name: shutil.which(name) is not None for name in names}
 
 
+# Actions that leave a present finding in the derivative rather than
+# removing it. Kept next to build_dispositions (rather than imported from
+# policies.py) so custody.py stays importable by the offline path without
+# dragging the policy engine in; the two lists are asserted equal in
+# tests/test_disposition_ledger.py.
+_RETAINING_ACTIONS = frozenset({"keep", "flag", "inspect_only", "refuse"})
+
+
+def build_dispositions(
+    *,
+    plan_actions: dict[str, dict[str, Any]],
+    subtypes_before: list[str] | set[str],
+    subtypes_after: list[str] | set[str] | None,
+    legal_by_subtype: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """One row per finding PRESENT before sanitization:
+    finding -> policy decision -> post-sanitize observation.
+
+    The gap this closes: a manifest recorded what was found (three
+    human-readable strings) and what was done (a flat action list), and
+    left a reader to *infer* which stripping operation disposed of which
+    pre-sanitize finding. When a finding disappeared as a side effect of
+    a broader strip -- an AI-generator marker carried inside custom XML,
+    say -- nothing in the record connected the two ends, and "verification
+    passed" had to be taken as covering it. Every row here carries its own
+    postcondition instead:
+
+    - ``removed_confirmed``  -- planned to be removed, and the
+      post-sanitize re-inspect no longer observes it.
+    - ``retained_as_planned``-- the policy chose to keep/flag it and it is
+      still there. This is a LIMITATION, never a clean result.
+    - ``retained_unplanned`` -- it was planned for removal and is STILL
+      OBSERVED. verify_derivative's reinspect_targeted_gone check fails
+      the job on this, so it should never reach a released derivative;
+      the row exists so the ledger can state it rather than omit it.
+    - ``not_verifiable``     -- no post-sanitize observation was available
+      for this subtype (no derivative, or the re-inspect cannot enumerate
+      it). Deliberately NOT reported as removed.
+    """
+    before = set(subtypes_before or ())
+    after_known = subtypes_after is not None
+    after = set(subtypes_after or ())
+    legal = legal_by_subtype or {}
+    rows: list[dict[str, Any]] = []
+    for st in sorted(before):
+        eff = plan_actions.get(st) or {}
+        action = str(eff.get("action") or "unknown")
+        still_present = st in after
+        if not after_known:
+            postcondition = "not_verifiable"
+        elif action in _RETAINING_ACTIONS:
+            postcondition = "retained_as_planned" if still_present else "removed_confirmed"
+        elif still_present:
+            postcondition = "retained_unplanned"
+        else:
+            postcondition = "removed_confirmed"
+        rows.append(
+            {
+                "subtype": st,
+                "present_before": True,
+                "action": action,
+                "reason": eff.get("reason"),
+                "present_after": still_present if after_known else None,
+                "postcondition": postcondition,
+                "legal_basis": legal.get(st),
+            }
+        )
+    return rows
+
+
 def emit_manifest(
     *,
     original_name: str,
@@ -121,6 +191,8 @@ def emit_manifest(
     actions: list[str],
     processor: dict[str, Any],
     action_records: list[dict[str, Any]] | None = None,
+    dispositions: list[dict[str, Any]] | None = None,
+    residual_metadata: dict[str, Any] | None = None,
     findings_before: list[str] | None = None,
     verification: dict[str, Any] | None = None,
     operator_id: str | None = None,
@@ -159,6 +231,8 @@ def emit_manifest(
         "processor": processor,
         "actions": list(actions),
         "action_records": list(action_records or []),
+        "dispositions": list(dispositions or []),
+        "residual_metadata": dict(residual_metadata or {"stripped": [], "retained": []}),
         "findings_before": list(findings_before or []),
         "verification": dict(verification or {}),
         "timestamps": {

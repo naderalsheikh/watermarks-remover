@@ -88,7 +88,15 @@
       "properties": {
         "type": { "type": "string" },
         "digest": { "type": ["string", "null"] },
-        "reference": { "type": ["string", "null"] }
+        "reference": { "type": ["string", "null"] },
+        "scope": {
+          "type": "string",
+          "_comment_optional": "what this anchor field describes. \"release_result_bytes\" means it describes THIS artifact's own bytes only -- it is not a statement about whether the release packet is anchored. Absent on results issued before 2026-09-02."
+        },
+        "note": {
+          "type": "string",
+          "_comment_optional": "human-readable reconciliation with the packet's own anchor field, so a recipient holding both artifacts does not read them as contradicting each other."
+        }
       }
     }
   },

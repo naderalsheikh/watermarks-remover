@@ -1,8 +1,9 @@
 # Claim-Copy Audit — marketing and UI copy vs. what the product enforces
 
 **Status:** audit only. No copy was edited, renamed, or deleted; no disclaimer was added to any new surface. Recommendations below are decisions for the product owner.
+**Update 2026-09-02:** rows **A1/A3/A7/A9** are scheduled as Lane C of `docs/counselclear-custody-truthfulness-plan.md`; row **D5** is resolved there. Line references into `service/app/main.py` were refreshed on the same date after the certificate builder grew its disposition and residual-metadata sections.
 **Date:** 2026-09-01 · **Branch:** `agent/z-claim-copy-audit`
-**Scope swept:** `README.md`, every file under `docs/` (excluding `docs/legal-panel/`), every UI string under `web/app/` and `web/components/`, and the certificate template. `service/scripts/certificate.html` no longer exists — the per-job custody certificate and the matter summary report are now generated inline by `_render_job_certificate_html` / `_build_certificate_html` and the `disclaimer` literals in `service/app/main.py` (lines ~239 and ~515), so those generated surfaces were audited at their current location. The upstream-utility surfaces (`docs/UPSTREAM_UTILITY_LEGACY.md`, `docs/synthid-text-benchmark.md`) were swept and are included; the research/commercial-surface manifests were swept and contain no legal-sufficiency claims (their hits are triage labels like `safe-to-keep`, which are file-disposition categories, not product claims — noted, not rowed).
+**Scope swept:** `README.md`, every file under `docs/` (excluding `docs/legal-panel/`), every UI string under `web/app/` and `web/components/`, and the certificate template. `service/scripts/certificate.html` no longer exists — the per-job custody certificate and the matter summary report are now generated inline by `_render_job_certificate_html` / `_build_certificate_html` and the `disclaimer` literals in `service/app/main.py` (lines ~330 and ~687), so those generated surfaces were audited at their current location. The upstream-utility surfaces (`docs/UPSTREAM_UTILITY_LEGACY.md`, `docs/synthid-text-benchmark.md`) were swept and are included; the research/commercial-surface manifests were swept and contain no legal-sufficiency claims (their hits are triage labels like `safe-to-keep`, which are file-disposition categories, not product claims — noted, not rowed).
 
 **Terms swept (case-insensitive):** defensible, safe-sharing, immutable, court-proof, verified, compliant, SynthID detection, Google-compatible — plus near-synonyms found in context: certified/certification, guaranteed/guarantee, admissible, machine-verifiable, verifiable, "independently timestamped", unforgeable, unimpeachable, "safe to share", "write-once", "lossless", trust/trustworthy, "not externally anchored", "Chain verified".
 
@@ -12,11 +13,11 @@
 
 ### Standing disclaimer, quoted exactly
 
-`service/app/main.py:239-247` (matter summary report):
+`service/app/main.py:330-338` (matter summary report):
 
 > "This report summarizes CounselClear's own recorded state for this matter -- document and job counts, open attention items, and audit chain integrity -- as of the generation timestamp below. It is **not** a legal certification, attestation, or a claim that any document is fully “clean” beyond what the per-job manifest and the hash-chained audit trail themselves record. Consult the individual job manifests for exactly what was stripped, flagged, or kept in each derivative."
 
-The per-job certificate carries its own equivalent (`service/app/main.py:514-521`):
+The per-job certificate carries its own equivalent (`service/app/main.py:687-695`):
 
 > "This certificate records CounselClear's own recorded state for this single job — what ran, what the applied policy did, what was verified, and what is explicitly disclosed as a limitation below — as of the generation timestamp. It is <strong>not</strong> a claim that this document is “clean,” “safe,” or free of risk beyond what is stated here, and it is <strong>not</strong> a legal opinion. Any limitation listed below is part of the certificate, not a defect in it."
 
@@ -103,11 +104,11 @@ Recommendations: **KEEP** = at least as narrow as the yardstick disclaimer; **QU
 
 | # | File:Line | Exact string | Context | Recommendation | Rationale |
 |---|-----------|--------------|---------|----------------|-----------|
-| D1 | `service/app/main.py:239-247` | Standing disclaimer (quoted in full above) | Matter summary report. | **KEEP** | The yardstick itself. |
-| D2 | `service/app/main.py:514-521` | Certificate disclaimer (quoted in full above) | Per-job custody certificate. | **KEEP** | The yardstick's per-job equivalent. |
+| D1 | `service/app/main.py:330-338` | Standing disclaimer (quoted in full above) | Matter summary report. | **KEEP** | The yardstick itself. |
+| D2 | `service/app/main.py:687-695` | Certificate disclaimer (quoted in full above) | Per-job custody certificate. | **KEEP** | The yardstick's per-job equivalent. |
 | D3 | `service/app/main.py:228-233` | `The complete, hash-chain-verifiable audit trail is available via the CSV export …, not reproduced in full here.` | Summary report preamble. | **KEEP** | "hash-chain-verifiable" is attached to the concrete mechanism (the CSV + chain) and the sentence immediately scopes it to what's recorded; consistent with thesis §6's sanctioned substitute ("every event's hash is recomputable from the recorded data"). |
 | D4 | `service/app/main.py:457-460` | `The derivative is therefore **not** covered by the original's signature; this certificate records the operator's recorded consent to that act, not any claim about its legal sufficiency.` | Signature-break attestation section. | **KEEP** | Explicitly denies the sufficiency claim; the attestation is recorded, not endorsed. |
-| D5 | `service/app/main.py:2142` | `"anchor": {"type": "none", "digest": None, "reference": None}` | release_result anchor field. | **KEEP (flag: stale)** | Structured field, not copy — but post-TSA this literal is wrong when anchoring succeeded; the sibling packet path (3338+) now computes a real anchor. Not a copy edit; a consistency flag for the owner. |
+| D5 | `service/app/main.py:2325` | `"anchor": {"type": "none", ..., "scope": "release_result_bytes", "note": ...}` | release_result anchor field. | **RESOLVED 2026-09-02** | The literal is correct *about this artifact's own bytes* and always was; what was missing is that it never said so, and a recipient holding it next to a TSA-anchored `release_packet.json` read the two as contradicting each other. It now carries `scope` and a `note` deferring to the packet's own anchor field, and the offline verifier's "NOT EXTERNALLY ANCHORED" line is scoped to match. Deliberately **not** derived from the packet: `release_result` is produced at release terminal, the packet at bundle download, and a refused release never gets a packet at all — see `docs/counselclear-custody-truthfulness-plan.md` Lane C / E3. |
 | D6 | `tools/counselclear_verify_release_packet.py:323,332` | `NOT EXTERNALLY ANCHORED. …` | Verifier unanchored notice. | **KEEP (flag: stale-adjacent)** | Correct for unanchored packets; test-enforced vocabulary. Becomes conditional output post-TSA (`CLAIMED` / `verified` branches already exist at 448-467), so no overclaim — noting only that operator docs quoting the notice unconditionally (A3/A7/A9) now lag the tool. |
 
 ### E. Explicitly out of scope (recorded, not rowed)
