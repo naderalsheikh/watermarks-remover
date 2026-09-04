@@ -47,7 +47,7 @@ Closes items 1–5 of the external review. `1343 passed, 1 skipped`, ruff clean.
 
 ---
 
-## Lane B — Hidden text: capability + control (DECIDED, blocks the client deliverable)
+## Lane B — Hidden text: capability + control (gate SHIPPED, stripper open)
 
 The only lane with client-visible exposure.
 
@@ -59,7 +59,29 @@ The only lane with client-visible exposure.
 
 Why both, stated plainly: **the gate without the stripper is a one-option choice.** Today an operator who clicks Approve on `hidden_text` gets `flag` regardless — a gate on top of that would only ever offer "retain with a recorded basis", which improves the record without improving the document. The stripper is what turns the gate into a real choice: *remove it*, or *keep it and say why on the certificate*.
 
-**Sequencing within the lane:** ship the gate first — it mutates no content, so it needs no visual-compare pass and can land while the stripper is still in proposal. Then the stripper lands behind it and the gate's second option becomes live.
+**B-gate — IMPLEMENTED 2026-09-02.** It lives in `plan_actions` alongside the existing macro and signature gates, raising `PolicyError`, which `engine_api` turns into `plan refused:` and the worker records as status `refused`. "Packet or refusal" already covered this shape, so no new lifecycle vocabulary was needed.
+
+What it blocks — a present finding that survives into the derivative with no human in the loop, under `external_sharing` or `production` only:
+
+| shape | reason | why it is blocked |
+|---|---|---|
+| flagged, not acknowledged | `policy_default` | the policy noticed and declined to act, and nobody was asked |
+| **approved but not removable** | `operator_approved` | the operator asked for REMOVAL and cannot have it — they hold a false belief about the derivative's contents, which is worse than being uninformed. The refusal says the approval cannot be honoured. |
+| never reviewed | `no_decision` | an approve-default cell the operator was never asked about, kept |
+
+Two scope decisions worth recording:
+
+- **`no_decision` had to be in.** Gating only `flag` left a hole: `hidden_text` is `flag` under `external_sharing` but `approve` under `production`, so an operator facing the gate could switch profile and ship the same finding as an unreviewed keep. A gate you can route around by changing profile is not a gate.
+- **A `policy_default` KEEP is not gated.** That is the composition rule (`layer_a_non_body` under `external_sharing`), not the policy declining to act on something it noticed; gating it would refuse a release over a stray zero-width space in a footer.
+
+Two surfaces had to change to make the gate usable rather than merely correct:
+
+- **`plan_actions` now honours a decision on a flag-default subtype.** It previously consulted `decisions` only for `approve`-default cells, so a decision sent for `hidden_text` was accepted by validation and then silently discarded — an operator could record a decision and have it vanish. The new reason is `operator_acknowledged`, deliberately not `operator_kept`: under a policy whose only action for the subtype is `flag` there is nothing to choose between, and calling it a choice would credit the operator with a decision the product never offered.
+- **The Airlock CLI gained `--acknowledge SUBTYPE`** (repeatable). Its docstring described both offered profiles as "decision-free"; that is no longer true for a document carrying flagged content, and without the flag the CLI had no path to release such a document at all. There is deliberately no `--acknowledge-all`.
+
+The demo seed now acknowledges two findings, which makes the walkthrough better rather than worse: the sample SPA hides "ATTORNEY WORK PRODUCT — PRIVILEGED AND CONFIDENTIAL" in invisible text and is released to a counterparty, so the seeded release now shows an operator being stopped, shown the privileged text, and proceeding only under a stated basis that then travels on the certificate.
+
+**Acknowledgement is not absolution.** An acknowledged finding is still in the derivative and still a limitation; the certificate records that a named operator confirmed it, rather than that a default table left it in.
 
 **B2 — Proposal before code**, per repo convention (`docs/rfc3161-anchor-implementation-proposal.md`, `docs/release-packet-verification-and-anchoring-proposal.md`). It must state: what "removed" means for hidden text; the postcondition check (the model is `verify.py`'s `accept_all_deleted_text_absent` — prove the concealed *text* is absent from the derivative's plaintext, not merely that the markup stopped matching a detector); which cases fall to refusal instead; and what, if anything, changes for `privacy_only`'s byte-fidelity promise (intended answer: nothing).
 
