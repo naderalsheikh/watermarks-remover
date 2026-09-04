@@ -283,7 +283,17 @@ def test_bundle_refuses_signed_pdf_without_attestation(tmp_path):
     with pytest.raises(CustodyError, match="plan refused"):
         clean_to_bundle(src, out)
     assert not (out / "manifest.json").exists()
-    r = clean_to_bundle(src, out, signature_break_attestation=True)
+    # Past the signature gate, the release gate is still in the way:
+    # signed.pdf carries an AcroForm with field values, which
+    # external_sharing flags rather than removes. Both must be cleared.
+    with pytest.raises(CustodyError, match="not acknowledged"):
+        clean_to_bundle(src, out, signature_break_attestation=True)
+    r = clean_to_bundle(
+        src,
+        out,
+        signature_break_attestation=True,
+        decisions={"pdf_acroform": "keep"},
+    )
     assert Path(r["derivative"]).is_file()
 
 

@@ -1223,10 +1223,24 @@ def test_signed_pdf_refused_then_done_with_attestation(client):
     r1 = client.post(url, json={"policy_id": "external_sharing"}).json()
     assert r1["status"] == "refused"
     assert "attestation" in r1["error"]
+    # Attestation clears the signature gate but not the release gate:
+    # signed.pdf also carries an AcroForm with field values, which
+    # external_sharing flags rather than removes. Two independent gates,
+    # and clearing one says nothing about the other.
     r2 = client.post(
         url, json={"policy_id": "external_sharing", "signature_break_attestation": True}
     ).json()
-    assert r2["status"] == "done", r2["error"]
+    assert r2["status"] == "refused"
+    assert "not acknowledged" in r2["error"]
+    r3 = client.post(
+        url,
+        json={
+            "policy_id": "external_sharing",
+            "signature_break_attestation": True,
+            "finding_decisions": {"pdf_acroform": "keep"},
+        },
+    ).json()
+    assert r3["status"] == "done", r3["error"]
 
 
 def _run_attested_done_sanitize(client) -> tuple[dict, dict]:
@@ -1243,6 +1257,9 @@ def _run_attested_done_sanitize(client) -> tuple[dict, dict]:
             "recipient_name": "X",
             "purpose": "prod",
             "signature_break_attestation": True,
+            # Release gate: signed.pdf's AcroForm is flag-only under this
+            # profile's policy, so a DONE release now requires it by name.
+            "finding_decisions": {"pdf_acroform": "keep"},
         },
     )
     assert r.status_code == 200, r.text
@@ -1358,6 +1375,10 @@ def test_rerun_release_links_its_predecessor_everywhere(client):
         json={
             "profile_id": "counterparty_deal_room",
             "signature_break_attestation": True,
+            # Release gate: the re-run must clear it too, exactly like a
+            # first attempt. Superseding a refused release does not inherit
+            # anyone's acknowledgement.
+            "finding_decisions": {"pdf_acroform": "keep"},
             "predecessor_release_id": original_release_id,
         },
     )
@@ -1506,22 +1527,26 @@ def test_unpinned_docker_worker_fails_the_job_instead_of_500ing(tmp_path, monkey
     assert r2.json()["status"] == "failed"
 
 
-def test_production_policy_approve_cells_unreachable_without_finding_decisions(client):
-    """Documents the gap this fix closes: without an explicit decision,
-    plan_actions' own no_decision default resolves an approve-default
-    subtype to "keep" — so production sanitize without finding_decisions
-    is, correctly, a strip of nothing approve-gated."""
+def test_production_approve_cells_now_refuse_rather_than_keep_unreviewed(client):
+    """This used to document the opposite: production sanitize with no
+    finding_decisions COMPLETED, silently keeping every approve-default
+    finding as an unreviewed `no_decision` keep -- comments and tracked
+    changes rode into the derivative and the job reported `done`.
+
+    The release gate makes that outcome unreachable. "The operator was
+    never asked" is not a state an outward-facing release may terminate in,
+    so the job is refused and the refusal names each finding."""
     doc = _upload(client, "spa.docx")
     r = client.post(
         f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
         json={"policy_id": "production"},
     ).json()
-    assert r["status"] == "done", r["error"]
-    bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{r['id']}/bundle")
-    with zipfile.ZipFile(io.BytesIO(bundle.content)) as zf:
-        deriv_name = next(n for n in zf.namelist() if n.startswith("derivative/"))
-        with zipfile.ZipFile(io.BytesIO(zf.read(deriv_name))) as inner:
-            assert "word/comments.xml" in inner.namelist()
+    assert r["status"] == "refused", r
+    assert "never reviewed" in r["error"]
+    assert "comments_and_notes" in r["error"]
+    assert "tracked_changes" in r["error"]
+    # A refusal produces no derivative to leak through.
+    assert client.get(f"/v1/matters/{doc['_matter']}/jobs/{r['id']}/bundle").status_code == 409
 
 
 def test_finding_decisions_makes_production_approve_cells_reachable(client):
@@ -1531,7 +1556,16 @@ def test_finding_decisions_makes_production_approve_cells_reachable(client):
     doc = _upload(client, "spa.docx")
     r = client.post(
         f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
-        json={"policy_id": "production", "finding_decisions": {"comments_and_notes": "approve"}},
+        json={
+            "policy_id": "production",
+            # Every approve-default finding spa.docx carries must now be
+            # decided, not just the one under test: the gate refuses on any
+            # that were never reviewed.
+            "finding_decisions": {
+                "comments_and_notes": "approve",
+                "tracked_changes": "approve",
+            },
+        },
     ).json()
     assert r["status"] == "done", r["error"]
     bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{r['id']}/bundle")

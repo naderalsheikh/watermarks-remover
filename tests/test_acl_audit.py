@@ -332,13 +332,15 @@ def test_audit_records_inspect_and_sanitize_execution(env):
 
 
 def test_audit_no_decision_count_reflects_production_findings_kept(tmp_path, monkeypatch):
-    """The audit trail must surface the same "kept without review" signal
-    the manifest does (see policies.py's _approve_default_keep_records / test_
-    apply_production_docx_discloses_findings_kept_without_a_decision) --
-    not just leave it buried in the manifest's actions list. spa.docx has
-    one comment and tracked changes, both approve-default under
-    production, so a production sanitize with zero decisions must show
-    no_decision_count >= 2 in the audit payload."""
+    """spa.docx has one comment and tracked changes, both approve-default
+    under production, so a production sanitize with zero decisions used to
+    complete and show no_decision_count >= 2 in the audit payload.
+
+    The release gate refuses that job instead. The audit event still
+    carries the field -- asserted here so it cannot vanish from the
+    payload shape -- but the "kept without review" signal it was built to
+    surface now describes a state only pre-gate jobs and custom policy
+    overlays can be in."""
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw-nodecision")
     c = TestClient(create_app(tmp_path / "data"))
     assert c.post("/v1/auth/login", json={"password": "pw-nodecision"}).status_code == 200
@@ -351,12 +353,22 @@ def test_audit_no_decision_count_reflects_production_findings_kept(tmp_path, mon
         f"/v1/matters/{matter['id']}/documents/{doc['id']}/sanitize-jobs",
         json={"policy_id": "production", "signature_break_attestation": True},
     ).json()
-    assert job["status"] == "done", job["error"]
+    # Since the release gate (2026-09-02) this is refused rather than
+    # completed: the audit trail's job for an unreviewed keep is no longer
+    # "surface it after the fact" but "there is nothing to surface,
+    # because the job did not finish". The refusal is itself audited, and
+    # names every finding that blocked it.
+    assert job["status"] == "refused", job
+    assert "never reviewed" in job["error"]
 
     events = _audit(c, matter["id"])["events"]
     sanitize_events = [e for e in events if e["action"] == "job.sanitize"]
     assert len(sanitize_events) == 1
-    assert sanitize_events[0]["payload"]["no_decision_count"] >= 2
+    # The count is still computed and still zero-or-more; what changed is
+    # that a *completed* job can no longer carry a nonzero one under a
+    # default policy. Kept as an assertion so the field cannot silently
+    # disappear from the payload.
+    assert "no_decision_count" in sanitize_events[0]["payload"]
 
 
 def test_cross_matter_document_and_job_access_is_404_not_leaked(env):

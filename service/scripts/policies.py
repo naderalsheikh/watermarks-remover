@@ -212,6 +212,18 @@ _APPROVE_RESOLVES_TO = {
 # (inspect_only is evidence_preservation, which never calls apply_actions.)
 _MACROS_ALLOWED = {"refuse", "inspect_only"}
 
+# Policies that put a derivative in someone else's hands, and therefore
+# carry the release gate below. privacy_only and evidence_preservation are
+# excluded by intent, not by oversight: neither is a release path.
+_RELEASE_GATE_POLICIES = frozenset({"external_sharing", "production"})
+
+# Stable, greppable marker so the API, the UI and the tests can tell this
+# refusal apart from a macro refusal or an unattested-signature refusal --
+# same reasoning as PDF_CONTENT_REFUSAL_MARKER below. This one is
+# RECOVERABLE: the operator re-runs with the acknowledgement, and the
+# Release supersede path (predecessor_release_id) already models that.
+RELEASE_GATE_MARKER = "release blocked: findings not acknowledged"
+
 # Policies whose PDF path requires real tooling (design KD 6). privacy_only
 # is excluded: it takes the GPS/Author-only exiftool path and deliberately
 # does not rebuild the document.
@@ -479,6 +491,21 @@ def plan_actions(
                 plan.actions[st] = {"action": "keep", "reason": "operator_kept"}
             else:
                 plan.actions[st] = {"action": "keep", "reason": "no_decision"}
+        elif default == "flag" and decisions.get(st) == "keep" and st in seen:
+            # An operator ACKNOWLEDGING a flagged finding that is actually
+            # present. Before this, `decisions` was consulted only for
+            # approve-default cells: a decision sent for a flag-default
+            # subtype was accepted by the validation loop above and then
+            # silently discarded, so an operator could record a decision
+            # about hidden text and have it vanish without a word.
+            #
+            # "acknowledged", deliberately not "kept": under a policy whose
+            # only action for this subtype is flag, the operator is not
+            # choosing between removal and retention -- there is no removal
+            # path (see docs/counselclear-custody-truthfulness-plan.md Lane
+            # B). Calling it a choice would overstate what they did. They
+            # confirmed they know the finding rides along.
+            plan.actions[st] = {"action": "flag", "reason": "operator_acknowledged"}
         elif default == "refuse_unless_attest":
             attested = signature_break_attestation and st == "cms_or_xml_dsig"
             plan.actions[st] = {
@@ -493,6 +520,112 @@ def plan_actions(
         if st in seen and plan.actions[st]["action"] in ("keep", "flag", "inspect_only"):
             plan.actions[st]["legal_justification"] = legal_basis_by_subtype.get(
                 st, dict(UNSPECIFIED_LEGAL_JUSTIFICATION)
+            )
+
+    # The release gate (docs/counselclear-custody-truthfulness-plan.md Lane
+    # B). A finding the policy FLAGGED is one the engine noticed and
+    # deliberately left in the derivative. Under an outward-facing policy
+    # that is a decision with consequences outside the building, and it was
+    # being made by a default table with no human in the loop -- the
+    # operator was never asked, and until the Lane A pass the certificate
+    # did not even say it had happened.
+    #
+    # So: a flagged finding that is actually PRESENT blocks the job unless
+    # the operator has acknowledged it by name. This is a refusal, not a
+    # failure -- PolicyError is what engine_api turns into "plan refused",
+    # which the worker records as status `refused` and the Release surfaces
+    # as a refusal record with reasons. "Packet or refusal" already covers
+    # this shape; no new lifecycle vocabulary is needed.
+    #
+    # Scope, deliberately narrow:
+    #   - outward-facing policies only. privacy_only and
+    #     evidence_preservation exist to leave documents alone and are not
+    #     release paths.
+    #   - `flag` only. A `keep` reached through the composition rule (e.g.
+    #     layer_a_non_body under external_sharing) is not the policy
+    #     noticing and declining to act; gating on it would refuse a
+    #     release over a stray zero-width space in a footer. An
+    #     approve-default `no_decision` keep is a real gap, but it already
+    #     carries its own marker and limitation, and widening to it is a
+    #     separate, larger behaviour change.
+    #   - present findings only. A flag row for a subtype the document does
+    #     not carry has nothing to acknowledge.
+    if policy_id in _RELEASE_GATE_POLICIES:
+        # Two shapes of "survives with no human in the loop":
+        #
+        #   flag, not acknowledged   -- the policy noticed and declined to
+        #                               act, and nobody was asked.
+        #   no_decision              -- an approve-default cell the operator
+        #                               was never asked about, kept.
+        #
+        # Both are gated, and the second is not optional. Gating only `flag`
+        # left a hole big enough to walk a release through: hidden_text is
+        # flag under external_sharing but approve under production, so an
+        # operator facing the gate could pick the production profile and the
+        # very same finding would sail out as a no_decision keep. A gate you
+        # can route around by changing profile is not a gate.
+        #
+        # A `policy_default` KEEP is deliberately not gated -- that is the
+        # composition rule (layer_a_non_body under external_sharing), not
+        # the policy declining to act on something it noticed, and gating it
+        # would refuse a release over a stray zero-width space in a footer.
+        blocked = sorted(
+            st
+            for st in seen
+            if (
+                plan.actions.get(st, {}).get("action") == "flag"
+                and plan.actions[st].get("reason") != "operator_acknowledged"
+            )
+            or plan.actions.get(st, {}).get("reason") == "no_decision"
+        )
+        if blocked:
+            # Two ways to arrive here, and they deserve different words.
+            #
+            # An operator who APPROVED the finding asked for it to be
+            # REMOVED and cannot have it: this policy has no removal path
+            # for the subtype. That is the more dangerous of the two --
+            # they are not merely uninformed, they hold a false belief
+            # about what the derivative contains. Shipping it with a
+            # disclosure buried in the action records would leave them
+            # believing they had it removed, so the gate refuses and says
+            # plainly that the approval could not be honoured.
+            approved = [
+                st for st in blocked if plan.actions[st].get("reason") == "operator_approved"
+            ]
+            never_asked = [
+                st for st in blocked if plan.actions[st].get("reason") == "no_decision"
+            ]
+            unasked = [st for st in blocked if st not in approved and st not in never_asked]
+            parts = []
+            if never_asked:
+                parts.append(
+                    "present and never reviewed — "
+                    + ", ".join(f"{SUBTYPE_LABELS.get(st, st)} ({st})" for st in never_asked)
+                    + f". The {policy_id} policy leaves these to the operator and no "
+                    "decision was supplied, so they would be kept unreviewed"
+                )
+            if approved:
+                parts.append(
+                    "approved for removal but NOT REMOVABLE under this policy — "
+                    + ", ".join(f"{SUBTYPE_LABELS.get(st, st)} ({st})" for st in approved)
+                    + ". The engine has no removal path for these; your approval "
+                    "cannot be honoured. Acknowledge instead if the finding may "
+                    "travel in the derivative"
+                )
+            if unasked:
+                parts.append(
+                    "flagged and not acknowledged — "
+                    + ", ".join(f"{SUBTYPE_LABELS.get(st, st)} ({st})" for st in unasked)
+                    + f". The {policy_id} policy flags these rather than removing "
+                    "them, so they would travel in the derivative"
+                )
+            raise PolicyError(
+                f"{RELEASE_GATE_MARKER}: "
+                + "; ".join(parts)
+                + ". Acknowledge each one by name to proceed (finding_decisions: {"
+                + ", ".join(f'"{st}": "keep"' for st in blocked)
+                + "}), ideally with a legal basis; the acknowledgement and any "
+                "basis are recorded on the certificate."
             )
     return plan
 
@@ -795,6 +928,12 @@ OPERATOR_KEPT_MARKER = "reviewed and kept by operator"
 # a hardcoded subtype list, so a policy edit that makes a fourth subtype
 # resolve this way is covered without touching this code.
 _NON_REMOVING_ACTIONS = frozenset({"keep", "flag", "inspect_only"})
+# The release gate's positive outcome: an operator was shown a flagged
+# finding and confirmed it travels. Deliberately NOT worded as a choice --
+# under a policy whose only action for the subtype is flag, there is no
+# alternative to choose, so "kept by operator" would credit the operator
+# with a decision the product never offered them.
+OPERATOR_ACKNOWLEDGED_MARKER = "acknowledged by operator before release"
 APPROVED_BUT_NO_OP_MARKER = "approved, but this subtype has no strip action under this policy"
 
 
@@ -846,6 +985,22 @@ def _surviving_finding_records(plan: ActionPlan, existing: set[tuple[str, str]])
                     f"{'kept' if action == 'keep' else action}: "
                     f"{APPROVED_BUT_NO_OP_MARKER} ({st}); the operator approved this "
                     "finding for removal and it was NOT removed",
+                    legal_justification=legal_justification,
+                    retained_finding=True,
+                )
+            )
+        elif action == "flag" and reason == "operator_acknowledged":
+            # Distinguished from the bare policy flag below, and worth the
+            # separate record: the difference between "a default table left
+            # this in" and "a named operator was shown it and confirmed it
+            # travels" is the whole point of the release gate. Both are
+            # limitations; only one of them had a human in the loop.
+            records.append(
+                ActionRecord(
+                    st,
+                    "flag",
+                    f"flagged by policy; {OPERATOR_ACKNOWLEDGED_MARKER} and the "
+                    "finding remains in derivative",
                     legal_justification=legal_justification,
                     retained_finding=True,
                 )

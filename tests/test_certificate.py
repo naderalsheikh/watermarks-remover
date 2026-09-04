@@ -251,18 +251,66 @@ def test_certificate_has_no_release_section_for_a_legacy_job(env):
 # --- no-decision / operator-kept limitations --------------------------------------
 
 
-def test_certificate_shows_no_decision_limitation_prominently(env):
-    """production policy, no finding_decisions -> comments_and_notes
-    resolves to "keep" with reason "no_decision" -- NO_DECISION_MARKER
-    must appear inside the certificate's own <div class="limitations">
-    section, not just somewhere in the page."""
+def test_production_without_decisions_is_now_refused_by_the_release_gate(env):
+    """This used to assert that production with no finding_decisions
+    COMPLETED, keeping comments and tracked changes as unreviewed
+    `no_decision` keeps and disclosing them as limitations.
+
+    The release gate (2026-09-02) removed that outcome: "the operator was
+    never asked" is not a state an outward-facing release may terminate
+    in. The disclosure is no longer the last line of defence, because the
+    job does not finish at all."""
     c, _, _ = env
     mid = _matter(c)
     doc = _upload(c, mid, "spa.docx")
     job = _sanitize(c, mid, doc, policy_id="production")
-    assert job["status"] == "done", job["error"]
+    assert job["status"] == "refused", job
+    assert "never reviewed" in job["error"]
 
-    body = _certificate(c, mid, job["id"]).text
+
+def test_certificate_shows_no_decision_limitation_prominently(env):
+    """NO_DECISION_MARKER must appear inside the certificate's own
+    <div class="limitations"> section, not just somewhere in the page.
+
+    Seeded rather than driven through the API, the same way the
+    approved-but-no-op certificate test above is: since the release gate,
+    no default policy can produce a `no_decision` keep, so this state now
+    arises only from a job recorded BEFORE the gate or from a custom
+    policy overlay outside the gated set. Both are real -- a matter's
+    historical jobs keep their manifests, and the certificate must keep
+    rendering them honestly -- and neither is reachable through a fresh
+    API call, so the manifest is seeded directly."""
+    c, sf, _ = env
+    mid = _matter(c)
+    doc = _upload(c, mid, "spa.docx")
+    with sf() as s:
+        s.add(
+            Job(
+                id="jnodec",
+                matter_id=mid,
+                document_id=doc,
+                kind="sanitize",
+                policy_id="production",
+                status="done",
+                result_json={
+                    "derivative": "spa.docx",
+                    "verification_pass": True,
+                    "manifest": {
+                        "policy": {"id": "production", "version": 1},
+                        "derivative": {"sha256": "e" * 64},
+                        "actions": [
+                            f"comments_and_notes:keep: kept: {NO_DECISION_MARKER} "
+                            "for this approve-default finding"
+                        ],
+                        "findings_before": [],
+                        "verification": {"pass": True, "checks": []},
+                    },
+                },
+            )
+        )
+        s.commit()
+
+    body = _certificate(c, mid, "jnodec").text
     assert NO_DECISION_MARKER in body
     limitations_block = body.split('class="limitations"')[1]
     assert NO_DECISION_MARKER in limitations_block

@@ -441,22 +441,43 @@ def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
 
 
 def test_dashboard_unreviewed_findings_from_real_production_run(env):
-    """A real production sanitize WITHOUT finding_decisions keeps comments
-    (no-decision default) — the worker's manifest must land in the
-    dashboard attention queue exactly as the audit event counts it."""
-    c, _, _ = env
+    """A manifest carrying an unreviewed keep must land in the dashboard
+    attention queue exactly as the audit event counts it. Such manifests
+    now come only from pre-gate jobs or custom policy overlays (see the
+    release gate), never from a fresh default-policy run."""
+    c, sf, _ = env
     mid = c.post("/v1/matters", json={"name": "End to End"}).json()["id"]
     with open(FIXTURES / "spa.docx", "rb") as f:
         doc = c.post(
             f"/v1/matters/{mid}/documents", files={"file": ("spa.docx", f, "application/octet-stream")}
         ).json()
+    # Since the release gate (2026-09-02) an unreviewed keep cannot be
+    # produced by any default policy -- production with no decisions is
+    # refused outright. The attention queue still has to render the state
+    # correctly for jobs recorded BEFORE the gate, whose manifests keep
+    # the marker, so the decisions are supplied to reach `done` and the
+    # manifest's action list is then given the historical shape.
     r = c.post(
         f"/v1/matters/{mid}/documents/{doc['id']}/sanitize-jobs",
-        json={"policy_id": "production"},
+        json={
+            "policy_id": "production",
+            "finding_decisions": {"comments_and_notes": "keep", "tracked_changes": "keep"},
+        },
     ).json()
     assert r["status"] == "done", r.get("error")
 
-    # Sanity: the job really did keep something without a decision.
+    with sf() as s:
+        job = s.query(Job).filter_by(id=r["id"]).one()
+        result = dict(job.result_json)
+        manifest = dict(result["manifest"])
+        manifest["actions"] = [
+            f"comments_and_notes:keep: kept: {NO_DECISION_MARKER} for this "
+            "approve-default finding"
+        ]
+        result["manifest"] = manifest
+        job.result_json = result
+        s.commit()
+
     manifest = c.get(f"/v1/matters/{mid}/jobs/{r['id']}/manifest").json()
     assert any(NO_DECISION_MARKER in a for a in manifest["actions"])
 

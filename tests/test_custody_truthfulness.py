@@ -148,7 +148,12 @@ def _job_with_retained_finding(c) -> tuple[str, dict, dict]:
     ).json()["id"]
     job = c.post(
         f"/v1/matters/{mid}/documents/{doc}/sanitize-jobs",
-        json={"policy_id": "external_sharing"},
+        # The release gate: hidden_text is flag-only under external_sharing,
+        # so reaching `done` at all now requires acknowledging it by name.
+        # The retention -- and its limitation -- survive the acknowledgement;
+        # that is the point. An acknowledged finding is still in the
+        # derivative, and the certificate must still say so.
+        json={"policy_id": "external_sharing", "finding_decisions": {"hidden_text": "keep"}},
     ).json()
     assert job["status"] == "done", job
     manifest = c.get(f"/v1/matters/{mid}/jobs/{job['id']}/manifest").json()
@@ -166,7 +171,9 @@ def test_flagged_retained_finding_is_recorded_as_retained():
     data = _hidden_text_docx()
     from engine_api import inspect_bytes
 
-    plan = plan_actions(inspect_bytes(data, "h.docx"), "external_sharing")
+    plan = plan_actions(
+        inspect_bytes(data, "h.docx"), "external_sharing", {"hidden_text": "keep"}
+    )
     _cleaned, records = apply_actions(data, plan)
     flagged = [r for r in records if r.action == "flag"]
     assert flagged, "hidden text should be flagged by external_sharing"
@@ -265,6 +272,7 @@ def test_release_result_limitations_match_the_certificate(client):
             "recipient_type": "opposing_counsel",
             "recipient_name": "Jane Doe, Esq.",
             "purpose": "production",
+            "finding_decisions": {"hidden_text": "keep"},
         },
     )
     assert rel.status_code == 200, rel.text
@@ -406,6 +414,7 @@ def test_release_result_anchor_scopes_itself_to_its_own_bytes(client):
             "recipient_type": "opposing_counsel",
             "recipient_name": "Jane Doe, Esq.",
             "purpose": "production",
+            "finding_decisions": {"hidden_text": "keep"},
         },
     )
     assert rel.status_code == 200, rel.text
@@ -582,35 +591,65 @@ def test_manifest_states_both_halves_of_the_exhaust_policy(client):
 # --- 6. an approval that was not acted on says so (A7) -----------------------
 
 
-def test_approve_resolving_to_flag_discloses_the_no_op():
-    """`APPROVED_BUT_NO_OP_MARKER` originally fired only for
-    `action == "keep"`, on the stated belief that `layer_a_non_body` was the
-    only subtype that could reach it. That held for "keep" and not for the
-    case as a whole: three more approve-default subtypes resolve to "flag",
-    and produced no disclosure at all.
+def test_approval_that_cannot_be_honoured_is_refused_not_disclosed():
+    """An operator who APPROVES a finding has asked for it to be REMOVED.
+    Under `production`, `hidden_text` approve resolves via
+    `_APPROVE_RESOLVES_TO` to `flag` -- the engine has no removal path -- so
+    before the release gate they got a flagged derivative and a disclosure
+    buried in the action records.
 
-    `hidden_text` is the one that matters. An operator approving it under
-    `production` is asking for concealed text to be removed; the engine has
-    no removal path, so they get a flag. Before this, nothing on the
-    certificate said their approval had not been acted on."""
+    That is the more dangerous of the two gate cases: the operator is not
+    merely uninformed, they hold a false belief about what the derivative
+    contains. The gate refuses and says the approval cannot be honoured,
+    rather than shipping and explaining afterwards."""
+    from engine_api import inspect_bytes
+    from policies import RELEASE_GATE_MARKER, PolicyError
+
+    res = inspect_bytes(_hidden_text_docx(), "h.docx")
+    with pytest.raises(PolicyError) as excinfo:
+        plan_actions(res, "production", {"hidden_text": "approve"})
+    message = str(excinfo.value)
+    assert RELEASE_GATE_MARKER in message
+    assert "NOT REMOVABLE" in message
+    assert "cannot be honoured" in message
+    # And it names the exact call that unblocks it, so the refusal is
+    # actionable rather than merely correct.
+    assert '"hidden_text": "keep"' in message
+
+
+def test_gate_cannot_be_routed_around_by_changing_profile():
+    """hidden_text is `flag` under external_sharing and `approve` under
+    production. Gating only the flag left an operator facing the gate free
+    to pick the other profile and ship the same finding as an unreviewed
+    `no_decision` keep. A gate you can route around by changing profile is
+    not a gate."""
+    from engine_api import inspect_bytes
+    from policies import PolicyError
+
+    res = inspect_bytes(_hidden_text_docx(), "h.docx")
+    for policy in ("external_sharing", "production"):
+        with pytest.raises(PolicyError, match="not acknowledged"):
+            plan_actions(res, policy)
+
+    # privacy_only and evidence_preservation are not release paths and are
+    # excluded by intent -- they exist to leave documents alone.
+    for policy in ("privacy_only", "evidence_preservation"):
+        plan = plan_actions(res, policy)
+        assert plan.actions["hidden_text"]["action"] == "keep"
+
+
+def test_composition_rule_keeps_are_not_gated():
+    """A `policy_default` KEEP is the composition rule, not the policy
+    declining to act on something it noticed. Gating it would refuse a
+    release over a stray zero-width space in a footer, so the gate is
+    scoped to flags and to never-reviewed approve-defaults."""
     from engine_api import inspect_bytes
 
-    data = _hidden_text_docx()
-    plan = plan_actions(inspect_bytes(data, "h.docx"), "production", {"hidden_text": "approve"})
-    assert plan.actions["hidden_text"] == {
-        "action": "flag",
-        "reason": "operator_approved",
-        "legal_justification": {"basis": "unspecified", "note": ""},
-    }
-    _cleaned, records = apply_actions(data, plan)
-    (record,) = [r for r in records if r.subtype == "hidden_text"]
-
-    # The record keeps the action that actually ran. Flattening it to "keep"
-    # would make the manifest wrong about what the policy did.
-    assert record.action == "flag"
-    assert record.retained_finding
-    assert "approved, but this subtype has no strip action" in record.detail
-    assert "NOT removed" in record.detail
+    # spa.docx carries comments and tracked changes but nothing flag-only,
+    # so it must still release cleanly with no acknowledgement at all.
+    data = (REPO / "tests" / "fixtures" / "legal" / "spa.docx").read_bytes()
+    plan = plan_actions(inspect_bytes(data, "spa.docx"), "external_sharing")
+    assert plan.actions["comments_and_notes"]["action"] == "strip"
 
 
 def test_approved_no_op_gate_is_the_action_not_a_subtype_list():
@@ -631,18 +670,64 @@ def test_approved_no_op_gate_is_the_action_not_a_subtype_list():
     assert reachable == {"hidden_structure", "hidden_text", "pdf_acroform", "layer_a_non_body"}
 
 
-def test_approved_no_op_reaches_the_certificate_limitations(client):
-    mid = client.post("/v1/matters", json={"name": "Approve no-op"}).json()["id"]
+def test_acknowledged_finding_is_still_a_disclosed_limitation(client):
+    """Acknowledgement is not absolution. The finding still travels, so the
+    certificate must still carry it as a limitation -- now recording that a
+    named operator was shown it and confirmed it, rather than that a default
+    table left it in."""
+    mid = client.post("/v1/matters", json={"name": "Acknowledged"}).json()["id"]
     doc = client.post(
         f"/v1/matters/{mid}/documents",
         files={"file": ("hidden.docx", _hidden_text_docx(), "application/octet-stream")},
     ).json()["id"]
     job = client.post(
         f"/v1/matters/{mid}/documents/{doc}/sanitize-jobs",
-        json={"policy_id": "production", "finding_decisions": {"hidden_text": "approve"}},
+        json={
+            "policy_id": "external_sharing",
+            "finding_decisions": {"hidden_text": "keep"},
+            "legal_justifications": {
+                "hidden_text": {"basis": "work_product", "note": "Drafting notes."}
+            },
+        },
     ).json()
     assert job["status"] == "done", job
 
+    manifest = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/manifest").json()
+    (record,) = [r for r in manifest["action_records"] if r["subtype"] == "hidden_text"]
+    assert record["retained_finding"] is True
+    assert "acknowledged by operator before release" in record["detail"]
+
     html = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/certificate").text
     limitations = html.split('class="limitations"')[1]
-    assert "NOT removed" in limitations
+    assert "REMAINS IN THE DERIVATIVE" in limitations
+    # The basis was supplied, so the "no basis" alarm must NOT fire.
+    assert "NO OPERATOR LEGAL BASIS" not in limitations
+    assert "work_product" in limitations
+
+
+def test_release_refused_by_the_gate_still_produces_a_result_artifact(client):
+    """"Packet or refusal" has to hold for a gate refusal too: the release
+    is refused, and the refusal is a machine-checkable record naming what
+    blocked it -- not a silent failure the operator has to interpret."""
+    mid = client.post("/v1/matters", json={"name": "Gate refusal"}).json()["id"]
+    doc = client.post(
+        f"/v1/matters/{mid}/documents",
+        files={"file": ("hidden.docx", _hidden_text_docx(), "application/octet-stream")},
+    ).json()["id"]
+    rel = client.post(
+        f"/v1/matters/{mid}/documents/{doc}/releases",
+        json={
+            "profile_id": "counterparty_deal_room",
+            "recipient_type": "opposing_counsel",
+            "recipient_name": "Jane Doe, Esq.",
+            "purpose": "production",
+        },
+    )
+    assert rel.status_code == 200, rel.text
+    body = rel.json()
+    assert body["release"]["status"] == "refused"
+    result = body["release_result"]
+    assert result["status"] == "refused"
+    assert "not acknowledged" in result["reason"]
+    assert "hidden_text" in result["reason"]
+    assert result["limitations"], "a refused release still discloses limitations"

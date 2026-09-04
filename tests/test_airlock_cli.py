@@ -114,9 +114,11 @@ class FakeClient:
         intended_external: bool,
         reason: str,
         legal_justifications: dict[str, dict[str, str]] | None = None,
+        finding_decisions: dict[str, str] | None = None,
     ) -> dict:
         self.calls.append("release")
         self.captured_legal_justifications = legal_justifications
+        self.captured_finding_decisions = finding_decisions
         # A real POST .../releases is synchronous -- this fake models a
         # never-terminal response ("queued") only for the __timeout__
         # case, so wait_for_terminal's own poll-loop-timeout logic is
@@ -233,9 +235,11 @@ class FakeBatchClient:
         intended_external: bool,
         reason: str,
         legal_justifications: dict[str, dict[str, str]] | None = None,
+        finding_decisions: dict[str, str] | None = None,
     ) -> dict:
         self.calls.append("release")
         self.captured_legal_justifications = legal_justifications
+        self.captured_finding_decisions = finding_decisions
         self._job_counter += 1
         job_id = f"job-{self._job_counter}"
         filename = self._doc_to_filename[doc_id]
@@ -1026,13 +1030,18 @@ def test_airlock_cli_end_to_end_legal_basis_reaches_certificate_html(tmp_path, l
         "--file", str(src),
         "--profile", "counterparty_deal_room",
         "--recipient-type", "opposing_counsel",
+        # The release gate: hidden.xlsx's hidden sheets are flag-only under
+        # counterparty_deal_room, so the CLI must name them to proceed.
+        # This is the flag's whole reason for existing -- without it the CLI
+        # has no path to release a document carrying flagged content at all.
+        "--acknowledge", "hidden_structure",
         "--legal-basis", "hidden_structure=privilege",
         "--legal-basis-note", "attorney notes embedded per draft protocol",
         "--reason", "legal basis e2e",
         "--output-dir", str(out),
         "--timeout-s", "30",
     ])
-    assert rc == 0, "hidden.xlsx under counterparty_deal_room must complete (flag record, not refusal)"
+    assert rc == 0, "acknowledged hidden.xlsx must complete (flag record, not refusal)"
 
     cert = (out / "certificate.html").read_text()
     # The basis reached the operator-facing artifact, spelled as the
@@ -1060,3 +1069,65 @@ def test_airlock_cli_end_to_end_legal_basis_reaches_certificate_html(tmp_path, l
 
     report = verifier.verify_release_packet(out)
     assert report.valid, report.to_text()
+
+
+def test_parse_acknowledge_flags():
+    """--acknowledge SUBTYPE (repeatable) -> the {subtype: "keep"} shape the
+    release API's finding_decisions takes. Validated CLI-side for the same
+    reason --legal-basis is: the backend turns a typo into a refused job
+    after a whole upload+release round trip."""
+    assert airlock.parse_acknowledge_flags(None) == {}
+    assert airlock.parse_acknowledge_flags([]) == {}
+    assert airlock.parse_acknowledge_flags(["hidden_text"]) == {"hidden_text": "keep"}
+    assert airlock.parse_acknowledge_flags(["hidden_text", "pdf_acroform"]) == {
+        "hidden_text": "keep",
+        "pdf_acroform": "keep",
+    }
+    with pytest.raises(airlock.AirlockError, match="not a known subtype"):
+        airlock.parse_acknowledge_flags(["hidden_txt"])
+    with pytest.raises(airlock.AirlockError, match="given twice"):
+        airlock.parse_acknowledge_flags(["hidden_text", "hidden_text"])
+
+
+def test_no_blanket_acknowledge_all_flag(tmp_path):
+    """Deliberately absent. The gate exists to make "this travels in the
+    derivative" an affirmative act about a NAMED finding; a blanket flag
+    would hand back exactly the silent default the gate removes.
+
+    Asserted against the parser, not the docstring -- the docstring
+    mentions the flag precisely to say it does not exist, so grepping the
+    text would fail on its own explanation."""
+    src = tmp_path / "doc.txt"
+    src.write_bytes(b"hi\n")
+    for banned in ("--acknowledge-all", "--acknowledge-any"):
+        with pytest.raises(SystemExit) as excinfo:
+            airlock.main([
+                "--matter-id", "m1",
+                "--file", str(src),
+                "--recipient-type", "opposing_counsel",
+                "--output-dir", str(tmp_path / "out"),
+                "--password", "pw",
+                banned,
+            ])
+        assert excinfo.value.code == 2, f"{banned} must be an argparse error, not accepted"
+
+
+def test_run_airlock_passes_acknowledgements_to_release(tmp_path):
+    src = tmp_path / "doc.txt"
+    src.write_bytes(b"hello\n")
+    client = FakeClient(job_status="done")
+    airlock.run_airlock(
+        client,
+        matter_id="m1",
+        file_path=src,
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="X",
+        purpose="p",
+        intended_external=True,
+        reason="r",
+        output_dir=tmp_path / "out",
+        timeout_s=5.0,
+        finding_decisions={"hidden_text": "keep"},
+    )
+    assert client.captured_finding_decisions == {"hidden_text": "keep"}

@@ -51,14 +51,28 @@ are processed. Every file in a batch shares the same --profile/
 --recipient-type/etc. -- no per-file overrides.
 
 Release profiles: only counterparty_deal_room and public_filing_anonymized
-are offered in this first version, in both single-file and batch mode --
-both are decision-free (RELEASE_PROFILES[*].policy_id resolves to a
-POLICIES[*].bulk_safe policy in service/app/main.py), so every finding
-resolves without a per-finding approve/keep decision this CLI has no
-interactive way to supply. ediscovery_production is refused at the
-argument-parser level, not silently degraded, so a caller finds out
-immediately rather than after a job (or a whole batch) that would have
-needed decisions this CLI can't provide.
+are offered in this first version, in both single-file and batch mode.
+ediscovery_production is refused at the argument-parser level, not
+silently degraded, so a caller finds out immediately rather than after a
+job (or a whole batch) that would have needed decisions this CLI can't
+provide.
+
+These two profiles used to be described here as "decision-free". They are
+not, since the release gate (policies.RELEASE_GATE_MARKER): a document
+that actually carries a finding the policy FLAGS -- hidden text, hidden
+sheets, an AcroForm with field values -- is refused unless the operator
+acknowledges it by name. --acknowledge SUBTYPE (repeatable) supplies that,
+e.g.::
+
+    --acknowledge hidden_structure --legal-basis hidden_structure=privilege
+
+There is deliberately no --acknowledge-all. The gate exists to make "this
+travels in the derivative" an affirmative act about a named finding, and a
+blanket flag would hand back the silent default it was built to remove.
+Typing the subtype is a perfectly good affirmative act -- arguably a
+better audit trail than a checkbox -- but it has to name what is being
+acknowledged. A refusal names every subtype that blocked it, so the
+follow-up command writes itself.
 
 Release-native since PR 43: this CLI calls POST .../releases (via
 Client.release()), not the legacy POST .../sanitize-jobs -- a
@@ -211,6 +225,39 @@ def parse_legal_basis_flags(raw: list[str] | None, note: str) -> dict[str, dict[
         raise AirlockError("--legal-basis-note given without any --legal-basis")
     return out
 
+def parse_acknowledge_flags(raw: list[str] | None) -> dict[str, str]:
+    """--acknowledge SUBTYPE (repeatable) into the {subtype: "keep"} shape
+    the release API's ``finding_decisions`` takes.
+
+    The release gate (policies.RELEASE_GATE_MARKER) refuses an outward-
+    facing release carrying a finding the policy FLAGS -- noticed and
+    deliberately left in the derivative -- unless the operator has
+    acknowledged it by name. Before the gate this CLI could assume its two
+    offered profiles were decision-free; they no longer are for a document
+    that actually carries flagged content, so without this flag the CLI
+    would have no path to release such a document at all.
+
+    Naming each subtype is the point, and why there is no --acknowledge-all:
+    the gate exists to make "this travels in the derivative" an affirmative
+    act, and a blanket flag would hand back exactly the silent default the
+    gate was built to remove. Typing the subtype on the command line is a
+    perfectly good affirmative act -- arguably a better audit trail than a
+    checkbox -- but it has to name what is being acknowledged.
+    """
+    out: dict[str, str] = {}
+    for item in raw or []:
+        subtype = item.strip()
+        if subtype not in LEGAL_BASIS_SUBTYPES:
+            raise AirlockError(
+                f"--acknowledge subtype {subtype!r} is not a known subtype "
+                f"(known: {', '.join(LEGAL_BASIS_SUBTYPES)})"
+            )
+        if subtype in out:
+            raise AirlockError(f"--acknowledge given twice for subtype {subtype!r}")
+        out[subtype] = "keep"
+    return out
+
+
 DEFAULT_TIMEOUT_S = 120.0
 POLL_INTERVAL_S = 1.0
 
@@ -296,6 +343,7 @@ class Client:
         intended_external: bool,
         reason: str,
         legal_justifications: dict[str, dict[str, str]] | None = None,
+        finding_decisions: dict[str, str] | None = None,
     ) -> dict:
         """POST .../releases (PR 39/43): returns {release, job,
         release_result} in one round trip -- release_result is the
@@ -316,6 +364,8 @@ class Client:
         }
         if legal_justifications:
             payload["legal_justifications"] = legal_justifications
+        if finding_decisions:
+            payload["finding_decisions"] = finding_decisions
         return self._json(
             "POST",
             f"/v1/matters/{matter_id}/documents/{doc_id}/releases",
@@ -409,6 +459,7 @@ def run_airlock(
     output_dir: Path,
     timeout_s: float,
     legal_justifications: dict[str, dict[str, str]] | None = None,
+    finding_decisions: dict[str, str] | None = None,
 ) -> AirlockResult:
     """The whole workflow, factored out of main() so tests can drive it
     against a fake or real Client without going through argv/exit codes."""
@@ -433,6 +484,7 @@ def run_airlock(
         intended_external=intended_external,
         reason=reason,
         legal_justifications=legal_justifications,
+        finding_decisions=finding_decisions,
     )
     release_id = response["release"]["id"]
     release_result = response["release_result"]
@@ -606,6 +658,7 @@ def run_airlock_batch(
     output_dir: Path,
     timeout_s: float,
     legal_justifications: dict[str, dict[str, str]] | None = None,
+    finding_decisions: dict[str, str] | None = None,
 ) -> BatchResult:
     """Sequential per-file processing over run_airlock. One file's outcome
     -- including a hard AirlockError (a failed upload, a failed submit, or
@@ -650,6 +703,7 @@ def run_airlock_batch(
                 output_dir=item_output_dir,
                 timeout_s=timeout_s,
                 legal_justifications=legal_justifications,
+                finding_decisions=finding_decisions,
             )
             batch.items.append(
                 BatchItemResult(
@@ -709,6 +763,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--reason", default="airlock CLI")
     ap.add_argument(
+        "--acknowledge",
+        action="append",
+        metavar="SUBTYPE",
+        help="acknowledge a flagged finding by subtype so it may travel in the "
+        "derivative (repeatable, e.g. --acknowledge hidden_text). Required by "
+        "the release gate for any finding this policy flags rather than "
+        "removes; the refusal message names exactly which ones. Pair it with "
+        "--legal-basis SUBTYPE=BASIS to record why.",
+    )
+    ap.add_argument(
         "--legal-basis",
         action="append",
         default=None,
@@ -741,6 +805,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         legal_justifications = parse_legal_basis_flags(args.legal_basis, args.legal_basis_note)
+        finding_decisions = parse_acknowledge_flags(args.acknowledge)
     except AirlockError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -766,6 +831,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir=args.output_dir,
                 timeout_s=args.timeout_s,
                 legal_justifications=legal_justifications,
+                finding_decisions=finding_decisions,
             )
         except AirlockError as e:
             print(f"error: {e}", file=sys.stderr)
@@ -812,6 +878,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             timeout_s=args.timeout_s,
             legal_justifications=legal_justifications,
+            finding_decisions=finding_decisions,
         )
     except AirlockError as e:
         print(f"error: {e}", file=sys.stderr)

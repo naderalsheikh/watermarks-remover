@@ -212,9 +212,22 @@ def test_signed_pdf_requires_attestation():
     res = inspect_bytes(_load("signed.pdf"), "signed.pdf")
     with pytest.raises(PolicyError, match="attestation"):
         plan_actions(res, "external_sharing")
-    attested = plan_actions(res, "external_sharing", signature_break_attestation=True)
+    # signed.pdf also carries an AcroForm with field values, which
+    # external_sharing flags rather than removes -- so past the signature
+    # gate it now meets the release gate and needs its own acknowledgement.
+    # Two independent gates on one document, which is the point: clearing
+    # one says nothing about the other.
+    with pytest.raises(PolicyError, match="not acknowledged"):
+        plan_actions(res, "external_sharing", signature_break_attestation=True)
+    attested = plan_actions(
+        res,
+        "external_sharing",
+        {"pdf_acroform": "keep"},
+        signature_break_attestation=True,
+    )
     assert attested.signature_break_attestation is True
     assert attested.actions["cms_or_xml_dsig"]["reason"] == "attested_signature_break"
+    assert attested.actions["pdf_acroform"]["reason"] == "operator_acknowledged"
 
 
 def test_macro_files_refused_by_mutating_policies():
@@ -297,7 +310,21 @@ def test_apply_production_docx_discloses_findings_kept_without_a_decision():
     staying silent."""
     data = _load("spa.docx")
     res = inspect_bytes(data, "spa.docx")
-    plan = plan_actions(res, "production")
+    # The release gate (2026-09-02) refuses this exact state under the
+    # product's own outward-facing policies -- "never reviewed" is no
+    # longer an outcome an external release may terminate in. The
+    # disclosure machinery this test covers is still live and still
+    # correct, but it is now reachable only through a policy OUTSIDE the
+    # gated set, i.e. a custom overlay. Exercised that way so the records
+    # keep their coverage instead of the test being deleted along with
+    # the path the gate closed.
+    custom = {
+        "id": "custom_review_policy",
+        "base": "external_sharing",
+        "comments_and_notes": "approve",
+        "tracked_changes": "approve",
+    }
+    plan = plan_actions(res, custom)
     cleaned, records = apply_actions(data, plan)
 
     by_subtype = {r.subtype: r for r in records}
@@ -437,7 +464,12 @@ def test_apply_signed_pdf_still_refuses_without_attest_then_executes_with():
     res = inspect_bytes(data, "signed.pdf")
     with pytest.raises(PolicyError):
         plan_actions(res, "external_sharing")
-    plan = plan_actions(res, "external_sharing", signature_break_attestation=True)
+    plan = plan_actions(
+        res,
+        "external_sharing",
+        {"pdf_acroform": "keep"},  # release gate: signed.pdf carries a flagged AcroForm
+        signature_break_attestation=True,
+    )
     cleaned, _records = apply_actions(data, plan)
     assert b"(Attorney A)" not in cleaned
 

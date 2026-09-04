@@ -1010,8 +1010,10 @@ def _demo_fixture_spa_docx() -> bytes:
     "ATTORNEY WORK PRODUCT" paragraph -- under counterparty_deal_room/
     external_sharing the comment strips and tracked changes get
     Accept-All'd, but hidden_text is flag-only (policies.py) so the vanish
-    text survives, listed under "What was found" but never "Actions
-    taken". One document, both behaviors. (A bare word/header1.xml part
+    text survives. Since the release gate it can no longer survive
+    QUIETLY: the seeded release names it, stops, and proceeds only under
+    an explicit acknowledgement, which then appears in the actions, the
+    disposition ledger and the certificate's limitations. One document, both behaviors. (A bare word/header1.xml part
     was tried first and dropped: this engine's own docx inspector doesn't
     generate a finding for header/footer part presence by itself --
     confirmed against tests/fixtures/legal/golden/spa.docx.json, which has
@@ -1082,10 +1084,41 @@ def _demo_fixture_hidden_xlsx() -> bytes:
 # One profile (counterparty_deal_room) for all three so the walkthrough is
 # "one profile, three real outcomes" rather than requiring the evaluator
 # to also reason about profile choice.
+# (filename, fixture builder, finding acknowledgements). Two entries carry
+# acknowledgements because of the release gate (policies.RELEASE_GATE_
+# MARKER): external_sharing FLAGS rather than removes the SPA's hidden
+# w:vanish paragraph and the workbook's hidden sheets/rows, so without a
+# named acknowledgement each release is refused.
+#
+# The SPA's acknowledgement is the walkthrough's whole point now. That
+# document hides "ATTORNEY WORK PRODUCT -- PRIVILEGED AND CONFIDENTIAL" in
+# invisible text and is being released to a counterparty; before the gate
+# it sailed through, disclosed only in a findings list nobody had to read.
+# The seeded release now shows what an operator actually experiences: the
+# privileged text is named, the release stops, and it proceeds only once
+# someone acknowledges it under a stated legal basis -- which then travels
+# on the certificate as a limitation.
+#
+# Acknowledging rather than letting these refuse is a deliberate demo
+# choice. The walkthrough already shows a refusal -- the macro-enabled
+# draft, refused outright with no derivative path -- and more refusals
+# would teach nothing new while dropping the outcome an evaluator most
+# needs to see: a release that COMPLETES while carrying a disclosed,
+# acknowledged limitation. The three documents now demonstrate the three
+# real outcomes: released-with-an-acknowledged-finding, refused outright,
+# and released-with-an-acknowledged-finding of a different shape.
 _DEMO_SEED_DOCUMENTS = (
-    ("Sample - Stock Purchase Agreement.docx", _demo_fixture_spa_docx),
-    ("Sample - Macro-Enabled Draft.docm", _demo_fixture_macro_docm),
-    ("Sample - Deal Terms Workbook.xlsx", _demo_fixture_hidden_xlsx),
+    (
+        "Sample - Stock Purchase Agreement.docx",
+        _demo_fixture_spa_docx,
+        {"hidden_text": "keep"},
+    ),
+    ("Sample - Macro-Enabled Draft.docm", _demo_fixture_macro_docm, {}),
+    (
+        "Sample - Deal Terms Workbook.xlsx",
+        _demo_fixture_hidden_xlsx,
+        {"hidden_structure": "keep"},
+    ),
 )
 _DEMO_MATTER_NAME = "Sample Matter — Release Gate Walkthrough"
 
@@ -2551,7 +2584,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             r[0] for r in s.query(Release.document_id).filter_by(matter_id=matter.id).all()
         }
 
-        for filename, build_fixture in _DEMO_SEED_DOCUMENTS:
+        for filename, build_fixture, acknowledgements in _DEMO_SEED_DOCUMENTS:
             doc = existing_docs.get(filename)
             if doc is None:
                 doc = _upload_document_bytes(matter.id, filename, build_fixture(), user, s)
@@ -2563,6 +2596,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     purpose="Release Gate evaluation walkthrough",
                     intended_external=True,
                     reason="demo seed",
+                    finding_decisions=dict(acknowledgements),
+                    legal_justifications={
+                        st: LegalJustificationBody(
+                            basis="work_product" if st == "hidden_text" else "client_instruction",
+                            note=(
+                                "Sample acknowledgement recorded by the demo seed: the "
+                                "operator was shown this finding and confirmed it travels "
+                                "in the derivative."
+                            ),
+                        )
+                        for st in acknowledgements
+                    },
                 )
                 create_release(matter.id, doc.id, release_body, user=user, s=s)
 
