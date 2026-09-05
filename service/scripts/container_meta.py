@@ -2180,6 +2180,323 @@ def _scoped_namespace_registration(xml_bytes: bytes):
         _NAMESPACE_REGISTRATION_LOCK.release()
 
 
+# --- Hidden-text removal (Lane B stripper) ---------------------------------
+#
+# Until this existed, `hidden_text` resolved to a non-removing action under
+# every policy: the engine could SEE concealed text and had no way to take
+# it out. A document could be released to a counterparty with "ATTORNEY
+# WORK PRODUCT -- PRIVILEGED AND CONFIDENTIAL" riding along in invisible
+# runs, disclosed only in a findings list.
+#
+# Policy-semantic decisions made here, stated rather than implied:
+#
+# 1. "Strip" means DELETE the concealed run, not un-hide it. Un-hiding
+#    would surface privileged text into the visible document -- the exact
+#    disclosure the release was meant to prevent, achieved by the tool
+#    meant to prevent it. Removal is the only reading that is safe when
+#    wrong.
+#
+# 2. A hidden PARAGRAPH MARK (w:vanish inside w:pPr/w:rPr) is NOT hidden
+#    content. It hides the pilcrow, visually joining the paragraph to the
+#    next one; the paragraph's own runs stay visible. Deleting on that
+#    signal would destroy visible text. Only run-level vanish is removed.
+#
+# 3. w:specVanish is not w:vanish. It marks TOC/field-result text that
+#    Word hides in specific views; it is not operator-concealed content
+#    and is left alone.
+#
+# 4. Toggle semantics are honoured. `<w:vanish/>` is ON, but
+#    `<w:vanish w:val="0"/>` (also "false"/"off") is explicitly OFF --
+#    commonly written to CANCEL a hidden style on one run. Treating those
+#    as hidden would delete visible text, which is the worst failure this
+#    function can have.
+#
+# 5. Style-level vanish is resolved, not ignored. A run carrying no vanish
+#    of its own but referencing a style whose rPr hides text IS hidden, and
+#    a stripper that missed it while reporting "hidden text removed" would
+#    be making exactly the overclaim this product exists to refuse.
+#    w:basedOn chains are followed, and a run's own explicit
+#    `w:vanish w:val="0"` overrides the style (direct formatting wins).
+#
+# 6. White-on-white text is deliberately NOT removed here. Whether white
+#    text is invisible depends on what is behind it -- run shading,
+#    paragraph shading, table cell shading, page background -- and this
+#    engine resolves none of those. Removing on a colour match alone would
+#    delete legitimately visible white-on-dark text. It stays a flagged
+#    finding, which the release gate turns into a required acknowledgement.
+_W_R = _W_NS + "r"
+_W_VANISH = _W_NS + "vanish"
+_W_RSTYLE = _W_NS + "rStyle"
+_W_PSTYLE = _W_NS + "pStyle"
+_W_STYLE = _W_NS + "style"
+_W_BASEDON = _W_NS + "basedOn"
+_W_STYLE_ID = _W_NS + "styleId"
+_W_VAL = _W_NS + "val"
+_W_T = _W_NS + "t"
+_W_DOC_DEFAULTS = _W_NS + "docDefaults"
+_W_RPR_DEFAULT = _W_NS + "rPrDefault"
+
+# OOXML toggle properties: absent val, or val in this set, means ON.
+_TOGGLE_OFF_VALUES = frozenset({"0", "false", "off"})
+
+
+def _toggle_is_on(elem) -> bool:
+    """OOXML toggle-property semantics for an element like ``<w:vanish/>``.
+
+    Present with no ``w:val`` is ON; ``w:val="0"|"false"|"off"`` is an
+    explicit OFF, which real documents use to cancel an inherited style.
+    Anything else ("1", "true", "on", or a junk value) is ON.
+    """
+    if elem is None:
+        return False
+    val = elem.get(_W_VAL)
+    if val is None:
+        return True
+    return val.strip().lower() not in _TOGGLE_OFF_VALUES
+
+
+def _vanish_state(rpr) -> bool | None:
+    """Tri-state hidden-ness of a ``w:rPr``: True on, False explicitly off,
+    None not specified (so a lower level of the cascade decides).
+
+    The tri-state is load-bearing, not fastidiousness. Collapsing "not
+    specified" into "off" makes a character style unable to inherit a
+    paragraph style's vanish; collapsing it into "on" deletes visible text.
+    Only three-valued resolution reproduces what Word actually renders.
+    """
+    if rpr is None:
+        return None
+    vanish = rpr.find(_W_VANISH)
+    if vanish is None:
+        return None
+    return _toggle_is_on(vanish)
+
+
+@dataclass(frozen=True)
+class DocxHiddenModel:
+    """Everything outside a run that can conceal that run's text.
+
+    ``default`` is the document-wide ``w:docDefaults/w:rPrDefault`` state;
+    ``style_state`` maps every styleId to its resolved tri-state with
+    ``w:basedOn`` chains followed. Built once per document and shared by the
+    remover and the verifier's postcondition, deliberately: if those two
+    disagreed about what "hidden" means, the postcondition would pass while
+    concealed text was still in the derivative -- a green check over a
+    false claim, which is the one outcome this engine may not produce.
+    """
+
+    default: bool = False
+    style_state: dict[str, bool | None] = field(default_factory=dict)
+
+    def resolved(self, *, direct, run_style_id, para_style_id) -> bool:
+        """Apply the OOXML formatting cascade, lowest precedence first:
+        docDefaults -> paragraph style -> character style -> direct run
+        formatting. The first level that actually specifies vanish, reading
+        from the top, wins."""
+        if direct is not None:
+            return direct
+        if run_style_id:
+            state = self.style_state.get(run_style_id)
+            if state is not None:
+                return state
+        if para_style_id:
+            state = self.style_state.get(para_style_id)
+            if state is not None:
+                return state
+        return self.default
+
+
+def docx_hidden_model(styles_xml: bytes) -> DocxHiddenModel:
+    """Parse ``word/styles.xml`` into a :class:`DocxHiddenModel`.
+
+    Returns an empty model for a missing or malformed styles part rather
+    than raising: a document whose styles will not parse still gets its
+    direct-formatting vanish runs removed, and a hard failure here would
+    turn a partial capability into none at all.
+    """
+    import xml.etree.ElementTree as ET
+
+    if not styles_xml:
+        return DocxHiddenModel()
+    try:
+        root = ET.fromstring(styles_xml)  # noqa: S314 - budget-capped zip member
+    except ET.ParseError:
+        return DocxHiddenModel()
+
+    default = False
+    doc_defaults = root.find(_W_DOC_DEFAULTS)
+    if doc_defaults is not None:
+        rpr_default = doc_defaults.find(_W_RPR_DEFAULT)
+        if rpr_default is not None:
+            default = _vanish_state(rpr_default.find(_W_RPR)) is True
+
+    own: dict[str, bool | None] = {}
+    parent: dict[str, str] = {}
+    for style in root.iter(_W_STYLE):
+        style_id = style.get(_W_STYLE_ID)
+        if not style_id:
+            continue
+        own[style_id] = _vanish_state(style.find(_W_RPR))
+        based_on = style.find(_W_BASEDON)
+        if based_on is not None:
+            base = based_on.get(_W_VAL)
+            if base and base != style_id:  # self-reference is not a chain
+                parent[style_id] = base
+
+    def resolve(style_id: str, seen: frozenset[str]) -> bool | None:
+        # `seen` guards a w:basedOn CYCLE, which a hostile or merely broken
+        # styles.xml can contain and which would otherwise recurse until the
+        # interpreter's stack limit.
+        if style_id in seen:
+            return None
+        state = own.get(style_id)
+        if state is not None:
+            return state
+        base = parent.get(style_id)
+        if base is None:
+            return None
+        return resolve(base, seen | {style_id})
+
+    return DocxHiddenModel(
+        default=default,
+        style_state={sid: resolve(sid, frozenset()) for sid in own},
+    )
+
+
+def _para_style_id(p_elem) -> str | None:
+    ppr = p_elem.find(_W_PPR)
+    if ppr is None:
+        return None
+    pstyle = ppr.find(_W_PSTYLE)
+    return pstyle.get(_W_VAL) if pstyle is not None else None
+
+
+def _run_is_hidden(r_elem, model: DocxHiddenModel, para_style_id: str | None) -> bool:
+    """True when this ``w:r``'s effective formatting conceals its text."""
+    rpr = r_elem.find(_W_RPR)
+    run_style_id = None
+    if rpr is not None:
+        rstyle = rpr.find(_W_RSTYLE)
+        if rstyle is not None:
+            run_style_id = rstyle.get(_W_VAL)
+    return model.resolved(
+        direct=_vanish_state(rpr),
+        run_style_id=run_style_id,
+        para_style_id=para_style_id,
+    )
+
+
+def _run_text(r_elem) -> str:
+    return "".join(t.text or "" for t in r_elem.iter(_W_T))
+
+
+def _walk_hidden_runs(elem, model: DocxHiddenModel, para_style_id, visit):
+    """Shared traversal for the remover and the extractor.
+
+    ``visit(run)`` returns True to DROP the run. One traversal, so the two
+    callers cannot drift into different answers about which runs are
+    concealed -- see :class:`DocxHiddenModel`.
+    """
+    if elem.tag == _W_P:
+        para_style_id = _para_style_id(elem)
+    kept = []
+    for child in list(elem):
+        # A vanish inside w:pPr belongs to the paragraph MARK, not to
+        # content: it hides the pilcrow so the paragraph joins the next one
+        # visually, while the paragraph's own runs stay visible. Deleting on
+        # that signal would destroy visible text, so pPr is never descended
+        # into -- its pStyle was already read above.
+        if child.tag == _W_PPR:
+            kept.append(child)
+            continue
+        if child.tag == _W_R and _run_is_hidden(child, model, para_style_id):
+            if visit(child):
+                continue
+            kept.append(child)
+            continue
+        _walk_hidden_runs(child, model, para_style_id, visit)
+        kept.append(child)
+    elem[:] = kept
+
+
+def _docx_strip_hidden_text(xml_bytes: bytes, model: DocxHiddenModel):
+    """Delete concealed runs from one DOCX content part.
+
+    Returns ``(xml_bytes, stats)``, or None when the part is not well-formed
+    XML -- the caller then keeps the original bytes and says so, exactly as
+    the Accept All pass does, rather than shipping a half-transformed part.
+
+    An emptied paragraph is left in place rather than removed. Hidden text
+    still occupied a line unless its paragraph mark was hidden too, so
+    keeping the now-empty ``w:p`` preserves the layout a reader already
+    saw; deleting paragraphs would reflow and repaginate the document,
+    which is a visible change this pass has no mandate to make.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_bytes)  # noqa: S314 - budget-capped zip member
+    except ET.ParseError:
+        return None
+
+    stats = {"runs_removed": 0, "chars_removed": 0}
+
+    def drop(run) -> bool:
+        stats["runs_removed"] += 1
+        stats["chars_removed"] += len(_run_text(run))
+        return True
+
+    _walk_hidden_runs(root, model, None, drop)
+    if not stats["runs_removed"]:
+        # Byte-identical no-op rather than a gratuitous re-serialization: an
+        # unchanged part must not churn the derivative hash or the part
+        # inventory just because this pass looked at it.
+        return xml_bytes, stats
+    with _scoped_namespace_registration(xml_bytes):
+        out = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    return out, stats
+
+
+def extract_docx_hidden_text(data: bytes) -> list[str]:
+    """Every concealed text fragment in a DOCX, for the verify postcondition.
+
+    "The markup stopped matching a detector" is not the same claim as "the
+    concealed words are gone from the file", and only the second is worth
+    making to a recipient. Mirrors ``extract_docx_deleted_text``, which does
+    the same job for Accept All.
+    """
+    import xml.etree.ElementTree as ET
+
+    out: list[str] = []
+    budget: list[int] = [0]
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = set(zf.namelist())
+            styles = b""
+            if "word/styles.xml" in names:
+                styles = _read_zip_member(zf, zf.getinfo("word/styles.xml"), budget)
+            model = docx_hidden_model(styles)
+            for info in zf.infolist():
+                if not _is_docx_body_part(info.filename):
+                    continue
+                raw = _read_zip_member(zf, info, budget)
+                try:
+                    root = ET.fromstring(raw)  # noqa: S314
+                except ET.ParseError:
+                    continue
+
+                def collect(run, _out=out) -> bool:
+                    text = _run_text(run).strip()
+                    if text:
+                        _out.append(text)
+                    return False  # observe only; never mutate here
+
+                _walk_hidden_runs(root, model, None, collect)
+    except (zipfile.BadZipFile, ZipBudgetExceeded):
+        return out
+    return out
+
+
 def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
     """Resolve tracked-change markup to its accepted state (stdlib ElementTree).
 
@@ -2278,6 +2595,7 @@ def _docx_legal_clean(
     accept_all: bool = True,
     strip_embeddings: bool = False,
     strip_comments: bool = True,
+    strip_hidden_text: bool = False,
 ) -> tuple[bytes, list[str]]:
     """Sharing-path DOCX legal pass; runs before ``_scrub_ooxml_zip``.
 
@@ -2291,7 +2609,21 @@ def _docx_legal_clean(
     budget = [0]
     dropped: set[str] = set()
     kept: list[tuple[zipfile.ZipInfo, bytes]] = []
+    hidden_runs = hidden_chars = 0
     with zipfile.ZipFile(io.BytesIO(data)) as zin:
+        # Styles must be resolved BEFORE the per-part loop: a run in
+        # document.xml can be hidden by a style defined in word/styles.xml,
+        # which the loop may not have reached yet (zip member order is not
+        # guaranteed). Reading it up front also charges its bytes to the
+        # same budget as everything else.
+        hidden_model = DocxHiddenModel()
+        if strip_hidden_text:
+            styles_bytes = b""
+            if "word/styles.xml" in set(zin.namelist()):
+                styles_bytes = _read_zip_member(
+                    zin, zin.getinfo("word/styles.xml"), budget
+                )
+            hidden_model = docx_hidden_model(styles_bytes)
         for info in zin.infolist():
             _check_zip_budget(info, budget)
             name = info.filename
@@ -2317,6 +2649,25 @@ def _docx_legal_clean(
                     raw = new_raw
                 else:
                     actions.append(f"warning: {name} not well-formed XML; left unmodified")
+            if strip_hidden_text and _is_docx_body_part(name):
+                # Runs after Accept All on purpose: resolving a tracked
+                # change can expose a run that was previously wrapped in
+                # w:ins/w:del, and that run may itself be hidden. Stripping
+                # first would leave it in the derivative.
+                result = _docx_strip_hidden_text(raw, hidden_model)
+                if result is None:
+                    actions.append(
+                        f"warning: {name} not well-formed XML; hidden text not removed"
+                    )
+                else:
+                    raw, st = result
+                    if st["runs_removed"]:
+                        hidden_runs += st["runs_removed"]
+                        hidden_chars += st["chars_removed"]
+                        actions.append(
+                            f"hidden-text: removed {st['runs_removed']} concealed run(s) "
+                            f"({st['chars_removed']} chars) from {name}"
+                        )
             kept.append((info, raw))
 
         if dropped:
@@ -2359,12 +2710,14 @@ def clean_docx(
     drop_custom_xml: bool = True,
     pii_blank_extra: bool = False,
     strip_authoring_exhaust: bool | None = None,
+    strip_hidden_text: bool = False,
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _docx_legal_clean(
         data,
         accept_all=accept_all,
         strip_embeddings=strip_embeddings,
         strip_comments=strip_comments,
+        strip_hidden_text=strip_hidden_text,
     )
     # Defaults to the full-identity-scrub path (prop_fields is None ==
     # external_sharing / production). privacy_only passes its own narrow

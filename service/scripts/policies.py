@@ -105,7 +105,18 @@ DEFAULT_POLICIES: dict[str, dict[str, str]] = {
         "comments_and_notes": "strip",
         "headers_footers": "flag",
         "hidden_structure": "flag",
-        "hidden_text": "flag",
+        # Lane B: was "flag" until the engine gained a remover. A document
+        # released to a counterparty must not carry concealed text, and the
+        # release gate could only ever force someone to acknowledge that it
+        # did. Flipping this also makes production's "approve" resolve to a
+        # real removal through _APPROVE_RESOLVES_TO, retiring the
+        # "your approval cannot be honoured" refusal for this subtype.
+        #
+        # The removal is PARTIAL by design -- w:vanish yes, white-on-white
+        # no, because whether white text is invisible depends on background
+        # shading this engine does not resolve. _WHITE_ONLY_HIDDEN_REFUSAL
+        # below keeps that honest rather than letting "strip" overclaim.
+        "hidden_text": "strip",
         "embeddings_ole": "strip",
         "custom_xml": "strip",
         "external_links": "strip",
@@ -216,6 +227,19 @@ _MACROS_ALLOWED = {"refuse", "inspect_only"}
 # carry the release gate below. privacy_only and evidence_preservation are
 # excluded by intent, not by oversight: neither is a release path.
 _RELEASE_GATE_POLICIES = frozenset({"external_sharing", "production"})
+
+# Greppable, like PDF_CONTENT_REFUSAL_MARKER and RELEASE_GATE_MARKER: the
+# engine can remove w:vanish text but not white-on-white, whose invisibility
+# depends on run/paragraph/cell shading and page background that this engine
+# never resolves. Removing on a colour match alone would delete legitimately
+# visible white-on-dark text. When a document's ONLY concealment is
+# white-applied, "strip" would silently do nothing, the re-inspect would
+# still find the finding, and the job would die at the verify gate with an
+# opaque message. This refusal says what is actually true, and names the
+# one-flag remedy.
+WHITE_ONLY_HIDDEN_REFUSAL = (
+    "hidden text is white-on-white, which this engine cannot remove safely"
+)
 
 # Stable, greppable marker so the API, the UI and the tests can tell this
 # refusal apart from a macro refusal or an unattested-signature refusal --
@@ -457,6 +481,33 @@ def plan_actions(
         raise PolicyError("plan requires source_sha256 (from inspect result)")
 
     # Hard gates before anything else.
+    # Deliberately checks `decisions` before refusing: this refusal's whole
+    # value is that it names a one-flag remedy, and a gate that then rejects
+    # that very flag is a dead end advertising an exit. The operator who
+    # acknowledges falls through to the strip->flag downgrade below.
+    if (
+        "hidden_text" in seen
+        and doc["hidden_text"] == "strip"
+        and decisions.get("hidden_text") != "keep"
+    ):
+        inspect_report = getattr(result, "report", None)
+        if isinstance(result, dict):
+            inspect_report = result.get("report")
+        legal = ((inspect_report or {}).get("details") or {}).get("docx_legal") or {}
+        if int(legal.get("hidden_vanish") or 0) == 0 and int(
+            legal.get("hidden_white_applied_runs") or 0
+        ):
+            raise PolicyError(
+                f"{WHITE_ONLY_HIDDEN_REFUSAL}: "
+                f"{legal['hidden_white_applied_runs']} white-font run(s) and no "
+                "w:vanish text. Whether white text is invisible depends on the "
+                "shading behind it, which this engine does not resolve, so "
+                "removing it could delete legitimately visible white-on-dark "
+                "text. Acknowledge it instead to release with the finding "
+                'disclosed (finding_decisions: {"hidden_text": "keep"}), or '
+                "remove the concealment in the source document."
+            )
+
     if "macros_vba" in seen and doc["macros_vba"] != "inspect_only":
         # Not `== "refuse"`: any macro action that still reaches apply_actions
         # would ship vbaProject.bin inside a derivative labeled clean.
@@ -491,6 +542,23 @@ def plan_actions(
                 plan.actions[st] = {"action": "keep", "reason": "operator_kept"}
             else:
                 plan.actions[st] = {"action": "keep", "reason": "no_decision"}
+        elif default == "strip" and st == "hidden_text" and decisions.get(st) == "keep" and st in seen:
+            # The one subtype where an operator may decline a strip.
+            #
+            # hidden_text's remover is deliberately partial: it deletes
+            # w:vanish runs and leaves white-on-white text alone. A document
+            # whose concealment is white-only therefore has no removal path,
+            # and without this branch it would have no RELEASE path either
+            # -- every outward-facing policy resolves hidden_text to strip,
+            # so refusing would be a dead end rather than a decision.
+            #
+            # Scoped to hidden_text on purpose, not offered for strip
+            # generally: an operator must not be able to decline the
+            # comments or authoring-props strip, where removal is complete
+            # and the default is the whole point. The downgrade lands as a
+            # flag with the gate's own operator_acknowledged reason, so it
+            # is recorded, limitation-bearing and certificate-visible.
+            plan.actions[st] = {"action": "flag", "reason": "operator_acknowledged"}
         elif default == "flag" and decisions.get(st) == "keep" and st in seen:
             # An operator ACKNOWLEDGING a flagged finding that is actually
             # present. Before this, `decisions` was consulted only for
@@ -1115,6 +1183,11 @@ def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[Acti
                     accept_all=a2["tracked_changes"] == "accept_all",
                     strip_embeddings=a2["embeddings_ole"] == "strip",
                     strip_comments=a2["comments_and_notes"] == "strip",
+                    # DOCX-only, so passed here rather than through the
+                    # shared _ooxml_kwargs: clean_xlsx and clean_pptx take
+                    # the same kwargs dict and neither accepts this one.
+                    # There is no such thing as an XLSX/PPTX w:vanish run.
+                    strip_hidden_text=a2["hidden_text"] == "strip",
                     **kwargs,
                 )
             elif fmt == "xlsx":
@@ -1133,7 +1206,9 @@ def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[Acti
                 )
             for m in msgs[:12]:
                 st = (
-                    "tracked_changes"
+                    "hidden_text"
+                    if m.startswith("hidden-text:")
+                    else "tracked_changes"
                     if "accept-all" in m
                     else "comments_and_notes"
                     if "comment" in m.lower() or "notes" in m.lower()

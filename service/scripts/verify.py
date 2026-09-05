@@ -75,6 +75,19 @@ def _check(name: str, passed: bool, detail: str) -> dict[str, Any]:
     return {"name": name, "pass": bool(passed), "detail": detail}
 
 
+_WS_RUN_RE = re.compile(r"\s+")
+
+
+def _normalize_ws(text: str) -> str:
+    """Collapse every whitespace run to one space, and trim.
+
+    Used to compare text extracted by two functions with different
+    granularity (per-run vs per-<w:t>), where the only difference between a
+    match and a miss is which whitespace the serializer happened to emit.
+    """
+    return _WS_RUN_RE.sub(" ", text).strip()
+
+
 def _png_dimensions(data: bytes) -> tuple[int, int] | None:
     if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
         w, h = struct.unpack(">II", data[16:24])
@@ -466,6 +479,86 @@ def verify_derivative(
                     else f"{len(deleted)} deleted string(s) confirmed absent",
                 )
             )
+
+    # 3c. The hidden-text stripper's oracle. reinspect_targeted_gone (check
+    # 1) only confirms the hidden_text SUBTYPE stopped matching a detector
+    # heuristic; it never reads the concealed words. The claim being made to
+    # a recipient is not "the markup stopped matching" but "the concealed
+    # text is not in this file", and only the second is worth anything, so
+    # it gets its own check.
+    #
+    # Two failure modes, and the second is the one that would be a
+    # catastrophe rather than a bug:
+    #
+    #   remaining   the stripper missed runs -- concealed text is still in
+    #               the derivative, still concealed.
+    #   surfaced    the stripper UN-HID text instead of removing it, making
+    #               privileged content visible to the recipient. That is the
+    #               precise disclosure a release exists to prevent, produced
+    #               by the tool meant to prevent it.
+    if (
+        kind == "container"
+        and res_before.format == "docx"
+        and plan.actions.get("hidden_text", {}).get("action") == "strip"
+    ):
+        import container_meta
+
+        hidden_before = container_meta.extract_docx_hidden_text(original)
+        if hidden_before:
+            remaining = container_meta.extract_docx_hidden_text(derivative)
+            # Both sides are whitespace-normalized before comparison, and
+            # that is a correctness requirement rather than tidiness. The
+            # two extractors have different bases: extract_docx_hidden_text
+            # concatenates a RUN's text, while extract_ooxml_plaintext
+            # splits per <w:t> and joins with newlines. Word routinely
+            # splits one run across several w:t elements (spell-check and
+            # rsid boundaries), so a concealed run reading
+            # "PRIVILEGED WORK PRODUCT" arrives from one extractor with a
+            # space and from the other with a newline.
+            #
+            # Without normalization the substring test misses, the
+            # count guard below reads 0 == 1, the fragment is silently
+            # dropped from consideration, and a derivative that UN-HID that
+            # run reports "confirmed absent" -- a passing check over
+            # privileged text made visible to the recipient. Caught by
+            # test_hidden_text_split_across_runs_is_still_detected.
+            derivative_text = _normalize_ws(
+                container_meta.extract_ooxml_plaintext(derivative, "docx")
+            )
+            original_text = _normalize_ws(
+                container_meta.extract_ooxml_plaintext(original, "docx")
+            )
+            hidden_before = [_normalize_ws(f) for f in hidden_before]
+            remaining = [_normalize_ws(f) for f in remaining]
+
+            # A fragment is only evidence of surfacing if it appeared
+            # NOWHERE BUT inside hidden runs. "CONFIDENTIAL" concealed in
+            # one run and printed visibly in the footer of the same
+            # document is not a leak, and failing the job over it would
+            # refuse correct work -- the opposite defect, and one that
+            # teaches operators to distrust the gate.
+            surfaced = sorted(
+                {
+                    fragment
+                    for fragment in hidden_before
+                    if original_text.count(fragment) == hidden_before.count(fragment)
+                    and fragment in derivative_text
+                }
+            )
+            passed = not remaining and not surfaced
+            if passed:
+                detail = f"{len(hidden_before)} concealed fragment(s) confirmed absent"
+            else:
+                parts = []
+                if remaining:
+                    parts.append(f"{len(remaining)} still concealed in the derivative")
+                if surfaced:
+                    parts.append(
+                        f"{len(surfaced)} SURFACED as visible text "
+                        "(un-hidden rather than removed)"
+                    )
+                detail = "; ".join(parts)
+            checks.append(_check("hidden_text_removed", passed, detail))
 
     # 4. body diff under privacy: only invisible codepoints may change
     if plan.policy_id == "privacy_only" and kind == "text":

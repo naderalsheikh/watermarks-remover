@@ -47,7 +47,7 @@ Closes items 1–5 of the external review. `1343 passed, 1 skipped`, ruff clean.
 
 ---
 
-## Lane B — Hidden text: capability + control (gate SHIPPED, stripper open)
+## Lane B — Hidden text: capability + control (SHIPPED)
 
 The only lane with client-visible exposure.
 
@@ -83,9 +83,19 @@ The demo seed now acknowledges two findings, which makes the walkthrough better 
 
 **Acknowledgement is not absolution.** An acknowledged finding is still in the derivative and still a limitation; the certificate records that a named operator confirmed it, rather than that a default table left it in.
 
-**B2 — Proposal before code**, per repo convention (`docs/rfc3161-anchor-implementation-proposal.md`, `docs/release-packet-verification-and-anchoring-proposal.md`). It must state: what "removed" means for hidden text; the postcondition check (the model is `verify.py`'s `accept_all_deleted_text_absent` — prove the concealed *text* is absent from the derivative's plaintext, not merely that the markup stopped matching a detector); which cases fall to refusal instead; and what, if anything, changes for `privacy_only`'s byte-fidelity promise (intended answer: nothing).
+**B-stripper — IMPLEMENTED 2026-09-05.** `external_sharing`'s `hidden_text` moves from `flag` to `strip`, which through `_APPROVE_RESOLVES_TO` also makes `production`'s `approve` resolve to a real removal.
 
-**B3 — Re-scrub the Aurelia deliverable.** Blocked on the gate and stripper landing. Until then, the honest client communication is: *the derivative retains hidden-text formatting; the current release's certificate now discloses this as a limitation; no configuration of the product removes it today.* Do not re-issue a packet claiming otherwise.
+- **Strip means delete, not un-hide.** Un-hiding would surface privileged text into the visible document — the exact disclosure a release exists to prevent, performed by the tool meant to prevent it.
+- **The full OOXML cascade is resolved**: `docDefaults → paragraph style → character style → direct run formatting`, `w:basedOn` chains followed, tri-state so an explicit `w:vanish w:val="0"` un-hides a run under a hidden style. A first pass that read only direct formatting and `w:rStyle` missed text hidden by `docDefaults` and by paragraph styles — silently, while reporting success.
+- **A hidden paragraph *mark* is not hidden content.** `w:vanish` in `w:pPr/w:rPr` hides the pilcrow; the paragraph's runs stay visible, and deleting on that signal would destroy visible text.
+- **White-on-white is deliberately not removed.** Whether white text is invisible depends on run/paragraph/cell shading and page background, none of which this engine resolves; removing on a colour match would delete legitimately visible white-on-dark text. A document whose *only* concealment is white-applied is refused with `WHITE_ONLY_HIDDEN_REFUSAL`, naming the one-flag remedy — rather than letting `strip` silently no-op and die later at the re-inspect gate.
+- **`hidden_text` is the one subtype an operator may decline**, because its removal is partial. Declining lands as `flag` with the gate's `operator_acknowledged` reason. An operator cannot decline the comments strip, where removal is complete.
+- **`verify.py` gained `hidden_text_removed`**, the postcondition: every concealed fragment found pre-sanitize must be absent from the derivative, and none may have been *surfaced* as visible text. Both sides are whitespace-normalised because the extractor works per run and the plaintext projection per `<w:t>`; without that, a run Word split across two `w:t` elements could be un-hidden and the check would report "confirmed absent".
+- **The remover and the extractor share one traversal.** If they disagreed about what "hidden" means, the postcondition would pass while concealed text sat in the derivative — a green check over a false claim.
+
+**Consequence: the gate is retired for hidden text.** The approve-but-unremovable set shrank from four subtypes to three (`hidden_structure`, `pdf_acroform`, `layer_a_non_body`). The gate forced acknowledgement while removal was impossible; removal now happens and nobody is asked. That is the two halves composing as designed.
+
+**B3 — Re-scrub the Aurelia deliverable.** UNBLOCKED as of 2026-09-05; not yet done. Until it is, the honest client communication is: *the derivative retains hidden-text formatting; the current release's certificate now discloses this as a limitation; no configuration of the product removes it today.* Do not re-issue a packet claiming otherwise.
 
 **Done criteria:** proposal merged; gate implemented with a regression test that a hidden-text document cannot reach a `done` external release without either removal or an affirmative recorded decision; stripper implemented with a postcondition check proving the concealed text is absent from the derivative's plaintext; superseding release issued for the Aurelia matter.
 

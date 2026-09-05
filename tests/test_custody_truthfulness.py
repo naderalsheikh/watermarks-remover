@@ -126,6 +126,16 @@ def _style_only_white_docx(rules: int = 119) -> bytes:
     return _docx({"word/document.xml": _document(body), "word/styles.xml": styles})
 
 
+def _hidden_structure_xlsx() -> bytes:
+    """A workbook with hidden sheets/rows. Used wherever a test needs a
+    finding the policy still FLAGS: since the Lane B stripper landed,
+    hidden_text is removed rather than flagged under every outward-facing
+    policy, so it can no longer exercise the release gate. hidden_structure
+    remains flag-only -- unhiding a sheet changes what a reader sees, which
+    is not a change a sanitizer may make unasked."""
+    return (REPO / "tests" / "fixtures" / "legal" / "hidden.xlsx").read_bytes()
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", PW)
@@ -593,40 +603,36 @@ def test_manifest_states_both_halves_of_the_exhaust_policy(client):
 
 def test_approval_that_cannot_be_honoured_is_refused_not_disclosed():
     """An operator who APPROVES a finding has asked for it to be REMOVED.
-    Under `production`, `hidden_text` approve resolves via
-    `_APPROVE_RESOLVES_TO` to `flag` -- the engine has no removal path -- so
-    before the release gate they got a flagged derivative and a disclosure
-    buried in the action records.
+    Where `_APPROVE_RESOLVES_TO` maps that approval onto a non-removing
+    action, they get a flagged derivative and hold a false belief about
+    what it contains -- worse than being uninformed, and not something a
+    disclosure after the fact repairs. The gate refuses and says the
+    approval cannot be honoured.
 
-    That is the more dangerous of the two gate cases: the operator is not
-    merely uninformed, they hold a false belief about what the derivative
-    contains. The gate refuses and says the approval cannot be honoured,
-    rather than shipping and explaining afterwards."""
+    Uses hidden_structure: hidden_text used to demonstrate this and no
+    longer can, because the Lane B stripper gave it a real removal path."""
     from engine_api import inspect_bytes
     from policies import RELEASE_GATE_MARKER, PolicyError
 
-    res = inspect_bytes(_hidden_text_docx(), "h.docx")
+    res = inspect_bytes(_hidden_structure_xlsx(), "hidden.xlsx")
     with pytest.raises(PolicyError) as excinfo:
-        plan_actions(res, "production", {"hidden_text": "approve"})
+        plan_actions(res, "production", {"hidden_structure": "approve"})
     message = str(excinfo.value)
     assert RELEASE_GATE_MARKER in message
     assert "NOT REMOVABLE" in message
     assert "cannot be honoured" in message
-    # And it names the exact call that unblocks it, so the refusal is
-    # actionable rather than merely correct.
-    assert '"hidden_text": "keep"' in message
+    assert '"hidden_structure": "keep"' in message
 
 
 def test_gate_cannot_be_routed_around_by_changing_profile():
-    """hidden_text is `flag` under external_sharing and `approve` under
-    production. Gating only the flag left an operator facing the gate free
-    to pick the other profile and ship the same finding as an unreviewed
-    `no_decision` keep. A gate you can route around by changing profile is
-    not a gate."""
+    """hidden_structure is `flag` under external_sharing and `approve` under
+    production. Gating only the flag would leave an operator free to pick
+    the other profile and ship the same finding as an unreviewed
+    `no_decision` keep."""
     from engine_api import inspect_bytes
     from policies import PolicyError
 
-    res = inspect_bytes(_hidden_text_docx(), "h.docx")
+    res = inspect_bytes(_hidden_structure_xlsx(), "hidden.xlsx")
     for policy in ("external_sharing", "production"):
         with pytest.raises(PolicyError, match="not acknowledged"):
             plan_actions(res, policy)
@@ -635,7 +641,7 @@ def test_gate_cannot_be_routed_around_by_changing_profile():
     # excluded by intent -- they exist to leave documents alone.
     for policy in ("privacy_only", "evidence_preservation"):
         plan = plan_actions(res, policy)
-        assert plan.actions["hidden_text"]["action"] == "keep"
+        assert plan.actions["hidden_structure"]["action"] == "keep"
 
 
 def test_composition_rule_keeps_are_not_gated():
@@ -665,9 +671,12 @@ def test_approved_no_op_gate_is_the_action_not_a_subtype_list():
         for st, a in row.items()
         if a == "approve" and _APPROVE_RESOLVES_TO.get(st) in _NON_REMOVING_ACTIONS
     }
-    # Four, not the one the old comment claimed. Asserted by name so a
-    # policy change that adds or drops one fails here and gets re-reasoned.
-    assert reachable == {"hidden_structure", "hidden_text", "pdf_acroform", "layer_a_non_body"}
+    # Asserted by name so a policy change that adds or drops one fails here
+    # and gets re-reasoned. hidden_text was in this set until the Lane B
+    # stripper landed: approving it now resolves to a real `strip`, so it
+    # drops out. That shrinkage is the stripper working -- one fewer subtype
+    # an operator can approve and not get.
+    assert reachable == {"hidden_structure", "pdf_acroform", "layer_a_non_body"}
 
 
 def test_acknowledged_finding_is_still_a_disclosed_limitation(client):
@@ -712,7 +721,7 @@ def test_release_refused_by_the_gate_still_produces_a_result_artifact(client):
     mid = client.post("/v1/matters", json={"name": "Gate refusal"}).json()["id"]
     doc = client.post(
         f"/v1/matters/{mid}/documents",
-        files={"file": ("hidden.docx", _hidden_text_docx(), "application/octet-stream")},
+        files={"file": ("hidden.xlsx", _hidden_structure_xlsx(), "application/octet-stream")},
     ).json()["id"]
     rel = client.post(
         f"/v1/matters/{mid}/documents/{doc}/releases",
@@ -729,5 +738,257 @@ def test_release_refused_by_the_gate_still_produces_a_result_artifact(client):
     result = body["release_result"]
     assert result["status"] == "refused"
     assert "not acknowledged" in result["reason"]
-    assert "hidden_text" in result["reason"]
+    assert "hidden_structure" in result["reason"]
     assert result["limitations"], "a refused release still discloses limitations"
+
+
+# --- 7. the hidden-text stripper (Lane B) ------------------------------------
+#
+# The engine could see concealed text and had no way to remove it; every
+# policy resolved hidden_text to a non-removing action, and the release gate
+# could only force someone to acknowledge that a document carried it. These
+# assert the removal is real, is honest about what it cannot do, and cannot
+# report success over text that is still there.
+
+
+def _styles(inner: str) -> bytes:
+    return f'<?xml version="1.0"?><w:styles {W_DECL}>{inner}</w:styles>'.encode()
+
+
+def _vanish_docx(styles: str | None = None, body: str | None = None) -> bytes:
+    body = body or (
+        "<w:p><w:r><w:t>Agreement body.</w:t></w:r></w:p>"
+        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>PRIVILEGED WORK PRODUCT</w:t></w:r></w:p>'
+    )
+    parts = {"word/document.xml": _document(body)}
+    if styles:
+        parts["word/styles.xml"] = _styles(styles)
+    return _docx(parts)
+
+
+def _body_of(blob: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return zf.read("word/document.xml").decode()
+
+
+def test_vanish_text_is_removed_not_unhidden():
+    """The single most important property. Un-hiding would surface
+    privileged text into the visible document -- the exact disclosure the
+    release exists to prevent, performed by the tool meant to prevent it."""
+    cleaned, actions = container_meta.clean_docx(_vanish_docx(), strip_hidden_text=True)
+    body = _body_of(cleaned)
+    assert "PRIVILEGED WORK PRODUCT" not in body, "concealed text must be GONE"
+    assert "w:vanish" not in body
+    assert "Agreement body." in body, "visible text must survive"
+    assert any(a.startswith("hidden-text: removed") for a in actions), actions
+
+
+def test_explicit_vanish_off_is_visible_text_and_must_survive():
+    """`<w:vanish w:val="0"/>` is an explicit OFF -- documents write it to
+    cancel a hidden style on one run. Treating it as hidden would delete
+    text the reader can see, the worst failure this pass can have."""
+    body = (
+        '<w:p><w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t>VISIBLE RUN</w:t></w:r></w:p>'
+    )
+    cleaned, _ = container_meta.clean_docx(
+        _vanish_docx(body=body), strip_hidden_text=True
+    )
+    assert "VISIBLE RUN" in _body_of(cleaned)
+
+
+def test_hidden_paragraph_mark_does_not_delete_paragraph_content():
+    """w:vanish inside w:pPr/w:rPr hides the pilcrow, joining the paragraph
+    to the next one visually. Its runs stay visible."""
+    body = (
+        "<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>"
+        "<w:r><w:t>PARAGRAPH TEXT</w:t></w:r></w:p>"
+    )
+    cleaned, _ = container_meta.clean_docx(
+        _vanish_docx(body=body), strip_hidden_text=True
+    )
+    assert "PARAGRAPH TEXT" in _body_of(cleaned)
+
+
+def test_style_and_docdefaults_concealment_is_resolved():
+    """Two bugs the first implementation had, both of which made the
+    stripper MISS hidden text while reporting success -- the overclaim this
+    product exists to refuse. A run is hidden by w:docDefaults, by its
+    paragraph style, by its character style, or by w:basedOn inheritance,
+    not only by direct formatting."""
+    # docDefaults hides everything by default.
+    cleaned, _ = container_meta.clean_docx(
+        _vanish_docx(
+            styles="<w:docDefaults><w:rPrDefault><w:rPr><w:vanish/></w:rPr>"
+            "</w:rPrDefault></w:docDefaults>",
+            body="<w:p><w:r><w:t>HIDDEN BY DEFAULT</w:t></w:r></w:p>",
+        ),
+        strip_hidden_text=True,
+    )
+    assert "HIDDEN BY DEFAULT" not in _body_of(cleaned)
+
+    # A paragraph style, reached through w:basedOn.
+    cleaned, _ = container_meta.clean_docx(
+        _vanish_docx(
+            styles='<w:style w:styleId="Base"><w:rPr><w:vanish/></w:rPr></w:style>'
+            '<w:style w:styleId="Hid"><w:basedOn w:val="Base"/></w:style>',
+            body='<w:p><w:pPr><w:pStyle w:val="Hid"/></w:pPr>'
+            "<w:r><w:t>HIDDEN BY STYLE</w:t></w:r></w:p>",
+        ),
+        strip_hidden_text=True,
+    )
+    assert "HIDDEN BY STYLE" not in _body_of(cleaned)
+
+
+def test_formatting_cascade_precedence():
+    """docDefaults -> paragraph style -> character style -> direct run.
+    The first level that specifies vanish, reading from the top, wins --
+    which is how a document exposes one visible run inside hidden text."""
+    cleaned, _ = container_meta.clean_docx(
+        _vanish_docx(
+            styles='<w:style w:styleId="HidP"><w:rPr><w:vanish/></w:rPr></w:style>'
+            '<w:style w:styleId="VisC"><w:rPr><w:vanish w:val="0"/></w:rPr></w:style>',
+            body='<w:p><w:pPr><w:pStyle w:val="HidP"/></w:pPr>'
+            '<w:r><w:rPr><w:rStyle w:val="VisC"/></w:rPr>'
+            "<w:t>CHARACTER STYLE WINS</w:t></w:r></w:p>",
+        ),
+        strip_hidden_text=True,
+    )
+    assert "CHARACTER STYLE WINS" in _body_of(cleaned)
+
+
+def test_basedon_cycle_does_not_recurse_forever():
+    model = container_meta.docx_hidden_model(
+        _styles(
+            '<w:style w:styleId="A"><w:basedOn w:val="B"/></w:style>'
+            '<w:style w:styleId="B"><w:basedOn w:val="A"/></w:style>'
+        )
+    )
+    assert all(state is None for state in model.style_state.values())
+
+
+def test_malformed_styles_do_not_disable_direct_stripping():
+    """A styles part that will not parse must not turn a partial capability
+    into none at all: direct-formatting vanish is still removed."""
+    parts = {
+        "word/document.xml": _document(
+            '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>STILL REMOVED</w:t></w:r></w:p>'
+        ),
+        "word/styles.xml": b"<w:styles",
+    }
+    cleaned, _ = container_meta.clean_docx(_docx(parts), strip_hidden_text=True)
+    assert "STILL REMOVED" not in _body_of(cleaned)
+
+
+def test_extractor_and_remover_share_one_definition_of_hidden():
+    """If these disagreed, verify's postcondition would go green while
+    concealed text sat in the derivative -- a passing check over a false
+    claim, the one outcome this engine may not produce."""
+    blob = _vanish_docx(
+        styles='<w:style w:styleId="Hid"><w:rPr><w:vanish/></w:rPr></w:style>',
+        body='<w:p><w:pPr><w:pStyle w:val="Hid"/></w:pPr>'
+        "<w:r><w:t>BY STYLE</w:t></w:r></w:p>"
+        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>BY DIRECT</w:t></w:r></w:p>'
+        "<w:p><w:r><w:t>Visible.</w:t></w:r></w:p>",
+    )
+    assert sorted(container_meta.extract_docx_hidden_text(blob)) == ["BY DIRECT", "BY STYLE"]
+    cleaned, _ = container_meta.clean_docx(blob, strip_hidden_text=True)
+    assert container_meta.extract_docx_hidden_text(cleaned) == []
+    assert "Visible." in _body_of(cleaned)
+
+
+def test_white_only_concealment_refuses_rather_than_silently_doing_nothing():
+    """The stripper is partial by design: whether white text is invisible
+    depends on the shading behind it, which this engine does not resolve, so
+    removing on a colour match could delete visible white-on-dark text.
+
+    A white-only document therefore has no removal path. Saying so is the
+    honest outcome; letting `strip` no-op would leave the finding in place,
+    fail the re-inspect gate, and kill the job with an opaque message."""
+    from engine_api import inspect_bytes
+    from policies import WHITE_ONLY_HIDDEN_REFUSAL, PolicyError
+
+    white = _vanish_docx(
+        body='<w:p><w:r><w:rPr><w:color w:val="FFFFFF"/></w:rPr>'
+        "<w:t>WHITE ON WHITE</w:t></w:r></w:p>"
+    )
+    res = inspect_bytes(white, "w.docx")
+    with pytest.raises(PolicyError) as excinfo:
+        plan_actions(res, "external_sharing")
+    assert WHITE_ONLY_HIDDEN_REFUSAL in str(excinfo.value)
+    # The refusal must name a remedy that actually works -- a gate that
+    # rejects the flag its own message recommends is a dead end.
+    assert '"hidden_text": "keep"' in str(excinfo.value)
+    plan = plan_actions(res, "external_sharing", {"hidden_text": "keep"})
+    assert plan.actions["hidden_text"]["reason"] == "operator_acknowledged"
+    cleaned, _records = apply_actions(white, plan)
+    assert "WHITE ON WHITE" in _body_of(cleaned), "acknowledged white text stays"
+
+
+def test_strip_declining_is_scoped_to_hidden_text():
+    """An operator may decline the hidden-text strip, because its removal is
+    partial. They may NOT decline a strip whose removal is complete -- the
+    comments strip is the whole point of an external-sharing release."""
+    from engine_api import inspect_bytes
+
+    data = (REPO / "tests" / "fixtures" / "legal" / "spa.docx").read_bytes()
+    plan = plan_actions(
+        inspect_bytes(data, "spa.docx"),
+        "external_sharing",
+        {"comments_and_notes": "keep"},
+    )
+    assert plan.actions["comments_and_notes"]["action"] == "strip"
+
+
+def test_verify_fails_when_hidden_text_is_surfaced_instead_of_removed():
+    """The catastrophic failure mode, asserted end to end: a derivative that
+    UN-HID concealed text must fail verification, not pass it.
+
+    The fragment is deliberately split across two <w:t> elements, which Word
+    produces routinely at spell-check and rsid boundaries. The extractor
+    concatenates per run and the plaintext projection splits per w:t, so
+    without whitespace normalisation the comparison misses and the check
+    reports 'confirmed absent' over privileged text now visible."""
+    from engine_api import inspect_bytes
+    from verify import verify_derivative
+
+    split = (
+        "<w:p><w:r><w:t>Body.</w:t></w:r></w:p>"
+        '<w:p><w:r><w:rPr><w:vanish/></w:rPr>'
+        "<w:t>PRIVILEGED </w:t><w:t>WORK PRODUCT</w:t></w:r></w:p>"
+    )
+    original = _vanish_docx(body=split)
+    plan = plan_actions(inspect_bytes(original, "d.docx"), "external_sharing")
+
+    honest, _ = container_meta.clean_docx(original, strip_hidden_text=True)
+    result = verify_derivative(original, honest, plan, name="d.docx")
+    check = next(c for c in result["checks"] if c["name"] == "hidden_text_removed")
+    assert check["pass"], check
+
+    # Same words, no longer concealed: removal was never performed.
+    surfaced = _vanish_docx(
+        body="<w:p><w:r><w:t>Body.</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>PRIVILEGED </w:t><w:t>WORK PRODUCT</w:t></w:r></w:p>"
+    )
+    result = verify_derivative(original, surfaced, plan, name="d.docx")
+    check = next(c for c in result["checks"] if c["name"] == "hidden_text_removed")
+    assert not check["pass"]
+    assert "SURFACED" in check["detail"]
+    assert result["pass"] is False, "a surfaced-text derivative must fail the whole gate"
+
+
+def test_verify_does_not_false_positive_on_dual_use_fragments():
+    """A fragment concealed in one place and printed visibly in another is
+    not a leak. Failing the job over it would refuse correct work and teach
+    operators to distrust the gate."""
+    from engine_api import inspect_bytes
+    from verify import verify_derivative
+
+    original = _vanish_docx(
+        body="<w:p><w:r><w:t>CONFIDENTIAL</w:t></w:r></w:p>"
+        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>CONFIDENTIAL</w:t></w:r></w:p>'
+    )
+    plan = plan_actions(inspect_bytes(original, "d.docx"), "external_sharing")
+    cleaned, _ = container_meta.clean_docx(original, strip_hidden_text=True)
+    result = verify_derivative(original, cleaned, plan, name="d.docx")
+    check = next(c for c in result["checks"] if c["name"] == "hidden_text_removed")
+    assert check["pass"], check
