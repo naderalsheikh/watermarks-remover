@@ -2190,6 +2190,34 @@ Continues the README tightening from PR 51-52 without changing any build or runt
 
 Verification stayed scoped to the changed files: `git diff --check README.md docs/UPSTREAM_UTILITY_LEGACY.md docs/COUNSELCLEAR_DESIGN.md` clean, plus a targeted grep confirming no unresolved root-relative markdown links remained in `docs/UPSTREAM_UTILITY_LEGACY.md`.
 
+### Schema evolution rule -- binding (2026-09-05)
+
+**A published schema file's bytes may never change without bumping its
+`version` and archiving the prior bytes under
+`service/scripts/schemas/archive/<name>.v<N>.schema.json`.**
+
+Every custody artifact is pinned to the contract it was built against by
+`schema_version` plus `schema_sha256`, the sha256 of the published schema
+*file*. The offline verifier recomputes that hash from the schema shipped
+alongside it. So editing a schema in place silently invalidates every packet
+ever issued: each one re-hashes against bytes that no longer exist, and a
+recipient checking a six-month-old packet gets a MISMATCH on a packet that
+was honestly produced.
+
+This is not hypothetical. The first post-pinning contract change (manifest
+v2, adding `retained_finding` and `dispositions`) would have done exactly
+that. The archive plus version-aware pin resolution
+(`schemas_meta.schema_sha256_for_version`, and the verifier's
+`_published_schema_sha256`) is what prevents it, and
+`test_superseded_schema_versions_stay_verifiable` enforces the rule: every
+version below the current one must have its exact bytes archived, and a
+version the verifier does not hold resolves to "unavailable" rather than a
+mismatch, because a tool cannot speak to a contract it never had.
+
+The same durability problem remains open for the signing key -- see the
+README each packet carries, and Lane E1 of
+`docs/counselclear-custody-truthfulness-plan.md`.
+
 ### PR 54 -- Versioned schemas for release artifacts -- implemented (2026-08-29)
 
 Closes the concrete schema gap identified in the legal/IP triage: `finding.schema.json`, `policy.schema.json`, and `verify_result.schema.json` already existed, but the generated release artifacts that outside reviewers actually handle (`manifest.json`, `report.json`, `release_packet.json`, and `release_result.json`) had no published JSON Schema contract.

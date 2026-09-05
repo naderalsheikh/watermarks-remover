@@ -101,7 +101,7 @@ The demo seed now acknowledges two findings, which makes the walkthrough better 
 
 ---
 
-## Lane C — Copy that no longer matches the code (PARALLEL, low risk)
+## Lane C — Copy that no longer matches the code (DONE 2026-09-05)
 
 All rows already exist in `docs/claim-copy-audit.md`; this lane executes them.
 
@@ -117,11 +117,11 @@ All rows already exist in `docs/claim-copy-audit.md`; this lane executes them.
 
 This dependency is also why Lane A scoped `release_result.json`'s anchor field rather than deriving it from the packet: `release_result` is produced at release terminal, the packet at bundle download, and a refused release never gets a packet at all.
 
-**Done criteria:** the three strings updated; `docs/claim-copy-audit.md` rows A1/A3/A7/A9 moved from flagged to resolved with the new text quoted.
+**Done 2026-09-05.** All four strings updated and audit rows A1/A3/A7/A9 marked RESOLVED. C2 took the interim reading as planned — the two job-page strings now name `release_packet.json`'s own `anchor` field and the offline verifier as where the answer is recorded, rather than asserting an outcome the page cannot observe. Deriving it properly still waits on E3.
 
 ---
 
-## Lane D — Deployment posture (DECIDED, small)
+## Lane D — Deployment posture (DONE 2026-09-05)
 
 **D1 — TSA egress is on by default.** `service/app/tsa.py:30,49-52`: an unset `COUNSELCLEAR_TSA_URL` returns `True` and defaults to `http://timestamp.digicert.com`. Zero-egress requires explicitly setting the variable to an opt-out value. The code documents this clearly and fails soft (5s timeout, one retry, falls through to unanchored with the limitation disclosed) — the gap is that it is not surfaced at deploy time.
 
@@ -129,7 +129,7 @@ The default is defensible: the anchor is what makes a packet externally verifiab
 
 **D1 — DECIDED (owner, 2026-09-02): the default stays on; surface the posture.** Emit `tsa_anchor: enabled|disabled` (and the resolved URL) in the startup posture log next to the existing worker-mode and clamscan warnings; document in `COUNSELCLEAR_PRODUCTION.md` that unset means DigiCert egress on every release, and that zero-egress deployments must opt out and thereby forgo external timestamps.
 
-**Done criteria:** posture line present at startup; production doc states the trade-off in one paragraph; a test asserts the posture line reflects `anchor_enabled()`.
+**Done 2026-09-05.** `tsa.describe_posture()` is the single source of truth, shared with `request_anchor` through `resolve_tsa_url` so the startup line and the release path cannot describe different deployments — pinned by `test_posture_never_disagrees_with_what_a_release_would_do`. Four states, two of them warnings: an unchosen third-party default, and a **configured endpoint whose scheme the client refuses to open**, which was previously invisible — every release fell through to unanchored while still succeeding, so an operator could believe for months they held timestamps they did not. `docs/COUNSELCLEAR_PRODUCTION.md` §6b documents the trade-off.
 
 ---
 
