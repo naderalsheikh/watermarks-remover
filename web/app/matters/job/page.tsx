@@ -390,8 +390,16 @@ function BundleContents({
         <li>
           <code className="font-mono">release_packet.json</code> — content hashes for every
           file above plus an Ed25519 signature from this deployment&apos;s custody key over
-          the packet&apos;s recorded facts, checkable offline without trusting this page
-          (not externally anchored — no independent timestamp).
+          the packet&apos;s recorded facts, checkable offline without trusting this page.
+          {/* Claim-copy audit row A3. The old flat "not externally anchored —
+              no independent timestamp" became false for TSA-anchored packets
+              when RFC 3161 anchoring merged. This page cannot tell which
+              this packet is: the anchor is computed while the bundle is
+              built and is not persisted anywhere this page reads (see the
+              plan's Lane E3). So it names where the answer lives instead of
+              predicting it, and never asserts a timestamp exists. */}{" "}
+          Whether it also carries an RFC 3161 timestamp is recorded in that same file&apos;s
+          <code className="font-mono"> anchor</code> field; this page does not read it.
         </li>
         <li>
           <code className="font-mono">README.txt</code> — names every file above for someone
@@ -1044,7 +1052,13 @@ function JobView({
                   plus an Ed25519 signature over them by this deployment&apos;s custody key,
                   checkable offline with{" "}
                   <code className="font-mono">tools/counselclear_verify_release_packet.py</code>.
-                  This packet is not externally anchored (no independent timestamp yet).
+                  {/* Row A7, same reasoning as A3 above: state where the
+                      answer is recorded rather than assert an outcome this
+                      page cannot observe. The verifier prints it either way
+                      ("Externally anchored: yes (rfc3161-tsa)" or "NOT
+                      EXTERNALLY ANCHORED"), which is the authority. */}{" "}
+                  That tool also reports whether the packet is externally anchored; this page
+                  does not, because the anchor is recorded in the packet rather than here.
                 </p>
                 {manifest && (
                   <BundleContents manifest={manifest} includeOriginal={includeOriginal} />

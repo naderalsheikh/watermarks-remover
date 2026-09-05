@@ -371,10 +371,29 @@ function ReleasePanel({
       {selectedProfile && (
         <details className="text-xs text-muted">
           <summary className="cursor-pointer select-none">Technical details</summary>
+          {/* Claim-copy audit row A9. This sits BEFORE the release exists,
+              so the old flat "not externally anchored" was stale after
+              RFC 3161 anchoring merged: it predicted an outcome this
+              screen cannot know.
+
+              Written as INTENT, never as an achieved state, and
+              deliberately in the future tense. Configuration copy helps an
+              operator only for as long as it cannot be mistaken for
+              completed anchoring evidence, so it says what the deployment
+              will REQUEST and points at the packet as the only place the
+              answer is recorded. Do not tighten this into "is
+              timestamped": that would be an evidentiary claim made by a
+              screen that has not yet produced a packet.
+
+              Enforced, not merely intended: the phrasing is pinned by
+              test_forbidden_claim_words_never_appear_as_affirmative_claims
+              and its pre-release sibling. */}
           <p className="mt-1">
-            Resolves to policy <code className="font-mono">{selectedProfile.policy_id}</code>. This
-            release&apos;s packet is signed by this deployment&apos;s custody key but not
-            externally anchored — see the release packet or release result for what that means.
+            Resolves to policy <code className="font-mono">{selectedProfile.policy_id}</code>. The
+            packet will be signed by this deployment&apos;s custody key. This deployment will also
+            request an RFC 3161 timestamp for it; whether one was obtained is recorded in the
+            packet itself, which is the only place that answer is authoritative — this screen
+            cannot know it yet.
           </p>
           <label className="mt-2 flex items-center gap-2">
             <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />

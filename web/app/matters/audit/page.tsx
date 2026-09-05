@@ -247,9 +247,24 @@ function AuditView({ matterId }: { matterId: string }) {
                 : "border-red-600/30 bg-red-600/5 text-red-700 dark:text-red-400"
             }`}
           >
+            {/* NOT "Chain verified" (claim-copy audit row A1). What this
+                banner reports is the server recomputing its own hash chain
+                and agreeing with itself -- the producing system vouching
+                for its own records. "Verified" is reserved by
+                docs/counselclear-strategy.md §5 for claims bound to
+                deterministic behaviour plus a manifest entry plus a
+                regression test, and the offline verifier refuses the word
+                outright, printing INTERNALLY CONSISTENT and never VALID.
+                A one-word banner is exactly where an overclaim does the
+                most damage: it is what a reader screenshots. */}
             <span className="font-semibold">
-              {auditQ.meta.chain_ok ? "Chain verified" : "Chain broken"}
+              {auditQ.meta.chain_ok
+                ? "Chain internally consistent"
+                : "Chain broken"}
             </span>
+            {auditQ.meta.chain_ok && (
+              <span className="text-muted"> (self-recomputed)</span>
+            )}
             <span className="text-muted"> — {auditQ.meta.chain_detail}</span>
           </div>
           {/* Independent of chain_ok above (which is the server's own
