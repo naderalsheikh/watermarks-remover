@@ -59,6 +59,62 @@ def anchor_enabled() -> bool:
 _SHA256_OID_DER = bytes.fromhex("0609608648016503040201")
 
 
+def resolve_tsa_url(tsa_url: str | None = None) -> str:
+    """The endpoint a release would actually contact.
+
+    Single source of truth: request_anchor resolved this inline and
+    anchor_enabled read the same variable with different rules, so the
+    startup posture line and the request path could describe different
+    deployments. They now share this.
+    """
+    return tsa_url or os.environ.get("COUNSELCLEAR_TSA_URL") or DEFAULT_TSA_URL
+
+
+def describe_posture() -> dict[str, object]:
+    """This deployment's anchoring posture, for the startup log.
+
+    Anchoring is ON unless explicitly opted out, and the default endpoint is
+    a third party. That is a defensible default -- an RFC 3161 token is the
+    only claim in this system that does not rest on the operator's own key
+    -- but it means a deployment handling privileged matters inherits an
+    outbound call to DigiCert on every release without ever being told. The
+    posture is surfaced rather than the default changed.
+
+    ``severity`` is "warning" for the two states an operator would want to
+    discover at boot rather than from a packet weeks later:
+
+    - ``default``   anchoring is on and nobody chose the endpoint.
+    - ``unusable``  a URL is configured whose scheme request_anchor will
+      refuse to open, so every release falls through to unanchored,
+      silently and forever. Nothing else in the system reports this: the
+      release still succeeds, just without the timestamp the operator
+      believes they are getting.
+    """
+    raw = os.environ.get("COUNSELCLEAR_TSA_URL")
+    if not anchor_enabled():
+        return {
+            "enabled": False,
+            "url": None,
+            "state": "disabled",
+            "severity": "info",
+        }
+    url = resolve_tsa_url()
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        return {
+            "enabled": True,
+            "url": url,
+            "state": "unusable",
+            "severity": "warning",
+        }
+    configured = raw is not None and raw.strip() != ""
+    return {
+        "enabled": True,
+        "url": url,
+        "state": "configured" if configured else "default",
+        "severity": "info" if configured else "warning",
+    }
+
+
 def _der_len(n: int) -> bytes:
     if n < 0x80:
         return bytes([n])
@@ -179,7 +235,7 @@ def request_anchor(
     today-shaped UNANCHORED dict on any failure after one retry. Never
     raises: the caller is the release path (§4.5).
     """
-    url = tsa_url or os.environ.get("COUNSELCLEAR_TSA_URL") or DEFAULT_TSA_URL
+    url = resolve_tsa_url(tsa_url)
     # Only http(s) is ever acceptable for the timestamp endpoint -- a
     # misconfigured file:/custom-scheme URL is a configuration error,
     # treated as a failed attempt (fall through to unanchored), never

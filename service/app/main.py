@@ -72,6 +72,7 @@ from .security import (
 from .storage import StorageError as StorageError_
 from .storage import original_key, storage_from_config
 from .tsa import anchor_enabled, request_anchor
+from .tsa import describe_posture as tsa_posture
 
 # scripts.policies.NO_DECISION_MARKER, literal here for the same PR 17
 # reason as POLICIES below: main.py must not import the engine. Used only
@@ -1419,6 +1420,38 @@ def _log_startup_posture(cfg: Config, swept: int, storage, *, reconciled_release
             "Dockerfile.counselclear installs clamav; a bare non-container "
             "run of this app does not."
         )
+    # RFC 3161 anchoring posture. Anchoring is ON unless explicitly opted
+    # out and the default endpoint is a third party, so a deployment
+    # handling privileged matters inherits an outbound call on every release
+    # without being told. The default stays (an external timestamp is the
+    # one claim here that does not rest on the operator's own key); what
+    # changes is that it is no longer silent.
+    posture = tsa_posture()
+    if posture["state"] == "disabled":
+        log.info(
+            "tsa_anchor: disabled — zero egress on the release path. Release "
+            "packets carry an operator signature only; no independent party "
+            "confirms when their content existed."
+        )
+    elif posture["state"] == "unusable":
+        log.warning(
+            "tsa_anchor: MISCONFIGURED — COUNSELCLEAR_TSA_URL=%r is not "
+            "http(s), so every release will silently fall through to "
+            "unanchored. Set a valid endpoint, or set the variable to "
+            "'off' to make zero-egress the recorded intent.",
+            posture["url"],
+        )
+    elif posture["state"] == "default":
+        log.warning(
+            "tsa_anchor: enabled against the DEFAULT endpoint %s — every "
+            "release makes an outbound request to a third party that this "
+            "deployment did not choose. Set COUNSELCLEAR_TSA_URL to your own "
+            "TSA, or to 'off' for zero egress (packets are then signed but "
+            "not externally timestamped).",
+            posture["url"],
+        )
+    else:
+        log.info("tsa_anchor: enabled against %s", posture["url"])
 
 
 _unknown_client_state = {"warned": False}

@@ -17,6 +17,7 @@ import hashlib
 import socket
 import sys
 import threading
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -201,3 +202,92 @@ def test_query_is_well_formed_der_with_certreq(mock_tsa):
     assert req["message_imprint"]["hash_algorithm"]["algorithm"].native == "sha256"
     assert req["message_imprint"]["hashed_message"].native == hashlib.sha256(REAL_SIG_A).digest()
     assert req["cert_req"].native is True
+
+
+# --- deployment posture (Lane D1) --------------------------------------------
+#
+# Anchoring is ON unless explicitly opted out, and the default endpoint is a
+# third party, so a deployment handling privileged matters inherits an
+# outbound call on every release without being told. The default is
+# defensible -- an RFC 3161 token is the only claim in this system that does
+# not rest on the operator's own key -- so the posture is surfaced rather
+# than the default changed.
+
+
+@pytest.mark.parametrize(
+    ("env", "state", "enabled"),
+    [
+        (None, "default", True),
+        ("", "disabled", False),
+        ("off", "disabled", False),
+        ("OFF", "disabled", False),
+        ("none", "disabled", False),
+        ("disabled", "disabled", False),
+        ("   ", "disabled", False),
+        ("https://tsa.example.org/ts", "configured", True),
+        ("http://tsa.example.org/ts", "configured", True),
+        ("file:///etc/passwd", "unusable", True),
+        ("ftp://tsa.example.org", "unusable", True),
+    ],
+)
+def test_describe_posture_states(monkeypatch, env, state, enabled):
+    if env is None:
+        monkeypatch.delenv("COUNSELCLEAR_TSA_URL", raising=False)
+    else:
+        monkeypatch.setenv("COUNSELCLEAR_TSA_URL", env)
+    posture = tsa.describe_posture()
+    assert posture["state"] == state
+    assert posture["enabled"] is enabled
+
+
+def test_posture_severity_flags_the_two_surprising_states(monkeypatch):
+    """Warning-level for exactly the two an operator should discover at boot
+    rather than from a packet weeks later: nobody chose the endpoint, and a
+    configured endpoint that can never work."""
+    monkeypatch.delenv("COUNSELCLEAR_TSA_URL", raising=False)
+    assert tsa.describe_posture()["severity"] == "warning"  # unchosen default
+    monkeypatch.setenv("COUNSELCLEAR_TSA_URL", "file:///nope")
+    assert tsa.describe_posture()["severity"] == "warning"  # silently unusable
+    monkeypatch.setenv("COUNSELCLEAR_TSA_URL", "https://tsa.example.org/ts")
+    assert tsa.describe_posture()["severity"] == "info"
+    monkeypatch.setenv("COUNSELCLEAR_TSA_URL", "off")
+    assert tsa.describe_posture()["severity"] == "info"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        None,
+        "",
+        "off",
+        "   ",
+        "https://tsa.example.org/ts",
+        "  http://padded.example  ",
+        "HTTP://UPPER.EXAMPLE",
+        "file:///etc/passwd",
+        "ftp://tsa.example.org",
+    ],
+)
+def test_posture_never_disagrees_with_what_a_release_would_do(monkeypatch, env):
+    """The posture line is worthless if it describes a different deployment
+    than the release path uses. Both resolve through resolve_tsa_url and
+    apply the same scheme rule; this pins that they cannot drift.
+
+    A posture reporting "configured" while every release silently falls
+    through to unanchored is the exact failure this whole pass exists to
+    prevent -- an operator believing they hold timestamps they do not.
+    """
+    if env is None:
+        monkeypatch.delenv("COUNSELCLEAR_TSA_URL", raising=False)
+    else:
+        monkeypatch.setenv("COUNSELCLEAR_TSA_URL", env)
+
+    posture = tsa.describe_posture()
+    if not posture["enabled"]:
+        # Disabled means the release path never calls request_anchor at all.
+        assert not tsa.anchor_enabled()
+        return
+    resolved = tsa.resolve_tsa_url()
+    openable = urllib.parse.urlparse(resolved).scheme in ("http", "https")
+    assert (posture["state"] != "unusable") is openable
+    assert posture["url"] == resolved

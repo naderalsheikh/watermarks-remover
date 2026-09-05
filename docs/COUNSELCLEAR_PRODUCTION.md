@@ -264,6 +264,46 @@ Compose's own `healthcheck:` (below) uses `/health/ready`, since compose
 doesn't auto-restart on an unhealthy container by default — there the DB
 check is purely informational, surfaced in `docker ps`.
 
+## 6b. Outbound network on the release path: RFC 3161 timestamping
+
+**Anchoring is ON by default, and the default endpoint is a third party.**
+An unset `COUNSELCLEAR_TSA_URL` resolves to `http://timestamp.digicert.com`,
+and every completed release makes an outbound request to it. Nothing else in
+this system calls out to the internet, so if your threat model treats egress
+from the release path as disqualifying, this is the one setting you must
+change before going live.
+
+The default is deliberate. An RFC 3161 token is the only claim CounselClear
+makes that does not rest on the operator's own key: everything else — the
+manifest, the certificate, the audit chain, the Ed25519 packet signature —
+is the producing system vouching for its own output. A timestamp is an
+independent party asserting that a digest existed at a stated time.
+
+| `COUNSELCLEAR_TSA_URL` | Behaviour | Startup line |
+|---|---|---|
+| unset | anchors against DigiCert | `tsa_anchor: enabled against the DEFAULT endpoint …` **(warning)** |
+| a valid `http(s)` URL | anchors against your TSA | `tsa_anchor: enabled against <url>` |
+| `off`, `none`, `disabled`, or empty | **zero egress**; no anchoring attempted | `tsa_anchor: disabled — zero egress on the release path` |
+| anything else | never anchors, silently | `tsa_anchor: MISCONFIGURED` **(warning)** |
+
+Check the startup log on every deploy. The two warning lines exist because
+both states are otherwise invisible: an unchosen third-party dependency, and
+a configured endpoint whose scheme the client refuses to open — the second
+means every release falls through to unanchored while still succeeding, so
+an operator can believe for months that they hold timestamps they do not.
+
+**Failure is soft, by design.** A TSA that is slow, down, or unreachable
+does not fail the release: one retry, a 5-second timeout, then the packet is
+issued unanchored with that fact recorded in its own `anchor` field and
+disclosed by the offline verifier. A release is never blocked on a third
+party's availability.
+
+**What you give up with `off`.** Packets remain internally consistent and
+Ed25519-signed, and the verifier still reports that faithfully — but it will
+print `NOT EXTERNALLY ANCHORED`, and no independent party will have confirmed
+when the content existed. That is a real evidentiary difference; choose it
+because zero egress is worth more to you, not by accident.
+
 ## 7. Operations checklist
 
 - [ ] Deploy artifacts match what's running: proxy config derived from
