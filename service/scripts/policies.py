@@ -333,6 +333,16 @@ class ActionPlan:
     present_subtypes: set[str] = field(default_factory=set)
     unmapped_findings: list[str] = field(default_factory=list)
     signature_break_attestation: bool = False
+    # Structured side-channel, filled during apply: the per-document
+    # authoring-exhaust removal counts (rsid_attrs / rsid_tables / doc_ids /
+    # session_props) the container cleaners observed. The prose summary the
+    # action list carries ("scrub authoring exhaust: ...") is emitted only
+    # when a count is non-zero and survives a 12-message cap, so a custody
+    # record that needs to know whether THIS document carried correlators
+    # reads these counts instead. Left empty by text/image/av/pdf paths and
+    # by every refusal, which is exactly the record wanted: no exhaust was
+    # (or could be) removed from those.
+    exhaust_counts: dict[str, int] = field(default_factory=dict)
 
     def requires_execution(self) -> bool:
         """True when any subtype resolves to something other than keep/flag/
@@ -1206,6 +1216,16 @@ def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[Acti
             return _apply_pdf(data, plan, a)
         if fmt in ("docx", "xlsx", "pptx"):
             kwargs, a2 = _ooxml_kwargs(plan)
+            # Per-document truth channel: the cleaners accumulate the
+            # authoring-exhaust removals they actually performed into this
+            # dict (rsid_attrs / rsid_tables / doc_ids / session_props), and
+            # the custody layer keys the manifest's residual_metadata off
+            # it -- a document that never carried a w:rsid must not get a
+            # record saying its RSIDs were removed. An all-zero dict stays
+            # all-zero: "nothing of this kind was present", which is the
+            # honest answer.
+            exhaust_counts: dict[str, int] = {}
+            kwargs["exhaust_counts"] = exhaust_counts
             if fmt == "docx":
                 cleaned, msgs = container_meta.clean_docx(
                     data,
@@ -1233,6 +1253,7 @@ def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[Acti
                     strip_comments=a2["comments_and_notes"] == "strip",
                     **kwargs,
                 )
+            plan.exhaust_counts = exhaust_counts
             for m in msgs[:12]:
                 st = (
                     "hidden_text"

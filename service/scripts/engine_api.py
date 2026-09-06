@@ -798,20 +798,52 @@ def _layer_b_rewrite(
 # fields, so removing RSIDs there would break the promise it makes.
 _EXHAUST_STRIPPING_POLICIES = ("external_sharing", "production")
 
+# The per-document exhaust record, keyed to what the scrub pass counted on
+# THIS package: count key -> (counted clause, prose suffix). Each becomes
+# one "removed N <clause><suffix>" sentence, and only when N > 0 -- a
+# document that carried none of a kind gets no sentence about it. The
+# clauses name mechanisms only, never part locations (a docId lives in
+# word/settings.xml but a PPTX has no settings.xml; the scrubber matches
+# wherever the pattern occurs), so no sentence can claim a place the
+# package did not have.
+_EXHAUST_COUNT_LABELS: tuple[tuple[str, str, str], ...] = (
+    ("rsid_attrs", "w:rsid* edit-session correlating attribute(s)", ""),
+    ("rsid_tables", "w:rsids edit-session catalogue table(s)", ""),
+    ("doc_ids", "w14:docId / w15:docId persistent document identifier(s)", ""),
+    (
+        "session_props",
+        "dcterms:created / dcterms:modified original authoring timestamp(s), "
+        "cp:revision save count(s) and TotalTime editing-minute counters",
+        " (emptied, not deleted)",
+    ),
+)
 
-def _residual_metadata(policy_id: str, fmt: str | None) -> dict[str, Any]:
-    """The policy's explicit position on authoring exhaust.
 
-    The 2026-09-02 review's fourth finding was not that the wrong fields
-    survived -- it was that the policy said NOTHING about them. A
-    derivative that had lost its creator and Application still carried
-    RSIDs, a persistent w14/w15:docId, the original create/modify
-    timestamps, the revision number and the editing-minutes counter, and a
-    reader had no way to tell whether that was a decision or an oversight.
-    Every custody manifest now states both halves: what was removed, and
-    what was deliberately kept and why.
+def _residual_metadata(
+    policy_id: str,
+    fmt: str | None,
+    exhaust_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """The policy's explicit position on authoring exhaust, scoped to what
+    THIS document actually carried.
+
+    Two failures were fixed here. The 2026-09-02 review's fourth finding
+    was that the policy said NOTHING about RSIDs, persistent docIds,
+    session timestamps and counters that survived a clean -- so every
+    custody manifest now states both halves: what was removed, and what
+    was deliberately kept and why. The 2026-09-06 review went further: the
+    "removed" half was keyed only to (policy_id, format) and listed a
+    FIXED set of Word mechanisms for every DOCX/PPTX -- a document that
+    never carried a single w:rsid still got a printed certificate
+    asserting they were removed from it, and a PPTX was told it had a
+    w:rsids table in settings.xml, which a presentation cannot even carry.
+    The removed half is therefore built from the scrub pass's own
+    per-document counts (policies.ActionPlan.exhaust_counts, fed from
+    container_meta's exhaust accumulator); the retained half stays the
+    policy's standing position, because retention IS a policy decision
+    that does not depend on what a given file contained.
     """
-    if fmt not in ("docx", "pptx") or policy_id not in _EXHAUST_STRIPPING_POLICIES:
+    if fmt not in ("docx", "xlsx", "pptx") or policy_id not in _EXHAUST_STRIPPING_POLICIES:
         return {
             "stripped": [],
             "retained": [
@@ -823,15 +855,16 @@ def _residual_metadata(policy_id: str, fmt: str | None) -> dict[str, Any]:
                 }
             ],
         }
+    counts = exhaust_counts or {}
+    stripped: list[str] = []
+    for key, clause, suffix in _EXHAUST_COUNT_LABELS:
+        n = counts.get(key, 0)
+        if n:
+            stripped.append(f"removed {n} {clause}{suffix}")
+    # Schema requires the key; an empty list is the honest value -- this
+    # document carried no authoring exhaust for the policy to remove.
     return {
-        "stripped": [
-            "w:rsid* edit-session correlators (paragraph/run attributes and the "
-            "w:rsids session table in settings.xml)",
-            "w14:docId / w15:docId persistent document identifiers",
-            "dcterms:created / dcterms:modified original authoring timestamps",
-            "cp:revision save count",
-            "TotalTime editing-minutes counter",
-        ],
+        "stripped": stripped,
         "retained": [
             {"field": field, "reason": reason}
             for field, reason in AUTHORING_EXHAUST_RETAINED
@@ -1012,7 +1045,9 @@ def clean_to_bundle(
         actions=actions,
         action_records=action_records,
         dispositions=dispositions,
-        residual_metadata=_residual_metadata(policy_id, result.format),
+        residual_metadata=_residual_metadata(
+            policy_id, result.format, getattr(plan, "exhaust_counts", None)
+        ),
         processor=processor_dict,
         findings_before=result.finding_strings,
         verification=verification,

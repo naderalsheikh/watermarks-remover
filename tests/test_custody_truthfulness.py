@@ -568,6 +568,164 @@ def test_privacy_only_does_not_strip_correlators():
     assert "<dc:creator></dc:creator>" in core, "identity is still scrubbed"
 
 
+def _clean_docx() -> bytes:
+    """A DOCX carrying NONE of the authoring exhaust: no w:rsid* anywhere,
+    no w:rsids session table, no w14/w15:docId, no session counters -- the
+    shape a plain single-session Word document actually has. Its only
+    finding is authoring identity, which every mutating policy strips."""
+    core = (
+        b'<?xml version="1.0"?>'
+        b'<cp:coreProperties xmlns:cp="c" xmlns:dc="d" xmlns:dcterms="t">'
+        b"<dc:creator>Jane Counsel</dc:creator></cp:coreProperties>"
+    )
+    app_props = (
+        b'<?xml version="1.0"?><Properties><Application>Microsoft Word</Application></Properties>'
+    )
+    body = "<w:p><w:r><w:t>Agreement text.</w:t></w:r></w:p>"
+    return _docx(
+        {
+            "word/document.xml": _document(body),
+            "docProps/core.xml": core,
+            "docProps/app.xml": app_props,
+        }
+    )
+
+
+def _residual_removed_section(html: str) -> str:
+    """The certificate's Removed sub-section, scoped so assertions cannot
+    be satisfied by the words rsid/docId appearing elsewhere in the page."""
+    tail = html.split("Residual authoring metadata", 1)[-1]
+    return tail.split("Deliberately retained", 1)[0]
+
+
+def test_certificate_does_not_claim_removals_this_document_never_carried(client):
+    """The defect (2026-09-06, most serious §5 violation): the certificate's
+    "Removed" list was keyed only to (policy_id, format), so a DOCX that
+    never carried a single w:rsid or docId still got a printed custody
+    certificate asserting those were removed from IT. A printed
+    certificate is the artifact most likely to reach opposing counsel with
+    none of the surrounding UI; it must not know more than the document
+    does. The list must be driven by the per-document exhaust counts the
+    engine actually observed."""
+    mid = client.post("/v1/matters", json={"name": "Clean Truth"}).json()["id"]
+    doc = client.post(
+        f"/v1/matters/{mid}/documents",
+        files={"file": ("plain.docx", _clean_docx(), "application/octet-stream")},
+    ).json()["id"]
+    job = client.post(
+        f"/v1/matters/{mid}/documents/{doc}/sanitize-jobs",
+        json={"policy_id": "external_sharing"},
+    ).json()
+    assert job["status"] == "done", job
+    manifest = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/manifest").json()
+
+    # Ground truth: the engine's own action list for THIS document must
+    # show no authoring-exhaust scrub happened -- there was nothing to
+    # scrub. (The identity scrub of core.xml/app.xml still runs.)
+    assert not any("authoring exhaust" in a for a in manifest["actions"]), manifest["actions"]
+
+    residual = manifest["residual_metadata"]
+    joined = " ".join(residual["stripped"])
+    assert "rsid" not in joined.lower(), joined
+    assert "docId" not in joined, joined
+
+    # The printed certificate -- the artifact that travels alone -- must
+    # carry the same scoping: no claim that RSIDs/docIds were removed from
+    # a document that never had them.
+    html = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/certificate").text
+    removed_section = _residual_removed_section(html)
+    assert "rsid" not in removed_section.lower(), removed_section
+    assert "docId" not in removed_section, removed_section
+
+
+def test_certificate_removed_list_names_what_this_document_carried(client):
+    """The positive half of the same invariant: a document that DOES carry
+    session correlators gets them named in the certificate's Removed list,
+    with the counts that came from its own scrub -- so the list is evidence
+    about this document, not a policy table restated."""
+    mid = client.post("/v1/matters", json={"name": "Exhaust Cert"}).json()["id"]
+    doc = client.post(
+        f"/v1/matters/{mid}/documents",
+        files={"file": ("icsa.docx", _exhaust_docx(), "application/octet-stream")},
+    ).json()["id"]
+    job = client.post(
+        f"/v1/matters/{mid}/documents/{doc}/sanitize-jobs",
+        json={"policy_id": "external_sharing"},
+    ).json()
+    assert job["status"] == "done", job
+    manifest = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/manifest").json()
+
+    assert any("authoring exhaust" in a for a in manifest["actions"]), manifest["actions"]
+    html = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/certificate").text
+    removed_section = _residual_removed_section(html)
+    # The _exhaust_docx fixture carries 3 w:rsid* attributes, 1 w:rsids
+    # session table and 2 persistent docIds; the certificate must show the
+    # counts, proving the list came from this document's scrub record.
+    assert "3" in removed_section and "rsid" in removed_section.lower(), removed_section
+    assert "2" in removed_section and "docId" in removed_section, removed_section
+
+
+def test_pptx_certificate_makes_no_word_exhaust_claims(client):
+    """The fixed list also fired for PPTX, naming w:rsid* attributes and a
+    w:rsids settings.xml table -- Word mechanisms a presentation cannot
+    even carry -- while the engine has no exhaust scrub for PPTX at all.
+    A deck's certificate must claim none of it."""
+    presentation = (
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>'
+    )
+    slide = (
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+        b"<p:cSld/></p:sld>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "[Content_Types].xml",
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+            "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
+            "<Default Extension='xml' ContentType='application/xml'/>"
+            "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>"
+            "<Override PartName='/ppt/presentation.xml' ContentType='application/vnd."
+            "openxmlformats-officedocument.presentationml.presentation.main+xml'/>"
+            "<Override PartName='/ppt/slides/slide1.xml' ContentType='application/vnd."
+            "openxmlformats-officedocument.presentationml.slide+xml'/>"
+            "</Types>",
+        )
+        zf.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>',
+        )
+        zf.writestr("ppt/presentation.xml", presentation)
+        zf.writestr("ppt/slides/slide1.xml", slide)
+    deck = buf.getvalue()
+
+    mid = client.post("/v1/matters", json={"name": "Deck Truth"}).json()["id"]
+    doc = client.post(
+        f"/v1/matters/{mid}/documents",
+        files={"file": ("deck.pptx", deck, "application/octet-stream")},
+    ).json()["id"]
+    job = client.post(
+        f"/v1/matters/{mid}/documents/{doc}/sanitize-jobs",
+        json={"policy_id": "external_sharing"},
+    ).json()
+    assert job["status"] == "done", job
+    manifest = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/manifest").json()
+
+    residual = manifest["residual_metadata"]
+    joined = " ".join(residual["stripped"])
+    assert "rsid" not in joined.lower(), joined
+    assert "docId" not in joined, joined
+    html = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/certificate").text
+    removed_section = _residual_removed_section(html)
+    assert "rsid" not in removed_section.lower(), removed_section
+    assert "docId" not in removed_section, removed_section
+
+
 def test_manifest_states_both_halves_of_the_exhaust_policy(client):
     """The actual defect the review named was silence: a reader could not
     tell a decision from an oversight. Both halves must be on the record."""

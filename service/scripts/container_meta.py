@@ -938,6 +938,10 @@ _EXHAUST_PROP_FIELDS = (
     ("cp:revision", "cp:revision"),
     ("TotalTime", "TotalTime"),
 )
+# Set form for the per-blank count into exhaust_counts["session_props"]
+# (see _scrub_ooxml_zip's docProps pass) -- membership tested per blanked
+# field, so it must be a set, not a re-scan of the tuple.
+_EXHAUST_PROP_FIELD_SET = frozenset(_EXHAUST_PROP_FIELDS)
 # Deliberately retained under external_sharing/production, and disclosed as
 # such rather than silently left in place. Each entry is (field, why).
 AUTHORING_EXHAUST_RETAINED = (
@@ -1795,12 +1799,25 @@ def _scrub_ooxml_zip(
     drop_custom_xml: bool = True,
     pii_blank_extra: bool = False,
     strip_authoring_exhaust: bool = False,
+    exhaust_counts: dict[str, int] | None = None,
 ) -> tuple[bytes, list[str]]:
+    """Scrub one OOXML package. Returns (cleaned_bytes, action strings).
+
+    ``exhaust_counts`` is the structured side-channel for the authoring
+    exhaust pass: when supplied, the per-part removal counts accumulate
+    into it (rsid_attrs / rsid_tables / doc_ids / session_props) so the
+    caller can drive per-document records from what THIS package actually
+    carried, instead of re-reading the prose summary line -- which the
+    action list only emits when a count is non-zero, and which the
+    policy engine may drop entirely under its 12-message cap. Omitted
+    (every historical caller): a local dict, behaviour unchanged.
+    """
     actions: list[str] = []
     budget = [0]
     layer_removed = 0
     layer_replaced = 0
-    exhaust_counts: dict[str, int] = {}
+    if exhaust_counts is None:
+        exhaust_counts = {}
     kept: list[tuple[zipfile.ZipInfo, bytes]] = []
     with zipfile.ZipFile(io.BytesIO(data)) as zin:
         for info in zin.infolist():
@@ -1872,6 +1889,15 @@ def _scrub_ooxml_zip(
                         if new[oe:cs_]:
                             n += 1
                             actions.append(f"scrub {name} field {label}")
+                            # Session counters reach the exhaust side-channel
+                            # as they are blanked: they never show up in
+                            # "drop part" style actions, and without this
+                            # count the structured record would under-report
+                            # what the pass actually did.
+                            if (tag, label) in _EXHAUST_PROP_FIELD_SET:
+                                exhaust_counts["session_props"] = (
+                                    exhaust_counts.get("session_props", 0) + 1
+                                )
                     if n:
                         out.append(new[last:])
                         new = "".join(out)
@@ -2711,6 +2737,7 @@ def clean_docx(
     pii_blank_extra: bool = False,
     strip_authoring_exhaust: bool | None = None,
     strip_hidden_text: bool = False,
+    exhaust_counts: dict[str, int] | None = None,
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _docx_legal_clean(
         data,
@@ -2734,6 +2761,7 @@ def clean_docx(
         drop_custom_xml=drop_custom_xml,
         pii_blank_extra=pii_blank_extra,
         strip_authoring_exhaust=strip_authoring_exhaust,
+        exhaust_counts=exhaust_counts,
     )
     return data, legal_actions + scrub_actions
 
@@ -2835,10 +2863,20 @@ def clean_xlsx(
     prop_fields: tuple[tuple[str, str], ...] | None = None,
     drop_custom_xml: bool = True,
     pii_blank_extra: bool = False,
+    strip_authoring_exhaust: bool | None = None,
+    exhaust_counts: dict[str, int] | None = None,
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _xlsx_legal_clean(
         data, strip_comments=strip_comments, strip_external_links=strip_external_links
     )
+    # Same default as clean_docx: the full-identity-scrub path (prop_fields
+    # is None == external_sharing / production) strips authoring exhaust;
+    # privacy_only passes its own narrow field list and keeps the workbook
+    # byte-faithful apart from the named identity fields. Historically this
+    # kwarg never reached the XLSX path at all; it is threaded now so every
+    # OOXML format answers the exhaust question the same way.
+    if strip_authoring_exhaust is None:
+        strip_authoring_exhaust = prop_fields is None
     data, scrub_actions = _scrub_ooxml_zip(
         data,
         "xlsx",
@@ -2847,6 +2885,8 @@ def clean_xlsx(
         prop_fields=prop_fields,
         drop_custom_xml=drop_custom_xml,
         pii_blank_extra=pii_blank_extra,
+        strip_authoring_exhaust=strip_authoring_exhaust,
+        exhaust_counts=exhaust_counts,
     )
     return data, legal_actions + scrub_actions
 
@@ -3087,10 +3127,22 @@ def clean_pptx(
     prop_fields: tuple[tuple[str, str], ...] | None = None,
     drop_custom_xml: bool = True,
     pii_blank_extra: bool = False,
+    strip_authoring_exhaust: bool | None = None,
+    exhaust_counts: dict[str, int] | None = None,
 ) -> tuple[bytes, list[str]]:
     data, legal_actions = _pptx_legal_clean(
         data, strip_notes=strip_notes, strip_comments=strip_comments
     )
+    # Same default as clean_docx: the full-identity-scrub path (prop_fields
+    # is None == external_sharing / production) strips authoring exhaust;
+    # privacy_only passes its own narrow field list and keeps the deck
+    # byte-faithful apart from the named identity fields. The scrub pass
+    # scopes itself to ppt/ parts, where the same rsid-attribute and docId
+    # patterns occur. Historically this kwarg never reached the PPTX path
+    # at all, while the certificate claimed it had; threaded now so every
+    # OOXML format answers the exhaust question the same way.
+    if strip_authoring_exhaust is None:
+        strip_authoring_exhaust = prop_fields is None
     data, scrub_actions = _scrub_ooxml_zip(
         data,
         "pptx",
@@ -3099,6 +3151,8 @@ def clean_pptx(
         prop_fields=prop_fields,
         drop_custom_xml=drop_custom_xml,
         pii_blank_extra=pii_blank_extra,
+        strip_authoring_exhaust=strip_authoring_exhaust,
+        exhaust_counts=exhaust_counts,
     )
     return data, legal_actions + scrub_actions
 

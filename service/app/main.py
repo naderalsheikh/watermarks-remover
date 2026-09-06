@@ -665,6 +665,16 @@ def _render_job_certificate_html(
     # session timestamps leaves a reader unable to tell a decision from an
     # oversight, which is the same class of defect as an unstated
     # limitation.
+    #
+    # The Removed half carries per-document counts (schema v3: each entry
+    # is "removed N <mechanism>", counted by this job's own exhaust scrub).
+    # An entry list that named Word mechanisms for every DOCX/PPTX claimed
+    # per-document knowledge the record did not have -- a document that
+    # never carried a w:rsid still got a printed certificate saying its
+    # RSIDs were removed. An empty list now means what it says: this
+    # document carried none of what the policy strips. The Deliberately
+    # retained half stays a policy position on purpose: retention IS the
+    # policy's standing decision, independent of what one file contained.
     residual_html = ""
     if residual_metadata and (residual_metadata.get("stripped") or residual_metadata.get("retained")):
         stripped = residual_metadata.get("stripped") or []
@@ -672,7 +682,9 @@ def _render_job_certificate_html(
         stripped_html = (
             "<ul>" + "".join(f"<li>{esc(x)}</li>" for x in stripped) + "</ul>"
             if stripped
-            else "<p>Nothing beyond the findings and identity fields listed above.</p>"
+            else "<p>None observed in this document — it carried none of the "
+            "correlators this policy strips. (What the policy WOULD remove is "
+            "its standing position, not a per-document claim.)</p>"
         )
         retained_html = (
             "<ul>"
@@ -688,7 +700,9 @@ def _render_job_certificate_html(
         residual_html = (
             "<h2>Residual authoring metadata</h2>"
             "<p>Authoring exhaust is not a finding: it is metadata this policy takes "
-            "an explicit position on. Both halves of that position are recorded.</p>"
+            "an explicit position on. Both halves of that position are recorded — "
+            "what this document carried and had removed (with the counts this job's "
+            "own scrub observed), and what the policy retains by decision.</p>"
             f"<h3>Removed</h3>{stripped_html}"
             f"<h3>Deliberately retained</h3>{retained_html}"
         )
