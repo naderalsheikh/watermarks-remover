@@ -796,9 +796,13 @@ POLICIES = [
         "id": "external_sharing",
         "label": "External sharing",
         "description": (
-            "For sending outside the firm: strips comments, external links, "
-            "embedded objects, and custom XML; accepts all tracked changes; "
-            "flags headers/footers and hidden content for review."
+            "For sending outside the firm: strips comments (DOCX, XLSX, "
+            "PPTX), embedded objects (DOCX only), external links (XLSX "
+            "only), and custom XML (OOXML formats), and accepts all "
+            "tracked changes; flags headers/footers and hidden content "
+            "for review. Formats without a strip for an action keep that "
+            "content — the per-job certificate and disposition ledger "
+            "record what actually happened."
         ),
         # bulk_safe: the subtype table has NO approve-default cells, so a
         # sanitize needs no per-finding decisions (main.py stays out of the
@@ -856,8 +860,11 @@ RELEASE_PROFILES = [
         "id": "counterparty_deal_room",
         "label": "Counterparty / Deal Room Release",
         "policy_id": "external_sharing",
-        "description": "Sending to the other side of a deal or matter: strips comments, "
-        "external links, embedded objects, and custom XML.",
+        "description": "Sending to the other side of a deal or matter: strips "
+        "comments (DOCX, XLSX, PPTX), embedded objects (DOCX only), external "
+        "links (XLSX only), and custom XML (OOXML formats), and accepts all "
+        "tracked changes. Formats without a strip for an action keep that "
+        "content — the certificate records what actually happened.",
     },
     {
         "id": "public_filing_anonymized",
