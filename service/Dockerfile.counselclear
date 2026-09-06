@@ -40,6 +40,11 @@ RUN python3 -m pip install --no-cache-dir "pip==26.2.1" \
     && python3 -m pip install --no-cache-dir -r /app/requirements-app.txt \
     && rm /app/requirements-app.txt
 
+# MIT requires the copyright notice to travel with substantial portions of
+# the Software, and this image is a distribution of exactly that. Copied
+# before the source so a licence change busts fewer layers than it would
+# last. See tests/test_image_license_compliance.py.
+COPY LICENSE /app/LICENSE
 COPY scripts /app/scripts
 COPY app /app/app
 RUN chmod -R a+rX /app/scripts /app/app

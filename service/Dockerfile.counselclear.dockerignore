@@ -34,6 +34,15 @@
 !app/**
 !scripts/
 !scripts/**
+# MIT compliance: the published image is a DISTRIBUTION of this MIT-licensed
+# codebase and contains substantial portions of it (all of app/ and most of
+# scripts/), so the licence text has to travel with it -- "included in all
+# copies or substantial portions of the Software" is not satisfied by a
+# LICENSE that only exists in the git repo. The build context is `service/`
+# (see .github/workflows/release-images.yml), which the repo-root LICENSE is
+# outside of, hence service/LICENSE; tests/test_image_license_compliance.py
+# pins it byte-identical to the root file so the copy cannot drift.
+!LICENSE
 
 # File-level QUARANTINE items (commercial-surface-manifest.md §2.1):
 # dedicated adapter/harness CLIs, their pin files, and host bootstrap
