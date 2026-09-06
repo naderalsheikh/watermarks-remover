@@ -301,6 +301,23 @@ export type Release = {
   // (supersedes), when this row is a re-run. null for a first release
   // and for every row created before the field existed.
   predecessor_release_id: string | null;
+  // Lane E3: what anchoring did the LAST time a packet for this release was
+  // built. Deliberately not a property of the release -- a packet is rebuilt
+  // per download and its TSA token attests to that download's own signature
+  // bytes, so this is the most recent observation, not a standing fact.
+  //
+  // null means no packet has been downloaded yet. Render that as "not yet
+  // known", NEVER as "not anchored": the difference between an unanswered
+  // question and a negative answer is the whole reason the field exists.
+  //
+  // Distinct from ReleaseResult.anchor below, which describes that
+  // artifact's OWN bytes and carries `reference` rather than `at`.
+  last_anchor: {
+    type: string;
+    at: string | null;
+    digest: string | null;
+    externally_anchored: boolean;
+  } | null;
 };
 
 // GET /v1/matters/{id}/releases/{id}/result — release_result.json's own

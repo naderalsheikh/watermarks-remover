@@ -356,12 +356,49 @@ function SanitizeManifestView({ manifest }: { manifest: Manifest }) {
 // each item at what's already shown above instead of re-deriving it, so
 // this can't quietly drift out of sync with NoDecisionWarning/
 // EmbeddedImageNotice/the verification-checks list.
+// Lane E3. Three states, and the third is the one that is easy to get
+// wrong: null is "no packet has been built yet, so nobody knows", NOT
+// "this is unanchored". Collapsing an unanswered question into a negative
+// answer is the same class of overclaim as the certificate that used to
+// say "No limitations flagged" -- just pointing the other way.
+const ANCHOR_STATE = {
+  external: "border-emerald-600/30 bg-emerald-600/5 text-emerald-700 dark:text-emerald-400",
+  operator: "border-amber-600/30 bg-amber-600/5 text-amber-700 dark:text-amber-400",
+  unknown: "border-border text-muted",
+} as const;
+
+function AnchorBadge({ release }: { release: Release | null }) {
+  const anchor = release?.last_anchor ?? null;
+  const state = !anchor ? "unknown" : anchor.externally_anchored ? "external" : "operator";
+  const label = !anchor
+    ? "Anchoring: not yet known"
+    : anchor.externally_anchored
+      ? "Externally anchored (RFC 3161)"
+      : "Operator signature only";
+  return (
+    <span
+      className={`rounded border px-2 py-0.5 text-xs font-medium ${ANCHOR_STATE[state]}`}
+      title={
+        !anchor
+          ? "No release packet has been downloaded yet. The anchor is obtained while the packet is assembled, so it is not knowable before then."
+          : anchor.externally_anchored
+            ? `An RFC 3161 timestamp was obtained at ${anchor.at}. A timestamp attests WHEN a digest existed; it does not vouch for the derivative's content.`
+            : `Last packet built at ${anchor.at} carried this deployment's own signature and no independent timestamp.`
+      }
+    >
+      {label}
+    </span>
+  );
+}
+
 function BundleContents({
   manifest,
   includeOriginal,
+  release,
 }: {
   manifest: Manifest;
   includeOriginal: boolean;
+  release: Release | null;
 }) {
   const hasKeptWithoutReview = manifest.actions.some((a) => a.includes(NO_DECISION_MARKER));
   return (
@@ -391,15 +428,37 @@ function BundleContents({
           <code className="font-mono">release_packet.json</code> — content hashes for every
           file above plus an Ed25519 signature from this deployment&apos;s custody key over
           the packet&apos;s recorded facts, checkable offline without trusting this page.
-          {/* Claim-copy audit row A3. The old flat "not externally anchored —
-              no independent timestamp" became false for TSA-anchored packets
-              when RFC 3161 anchoring merged. This page cannot tell which
-              this packet is: the anchor is computed while the bundle is
-              built and is not persisted anywhere this page reads (see the
-              plan's Lane E3). So it names where the answer lives instead of
-              predicting it, and never asserts a timestamp exists. */}{" "}
-          Whether it also carries an RFC 3161 timestamp is recorded in that same file&apos;s
-          <code className="font-mono"> anchor</code> field; this page does not read it.
+          {/* Claim-copy audit row A3, now answerable. The original copy
+              asserted "not externally anchored" unconditionally, which
+              stopped being true when RFC 3161 anchoring merged; the interim
+              copy pointed at the packet because nothing persisted the
+              outcome. Lane E3 records it (releases.last_anchor_*), so the
+              page can state it.
+
+              Scoped to the LAST packet built, deliberately: a packet is
+              rebuilt per download and its token attests to that download's
+              own signature bytes, so "this release is anchored" would claim
+              a stability the protocol does not provide. */}{" "}
+          {release?.last_anchor ? (
+            release.last_anchor.externally_anchored ? (
+              <>
+                The last packet built for this release carried an RFC 3161 timestamp from an
+                independent authority. That attests <em>when</em> its signature existed — not
+                that the derivative is clean.
+              </>
+            ) : (
+              <>
+                The last packet built for this release carried this deployment&apos;s own
+                signature and no independent timestamp.
+              </>
+            )
+          ) : (
+            <>
+              Whether a packet also carries an RFC 3161 timestamp is decided while it is being
+              assembled, so it is not known until one has been built. None has been downloaded
+              for this release yet.
+            </>
+          )}
         </li>
         <li>
           <code className="font-mono">README.txt</code> — names every file above for someone
@@ -695,7 +754,7 @@ function JobView({
   // Release context (PR 44): reuses the existing release-detail route --
   // no new backend surface. Fetched only when job.release_id is present
   // (PR 40's own mechanism for discovering a job's Release at all).
-  const { data: release } = useApiData(
+  const { data: release, reload: reloadRelease } = useApiData(
     () =>
       job?.release_id
         ? api.get<Release>(`/v1/matters/${matterId}/releases/${job.release_id}`)
@@ -1011,8 +1070,16 @@ function JobView({
                     />
                     Include original in packet
                   </label>
+                  {/* last_anchor is written server-side while the packet
+                      is assembled, so it only becomes known once a download
+                      has happened. The release query's key never changes
+                      after mount, so without this the panel below would sit
+                      on "not yet known" forever -- on the very page that
+                      just caused it to be known. The delay lets the request
+                      reach the server before we re-read. */}
                   <a
                     href={`/v1/matters/${matterId}/jobs/${jobId}/bundle${includeOriginal ? "?include_original=true" : ""}`}
+                    onClick={() => window.setTimeout(reloadRelease, 1500)}
                     className="ml-auto rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-white hover:opacity-90"
                   >
                     Download release packet
@@ -1052,16 +1119,22 @@ function JobView({
                   plus an Ed25519 signature over them by this deployment&apos;s custody key,
                   checkable offline with{" "}
                   <code className="font-mono">tools/counselclear_verify_release_packet.py</code>.
-                  {/* Row A7, same reasoning as A3 above: state where the
-                      answer is recorded rather than assert an outcome this
-                      page cannot observe. The verifier prints it either way
-                      ("Externally anchored: yes (rfc3161-tsa)" or "NOT
-                      EXTERNALLY ANCHORED"), which is the authority. */}{" "}
-                  That tool also reports whether the packet is externally anchored; this page
-                  does not, because the anchor is recorded in the packet rather than here.
+                  {/* Row A7. The verifier remains the authority for a
+                      packet a recipient holds -- it recomputes the token
+                      against a pinned TSA certificate, which this page does
+                      not do. The badge reports what THIS deployment last
+                      observed, which is a weaker and differently-scoped
+                      claim, so both are stated rather than one standing in
+                      for the other. */}{" "}
+                  That tool also reports whether the packet is externally anchored, verifying
+                  the token itself; the badge below is only what this deployment recorded when
+                  the packet was built.
+                </p>
+                <p className="mt-2">
+                  <AnchorBadge release={release} />
                 </p>
                 {manifest && (
-                  <BundleContents manifest={manifest} includeOriginal={includeOriginal} />
+                  <BundleContents manifest={manifest} includeOriginal={includeOriginal} release={release} />
                 )}
               </div>
             )}

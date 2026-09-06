@@ -117,7 +117,7 @@ All rows already exist in `docs/claim-copy-audit.md`; this lane executes them.
 
 This dependency is also why Lane A scoped `release_result.json`'s anchor field rather than deriving it from the packet: `release_result` is produced at release terminal, the packet at bundle download, and a refused release never gets a packet at all.
 
-**Done 2026-09-05.** All four strings updated and audit rows A1/A3/A7/A9 marked RESOLVED. C2 took the interim reading as planned — the two job-page strings now name `release_packet.json`'s own `anchor` field and the offline verifier as where the answer is recorded, rather than asserting an outcome the page cannot observe. Deriving it properly still waits on E3.
+**Done 2026-09-05.** All four strings updated and audit rows A1/A3/A7/A9 marked RESOLVED. C2 first took the interim reading — the two job-page strings now name `release_packet.json`'s own `anchor` field and the offline verifier as where the answer is recorded, rather than asserting an outcome the page cannot observe. It was then completed the same day once E3 landed: the page renders an `AnchorBadge` from the persisted outcome, with `null` shown as *not yet known* rather than *not anchored*.
 
 ---
 
