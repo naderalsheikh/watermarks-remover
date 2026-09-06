@@ -304,6 +304,42 @@ print `NOT EXTERNALLY ANCHORED`, and no independent party will have confirmed
 when the content existed. That is a real evidentiary difference; choose it
 because zero egress is worth more to you, not by accident.
 
+## 6c. Custody signing key: back it up, and send the fingerprint
+
+The release-packet signing key is generated on first use and lives in this
+deployment's data root. **Nothing else holds it.** Treat it the way you
+already treat matter files that outlive the people who created them: back it
+up under your records-retention policy, and make its succession somebody's
+named responsibility.
+
+Since 2026-09-05 each packet publishes the *public* half inside
+`release_packet.json`, so a recipient can always check the signature
+arithmetic even if every key file is lost. That fixes availability and
+nothing else: a key a packet supplies about itself proves nothing about
+whose key it is, because anyone able to alter the packet could also have
+replaced that field. The verifier reports such a check as
+`VERIFIED under a SELF-PUBLISHED key (provenance unconfirmed)` and never as
+plain `VERIFIED`.
+
+**So send recipients the fingerprint, not just the key.** It is printed in
+every packet's `README.txt` and by the verifier on every run:
+
+```bash
+counselclear_verify_release_packet.py --key-fingerprint <sha256> packet.zip
+```
+
+A recipient who confirms that fingerprint once — in an engagement letter, on
+a call, from a packet they already trust — can verify every future packet
+from this deployment with no key file at all. The pin is their act, in their
+records, which is exactly why it carries weight the packet's own claims
+cannot.
+
+Losing the *private* key means you can no longer sign new packets; already
+issued packets remain checkable. Losing control of it is the serious case
+and is not addressed by any of the above — rotate immediately, and see
+`docs/counselclear-key-durability-proposal.md` §4 for what revocation would
+require, which this product does not yet implement.
+
 ## 7. Operations checklist
 
 - [ ] Deploy artifacts match what's running: proxy config derived from
