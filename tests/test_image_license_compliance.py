@@ -82,3 +82,76 @@ def test_licence_is_still_mit_with_a_copyright_line():
     assert "MIT License" in text
     assert "Copyright (c)" in text
     assert "substantial portions of the Software" in text
+
+
+# --- redistributed dependencies ----------------------------------------------
+#
+# The image also redistributes ten third-party packages. Most are permissive
+# and satisfied by attribution, but two obligations are concrete rather than
+# theoretical: Apache-2.0 §4(d) requires boto3's NOTICE text to travel with
+# the redistribution, and psycopg is LGPL-3.0-only -- the only copyleft terms
+# in the stack, shipped even in SQLite deployments so a Postgres URL works
+# without a rebuild.
+
+NOTICES = REPO / "service" / "THIRD-PARTY-NOTICES.md"
+GENERATOR = REPO / "tools" / "generate_third_party_notices.py"
+
+
+def test_notices_file_is_not_stale():
+    """Generated from installed metadata, not hand-maintained -- a
+    hand-written notices file goes stale the first time someone bumps a pin,
+    and a stale one is worse than none because it asserts something false."""
+    import subprocess
+
+    result = subprocess.run(
+        [str(REPO / ".venv" / "bin" / "python"), str(GENERATOR), "--check"],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_every_pinned_dependency_appears_in_the_notices():
+    import re
+
+    pins = REPO / "service" / "requirements-app.txt"
+    text = NOTICES.read_text()
+    for raw in pins.read_text().splitlines():
+        pin = raw.strip()
+        if not pin or pin.startswith("#"):
+            continue
+        name = re.match(r"^([A-Za-z0-9._-]+)", pin)
+        assert name, pin
+        assert f"`{name.group(1)}`" in text or name.group(1).lower() in text.lower(), (
+            f"{name.group(1)} ships in the image but is absent from THIRD-PARTY-NOTICES.md"
+        )
+
+
+def test_apache_notice_text_is_propagated():
+    """The one attribution duty a licence table alone cannot discharge."""
+    text = NOTICES.read_text()
+    assert "Amazon.com, Inc. or its affiliates" in text
+
+
+def test_copyleft_component_is_named_and_explained():
+    """psycopg's LGPL terms must be stated, not buried in a table row: it is
+    the only component whose licence constrains how the image may be
+    redistributed, and a recipient's right to replace it is the thing that
+    makes shipping it compliant."""
+    text = NOTICES.read_text()
+    assert "LGPL-3.0-only" in text
+    assert "psycopg" in text
+    assert "replace it" in text
+
+
+def test_notices_ship_inside_the_image():
+    docker = DOCKERFILE.read_text()
+    assert "COPY THIRD-PARTY-NOTICES.md /app/THIRD-PARTY-NOTICES.md" in docker
+    lines = [
+        line.strip()
+        for line in DOCKERIGNORE.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert "!THIRD-PARTY-NOTICES.md" in lines

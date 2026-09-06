@@ -43,6 +43,7 @@
 # outside of, hence service/LICENSE; tests/test_image_license_compliance.py
 # pins it byte-identical to the root file so the copy cannot drift.
 !LICENSE
+!THIRD-PARTY-NOTICES.md
 
 # File-level QUARANTINE items (commercial-surface-manifest.md §2.1):
 # dedicated adapter/harness CLIs, their pin files, and host bootstrap
