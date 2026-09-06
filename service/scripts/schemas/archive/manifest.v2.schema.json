@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://counselclear.local/schemas/manifest.v3.schema.json",
-  "title": "CounselClear Manifest v3",
-  "version": 3,
+  "$id": "https://counselclear.local/schemas/manifest.v2.schema.json",
+  "title": "CounselClear Manifest v2",
+  "version": 2,
   "type": "object",
   "required": [
     "manifest_version",
@@ -175,12 +175,10 @@
         "postcondition": {
           "enum": [
             "removed_confirmed",
-            "removed_unplanned",
             "retained_as_planned",
             "retained_unplanned",
             "not_verifiable"
-          ],
-          "_comment_optional": "schema v3 adds removed_unplanned: a RETAINING action (keep/flag/inspect_only/refuse) whose finding vanished on re-inspect. The policy promised preservation and the engine destroyed it -- the opposite of a confirmed removal, and never a success. v2 mislabelled it removed_confirmed."
+          ]
         },
         "legal_basis": { "type": ["string", "null"] }
       }

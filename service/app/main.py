@@ -623,6 +623,14 @@ def _render_job_certificate_html(
     if dispositions:
         _POSTCONDITION_LABEL = {
             "removed_confirmed": ("chain-ok", "removed — confirmed absent on re-inspect"),
+            # RED, never green: the policy promised preservation and the
+            # engine destroyed the finding. Recorded as the opposite of a
+            # confirmed removal (schema v3; v2 mislabelled it
+            # removed_confirmed).
+            "removed_unplanned": (
+                "chain-broken",
+                "REMOVED although the policy planned to keep it",
+            ),
             "retained_as_planned": ("chain-broken", "RETAINED in the derivative (see Limitations)"),
             "retained_unplanned": ("chain-broken", "STILL PRESENT despite a removal action"),
             "not_verifiable": ("", "not verifiable — no post-sanitize observation"),

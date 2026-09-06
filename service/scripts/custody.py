@@ -138,6 +138,11 @@ def build_dispositions(
 
     - ``removed_confirmed``  -- planned to be removed, and the
       post-sanitize re-inspect no longer observes it.
+    - ``removed_unplanned``  -- the policy chose to KEEP it and it is
+      GONE. The opposite of a confirmed removal: the engine destroyed
+      what the operator asked to preserve. Matters most under
+      ``evidence_preservation`` / ``privacy_only``, whose product is
+      not touching things at all.
     - ``retained_as_planned``-- the policy chose to keep/flag it and it is
       still there. This is a LIMITATION, never a clean result.
     - ``retained_unplanned`` -- it was planned for removal and is STILL
@@ -160,7 +165,11 @@ def build_dispositions(
         if not after_known:
             postcondition = "not_verifiable"
         elif action in _RETAINING_ACTIONS:
-            postcondition = "retained_as_planned" if still_present else "removed_confirmed"
+            # A retaining action whose finding vanished is NEVER a
+            # confirmed removal: the policy promised to preserve the
+            # finding and the engine destroyed it (``removed_unplanned``,
+            # schema v3 -- v2 mislabelled it removed_confirmed).
+            postcondition = "retained_as_planned" if still_present else "removed_unplanned"
         elif still_present:
             postcondition = "retained_unplanned"
         else:
