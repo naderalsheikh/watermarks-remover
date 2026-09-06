@@ -13,7 +13,9 @@ written the same day.
 
 from __future__ import annotations
 
+import io
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -120,3 +122,150 @@ def test_every_postcondition_value_is_in_the_published_schema():
             ):
                 produced.add(row["postcondition"])
     assert produced <= allowed, produced - allowed
+
+
+# --- Task 4: the action record is the custody record, so it cannot be
+# --- capped silently or classified by the cleaner's prose. -------------------
+
+
+def _many_message_docx() -> bytes:
+    """A DOCX whose cleaner produces MORE than 12 messages: every identity
+    and session field carrying content in docProps/core.xml (10) and
+    docProps/app.xml (4) under external_sharing -- which also strips
+    authoring exhaust -- plus one OLE embedding drop and one customXml
+    drop. The old msgs[:12] cap cut that tail from the record silently."""
+    core_fields = (
+        "<dc:creator>Jane Counsel</dc:creator>"
+        "<cp:lastModifiedBy>Bob Reviewer</cp:lastModifiedBy>"
+        "<dc:description>settlement draft</dc:description>"
+        "<cp:keywords>kw1, kw2</cp:keywords>"
+        "<dc:subject>subj</dc:subject>"
+        "<cp:category>cat</cp:category>"
+        "<dcterms:created>2026-01-01T00:00:00Z</dcterms:created>"
+        "<dcterms:modified>2026-01-02T00:00:00Z</dcterms:modified>"
+        "<cp:revision>7</cp:revision>"
+        "<TotalTime>42</TotalTime>"
+    )
+    core = (
+        b'<?xml version="1.0"?>'
+        b'<cp:coreProperties xmlns:cp="c" xmlns:dc="d" xmlns:dcterms="t">'
+        + core_fields.encode()
+        + b"</cp:coreProperties>"
+    )
+    app_fields = (
+        "<Application>Microsoft Word</Application>"
+        "<AppVersion>16.0000</AppVersion>"
+        "<Company>ACME LLP</Company>"
+        "<Manager>Mgr</Manager>"
+    )
+    app_props = (
+        b'<?xml version="1.0"?><Properties xmlns="p">' + app_fields.encode() + b"</Properties>"
+    )
+    body = "<w:p><w:r><w:t>Agreement text.</w:t></w:r></w:p>"
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}<w:sectPr/></w:body></w:document>"
+    ).encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        ct = (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+            "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
+            "<Default Extension='xml' ContentType='application/xml'/>"
+            "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>"
+            "<Default Extension='bin' ContentType='application/vnd.openxmlformats-officedocument.oleObject'/>"
+            "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-"
+            "officedocument.wordprocessingml.document.main+xml'/>"
+            "</Types>"
+        )
+        zf.writestr("[Content_Types].xml", ct.encode())
+        zf.writestr(
+            "_rels/.rels",
+            b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            b'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            b'relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+        )
+        zf.writestr("word/document.xml", document)
+        zf.writestr("docProps/core.xml", core)
+        zf.writestr("docProps/app.xml", app_props)
+        zf.writestr("word/embeddings/oleObject1.bin", b"OLE payload bytes")
+        zf.writestr("customXml/item1.xml", "<customProps><ai>true</ai></customProps>")
+    return buf.getvalue()
+
+
+def test_action_records_beyond_twelve_are_never_silently_dropped():
+    """policies.py's container branch used `for m in msgs[:12]`: every
+    cleaner message past the twelfth vanished from the custody record with
+    no marker. The dropped tail includes limitation disclosures (`warning:
+    ... not well-formed XML`). A record that stops without saying it
+    stopped claims completeness it does not have."""
+    from engine_api import inspect_bytes
+    from policies import apply_actions, plan_actions
+
+    data = _many_message_docx()
+    plan = plan_actions(inspect_bytes(data, "many.docx"), "external_sharing", {})
+    _cleaned, records = apply_actions(data, plan)
+    details = [r.detail for r in records]
+    # The identity scrubs alone exceed 12; the record must carry them all,
+    # or carry an explicit truncation record naming the dropped count.
+    truncation = [d for d in details if "more cleaner messages" in d or "truncat" in d.lower()]
+    assert len(records) > 12 or truncation, (
+        f"record holds {len(records)} entries with no truncation marker"
+    )
+    # Every scrub message the cleaner produced must be represented: the
+    # identity fields are individually named in the detail strings.
+    scrubbed = [d for d in details if d.startswith("scrub ")]
+    assert scrubbed, details
+    assert len(scrubbed) >= 12, f"only {len(scrubbed)} scrub records survived the cap"
+
+
+def test_ole_part_drop_is_not_recorded_as_custom_xml():
+    """Subtype was inferred by substring-matching the cleaner's prose with
+    a final `else "custom_xml"`, so dropping word/embeddings/oleObject1.bin
+    was recorded as custom_xml|strip. A prose reword in a cleaner moved
+    custody facts; the subtype must come from structural facts (the part
+    path), not from which substring happened to match."""
+    from engine_api import inspect_bytes
+    from policies import apply_actions, plan_actions
+
+    body = "<w:p><w:r><w:t>Agreement text.</w:t></w:r></w:p>"
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}<w:sectPr/></w:body></w:document>"
+    ).encode()
+    ole = b"OLE payload bytes - content irrelevant, presence is the point"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        ct = (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+            "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
+            "<Default Extension='xml' ContentType='application/xml'/>"
+            "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>"
+            "<Default Extension='bin' ContentType='application/vnd.openxmlformats-"
+            "officedocument.oleObject'/>"
+            "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-"
+            "officedocument.wordprocessingml.document.main+xml'/>"
+            "</Types>"
+        )
+        zf.writestr("[Content_Types].xml", ct.encode())
+        zf.writestr(
+            "_rels/.rels",
+            b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            b'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            b'relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+        )
+        zf.writestr("word/document.xml", document)
+        zf.writestr("word/embeddings/oleObject1.bin", ole)
+    data = buf.getvalue()
+
+    plan = plan_actions(inspect_bytes(data, "ole.docx"), "external_sharing", {})
+    _cleaned, records = apply_actions(data, plan)
+    dropped = [r for r in records if "oleObject1.bin" in r.detail]
+    assert dropped, f"OLE drop not recorded at all: {[r.detail for r in records]}"
+    assert all(r.subtype == "embeddings_ole" for r in dropped), [
+        (r.subtype, r.detail) for r in dropped
+    ]

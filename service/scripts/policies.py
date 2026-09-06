@@ -1143,6 +1143,74 @@ def apply_actions(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionReco
     return cleaned, records
 
 
+# Part-path facts, not the cleaner's prose, decide which custody subtype a
+# message belongs to. The old classifier substring-matched the message text
+# with a final `else "custom_xml"`, so a prose reword in a cleaner moved
+# custody facts, and `drop part word/embeddings/oleObject1.bin` was recorded
+# as custom_xml|strip because "embeddings" was never in the match list.
+_OOXML_PART_SUBTYPES: tuple[tuple[str, str], ...] = (
+    ("word/embeddings/", "embeddings_ole"),
+    ("xl/embeddings/", "embeddings_ole"),
+    ("ppt/embeddings/", "embeddings_ole"),
+    ("word/comments", "comments_and_notes"),
+    ("word/people.xml", "comments_and_notes"),
+    ("xl/comments", "comments_and_notes"),
+    ("xl/threadedcomments/", "comments_and_notes"),
+    ("xl/persons/person", "comments_and_notes"),
+    ("ppt/notesSlides/", "comments_and_notes"),
+    ("ppt/comments/", "comments_and_notes"),
+    ("ppt/commentauthors.xml", "comments_and_notes"),
+    ("xl/externallinks", "external_links"),
+)
+
+
+def _subtype_for_message(m: str, fallback: str) -> str:
+    """Classify one cleaner message: part-path facts first (the structural
+    truth about which custody subtype this action belongs to), then the
+    prose heuristics for messages that name no recognizable part, then the
+    fallback. The prose pass is kept deliberately -- `removed comment
+    markers x2 in word/document.xml` names only word/document.xml, which is
+    not in the part table, and its word "comment" IS the truth about it."""
+    lowered = m.lower()
+    for marker, st in _OOXML_PART_SUBTYPES:
+        if marker in lowered:
+            return st
+    if "comment" in lowered or "notes" in lowered:
+        return "comments_and_notes"
+    return fallback
+
+
+def _classify_ooxml_messages(
+    msgs: list[str], a2: dict[str, Any]
+) -> list[ActionRecord]:
+    """Turn cleaner messages into ActionRecords -- ALL of them.
+
+    The loop this replaces iterated msgs[:12], silently dropping every
+    message past the twelfth from the custody record -- including
+    `warning: ... not well-formed XML` limitation disclosures -- so a
+    record that stopped without saying it stopped claimed a completeness
+    it did not have. Every message is recorded now; the manifest's actions
+    list derives one-to-one from these records, so the record and the
+    display can no longer disagree about where the tail went.
+    """
+    records: list[ActionRecord] = []
+    for m in msgs:
+        if m.startswith("hidden-text:"):
+            st = "hidden_text"
+        elif "accept-all" in m:
+            st = "tracked_changes"
+        elif m.startswith("layer A"):
+            st = "layer_a_body"
+        elif m.startswith("scrub"):
+            # "scrub authoring exhaust: ..." and "scrub <part> field ..."
+            # are both authoring_props outcomes.
+            st = "authoring_props"
+        else:
+            st = _subtype_for_message(m, fallback="custom_xml")
+        records.append(ActionRecord(st, a2.get(st, "executed"), m))
+    return records
+
+
 def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[ActionRecord]]:
     if hashlib.sha256(data).hexdigest() != plan.source_sha256:
         raise PolicyError("input changed since inspection (sha256 mismatch)")
@@ -1254,25 +1322,7 @@ def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[Acti
                     **kwargs,
                 )
             plan.exhaust_counts = exhaust_counts
-            for m in msgs[:12]:
-                st = (
-                    "hidden_text"
-                    if m.startswith("hidden-text:")
-                    else "tracked_changes"
-                    if "accept-all" in m
-                    else "comments_and_notes"
-                    if "comment" in m.lower() or "notes" in m.lower()
-                    # "scrub authoring exhaust: ..." and "scrub <part> field
-                    # ..." are both authoring_props outcomes; the exhaust
-                    # line is matched first only because it is the more
-                    # specific string, not because the order matters.
-                    else "authoring_props"
-                    if "scrub" in m
-                    else "layer_a_body"
-                    if m.startswith("layer A")
-                    else "custom_xml"
-                )
-                records.append(ActionRecord(st, a2.get(st, "executed"), m))
+            records.extend(_classify_ooxml_messages(msgs, a2))
             return cleaned, records
         # other containers (odt/html/md/svg): v1 executes sharing semantics only
         mutating = any(v in ("strip", "accept_all", "sanitize") for v in a.values())
