@@ -934,11 +934,14 @@ def test_airlock_cli_end_to_end_against_a_real_server(tmp_path, live_server):
 
     report = verifier.verify_release_packet(out)
     assert report.valid, report.to_text()
-    # PR 57 (MUST-2): packets are signed now -- the anchor is the
-    # operator's Ed25519 signature, and the CLI's key-less verification
-    # run reports it as a no_key signature downgrade, not "none".
+    # PR 57 (MUST-2): packets are signed, so the anchor is the operator's
+    # Ed25519 signature rather than "none". Since Lane E1 Phase 1 the
+    # packet also publishes its public key, so a key-less run can check
+    # the signature and reports `self_key` -- mathematically sound,
+    # provenance unconfirmed -- instead of the old `no_key` downgrade.
     assert report.anchor_type == "ed25519-operator"
-    assert report.signature_status == "no_key"
+    assert report.signature_status == "self_key"
+    assert report.signature_status != "verified"
 
 
 def test_airlock_cli_batch_end_to_end_against_a_real_server_mixed_folder(tmp_path, live_server):

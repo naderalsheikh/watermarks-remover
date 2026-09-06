@@ -657,8 +657,14 @@ def test_sanitize_job_privacy_bundle_excludes_original(client, tmp_path):
     report = verifier.verify_release_packet(zip_path)
     assert report.valid, report.to_text()
     assert report.anchor_type == "ed25519-operator"
-    # Signed packet, no --public-key: exactly the no_key downgrade.
-    assert report.signature_status == "no_key"
+    # Signed packet, no --public-key. Since Lane E1 Phase 1 the packet
+    # PUBLISHES its own public key, so the arithmetic can be checked and
+    # this is `self_key` rather than the old `no_key` downgrade. The
+    # distinction is the point: the maths is sound and the provenance is
+    # not, so it must never collapse into "verified".
+    assert report.signature_status == "self_key"
+    assert "SELF-PUBLISHED" in report.to_text()
+    assert report.signature_status != "verified"
     # The signature is an operator's, not an external authority's: the
     # honest disclaimer must survive the anchor upgrade.
     assert "NOT EXTERNALLY ANCHORED" in report.to_text()

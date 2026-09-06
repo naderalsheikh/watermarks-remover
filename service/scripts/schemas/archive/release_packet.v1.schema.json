@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://counselclear.local/schemas/release_packet.v2.schema.json",
-  "title": "CounselClear Release Packet v2",
-  "version": 2,
+  "$id": "https://counselclear.local/schemas/release_packet.v1.schema.json",
+  "title": "CounselClear Release Packet v1",
+  "version": 1,
   "type": "object",
   "required": [
     "spec_version",
@@ -123,20 +123,9 @@
       "properties": {
         "algorithm": { "const": "ed25519" },
         "key_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
-        "signed_fields": {
-          "enum": [
-            "release_packet.v1.canonical",
-            "release_packet.v1.canonical-excluding-anchor"
-          ],
-          "_comment": "schema v2 fix: this was a const naming only the first value, so every SUCCESSFULLY TSA-anchored packet failed its own published schema. The anchor-excluding variant is emitted whenever an RFC 3161 token is obtained (security.PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR), because the anchor's digest IS the signature's sha256 and so cannot be inside the bytes it signs. The bug was latent because a packet only takes that path when the TSA actually answers."
-        },
+        "signed_fields": { "const": "release_packet.v1.canonical" },
         "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "value": { "type": "string", "pattern": "^[0-9a-f]{128}$" },
-        "public_key": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "_comment_optional": "schema v2; absent on packets issued before 2026-09-05. Raw Ed25519 public bytes, published so a recipient who lost the operator's key file can still check the signature. Solves AVAILABILITY only: anyone able to alter the packet could also replace this field, so a verifier must never report a check against it with the same word it uses for an operator-supplied key. See docs/counselclear-key-durability-proposal.md §1a."
-        }
+        "value": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
       },
       "_comment_optional": "not in required -- packets issued before PR 57 carry no signature and must keep validating"
     },

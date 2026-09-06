@@ -60,6 +60,7 @@ from .security import (
     LoginThrottle,
     consume_attestation,
     custody_key_id,
+    custody_public_key_hex,
     ensure_local_password,
     issue_attestation,
     issue_session,
@@ -3505,13 +3506,23 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "                     tools/counselclear_verify_release_packet.py.\n"
             "  README.txt      -- this file\n\n"
             "The packet's signature is made by this CounselClear deployment's\n"
-            "custody signing key (key_id below). Keep the public key the operator\n"
-            "sent you alongside this packet: without it the signature cannot be\n"
-            "verified, and the operator's copy is the only source -- a lost public\n"
-            "key makes every packet issued under it unverifiable.\n"
-            f"  Signing key_id: {custody_key_id(cfg)}\n"
-            "  Verify offline: counselclear_verify_release_packet.py --public-key\n"
-            "                   <key.pem> <packet.zip>\n\n"
+            "custody signing key. The public half is published inside\n"
+            "release_packet.json (signature.public_key), so the signature can\n"
+            "always be CHECKED -- but a key a packet supplies about itself proves\n"
+            "nothing about whose key it is: anyone able to alter this packet could\n"
+            "also have replaced that field. The verifier says so, reporting a\n"
+            "self-published key separately from a verified one.\n\n"
+            "To close that gap once: ask the operator for the key fingerprint\n"
+            "below over a channel you already trust, record it, and pass it with\n"
+            "--key-fingerprint from then on. That pin is YOUR act, in your own\n"
+            "records; no packet can assert it for you.\n"
+            f"  Signing key_id:  {custody_key_id(cfg)}\n"
+            f"  Key fingerprint: {hashlib.sha256(bytes.fromhex(custody_public_key_hex(cfg))).hexdigest()}\n"
+            "  Verify offline:  counselclear_verify_release_packet.py \\\n"
+            "                     --key-fingerprint <fingerprint> <packet.zip>\n"
+            "  Or with the operator's key file, which takes precedence:\n"
+            "                   counselclear_verify_release_packet.py \\\n"
+            "                     --public-key <key.pem> <packet.zip>\n\n"
             "certificate.html is the same certificate available on its own at\n"
             f"/v1/matters/{matter.id}/jobs/{job.id}/certificate -- read it before\n"
             "relying on this packet: it discloses anything kept without review,\n"

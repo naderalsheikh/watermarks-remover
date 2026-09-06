@@ -184,6 +184,27 @@ def custody_key_id(cfg: Config) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
+def custody_public_key_hex(cfg: Config) -> str:
+    """Raw Ed25519 public bytes as 64-char hex.
+
+    Published inside every packet (docs/counselclear-key-durability-
+    proposal.md §3). This solves AVAILABILITY only -- a recipient who lost
+    the operator's key file can still check the maths -- and contributes
+    nothing to AUTHENTICITY, because anyone able to alter a packet could
+    also replace this field and re-sign. The verifier is responsible for
+    never letting the two be confused; see its "self-published key" status.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    key = cfg.ensure_custody_signing_key()
+    if not isinstance(key, Ed25519PrivateKey):
+        raise RuntimeError("custody signing key is not an Ed25519 private key")
+    return key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
+    ).hex()
+
+
 def sign_release_packet(cfg: Config, packet: dict, *, exclude_anchor: bool = False) -> dict:
     """Sign *packet* (which must not yet carry a ``signature`` block)
     and return that block: algorithm/key_id/signed_fields/digest/value.
@@ -210,6 +231,12 @@ def sign_release_packet(cfg: Config, packet: dict, *, exclude_anchor: bool = Fal
     return {
         "algorithm": "ed25519",
         "key_id": custody_key_id(cfg),
+        # Published so a recipient who lost the operator's key file can
+        # still check the signature. Deliberately INSIDE the signed
+        # content's sibling block rather than the signed content itself:
+        # signing your own key proves nothing, and putting it in the
+        # canonical bytes would only make that circularity harder to see.
+        "public_key": custody_public_key_hex(cfg),
         "signed_fields": (
             PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR if exclude_anchor else PACKET_SIGNATURE_SIGNED_FIELDS
         ),

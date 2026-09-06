@@ -412,6 +412,10 @@ _AUDIT_REFS_NOTE = (
 
 _SIGNATURE_MARKERS = {
     "verified": "VERIFIED",
+    # Never the bare word VERIFIED. The maths is sound and the provenance
+    # is not, and a reader skimming for a green word must not be able to
+    # mistake one for the other.
+    "self_key": "VERIFIED under a SELF-PUBLISHED key (provenance unconfirmed)",
     "unsigned": "UNSIGNED (packet predates signatures)",
     "no_key": "NOT VERIFIED (no --public-key given)",
     "unknown_key": "NOT VERIFIED (key not provided)",
@@ -751,12 +755,54 @@ def _packet_canonical_bytes(packet: dict, *, exclude_anchor: bool = False) -> by
     return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
-def check_packet_signature(packet: dict, public_keys: dict[str, bytes]) -> tuple[str, str]:
+def _self_published_key(sig: dict) -> bytes | None:
+    """The raw public bytes the PACKET carries about itself, if any.
+
+    Schema v2 (docs/counselclear-key-durability-proposal.md §3). Accepted
+    only for the deliberately weaker `self_key` status below, and only
+    when it actually corresponds to the key_id the signature names --
+    otherwise the packet is internally inconsistent about its own key,
+    which is a mismatch, not a verification.
+    """
+    raw = sig.get("public_key")
+    if not isinstance(raw, str) or len(raw) != 64:
+        return None
+    try:
+        pub = bytes.fromhex(raw)
+    except ValueError:
+        return None
+    if _sha256(pub)[:16] != sig.get("key_id"):
+        return None
+    return pub
+
+
+def key_fingerprint(pub: bytes) -> str:
+    """sha256 of the raw public bytes, full hex -- what a recipient pins
+    out of band and passes back as --key-fingerprint."""
+    return _sha256(pub)
+
+
+def check_packet_signature(
+    packet: dict,
+    public_keys: dict[str, bytes],
+    *,
+    pinned_fingerprints: set[str] | None = None,
+) -> tuple[str, str]:
     """Returns (status, detail) where status is one of:
-      "verified"   -- the signature checks out under the key the packet names
+      "verified"   -- the signature checks out under a key the VERIFIER was
+                      given out of band, or one whose fingerprint the
+                      recipient pinned
+      "self_key"   -- the signature checks out under the key the PACKET
+                      published about itself. Mathematically sound and
+                      evidentially much weaker: anyone able to alter the
+                      packet could also have replaced that key and
+                      re-signed. Never collapsed into "verified" -- see
+                      the proposal's §1a, which exists because this is the
+                      one place the tool could produce a green check over a
+                      self-consistent forgery.
       "unsigned"   -- this packet predates signatures (a downgrade line, not
                       a failure: old packets must keep verifying)
-      "no_key"     -- signature present but --public-key wasn't given
+      "no_key"     -- signature present, no key supplied and none published
       "unknown_key"-- signature names a key_id not in the provided keys
       "mismatch"   -- the signature does not verify (tampered packet, wrong
                       key, or canonicalization drift -- all fail identically
@@ -766,7 +812,23 @@ def check_packet_signature(packet: dict, public_keys: dict[str, bytes]) -> tuple
     if not isinstance(sig, dict) or "value" not in sig:
         return "unsigned", "packet predates signatures (no signature block)"
     key_id = sig.get("key_id")
-    if not public_keys:
+    self_key = _self_published_key(sig)
+    pinned = pinned_fingerprints or set()
+
+    # Precedence is deliberate: a key the recipient supplied out of band
+    # always wins over one the packet supplied about itself. A pinned
+    # fingerprint promotes the self-published key to full verification,
+    # because the pin is the recipient's own act recorded in their own
+    # records -- the packet cannot assert it.
+    provenance = "supplied"
+    if not public_keys and self_key is not None:
+        if key_fingerprint(self_key) in pinned:
+            public_keys = {key_id: self_key}
+            provenance = "pinned"
+        else:
+            public_keys = {key_id: self_key}
+            provenance = "self"
+    elif not public_keys:
         return "no_key", "signature present but no --public-key given"
     if key_id not in public_keys:
         return "unknown_key", f"signature names key_id {key_id!r} which was not provided"
@@ -797,7 +859,25 @@ def check_packet_signature(packet: dict, public_keys: dict[str, bytes]) -> tuple
     recomputed = "sha256:" + hashlib.sha256(canonical).hexdigest()
     if declared != recomputed:
         return "mismatch", f"signed digest {declared!r} != recomputed {recomputed!r}"
-    return "verified", f"Ed25519 signature verified under key_id {key_id} (digest {recomputed})"
+    fingerprint = key_fingerprint(pub)
+    if provenance == "self":
+        return "self_key", (
+            f"Ed25519 signature checks out under the key PUBLISHED IN THIS PACKET "
+            f"(key_id {key_id}, fingerprint {fingerprint}). This confirms the packet is "
+            "internally consistent; it does NOT confirm whose key it is, because anyone "
+            "able to alter the packet could also have replaced that key. Confirm the "
+            "fingerprint with the operator out of band, then re-run with "
+            "--key-fingerprint to record that you did."
+        )
+    if provenance == "pinned":
+        return "verified", (
+            f"Ed25519 signature verified under key_id {key_id}, whose fingerprint "
+            f"{fingerprint} matches one you pinned (digest {recomputed})"
+        )
+    return "verified", (
+        f"Ed25519 signature verified under key_id {key_id} "
+        f"(fingerprint {fingerprint}, digest {recomputed})"
+    )
 
 
 # --- audit-chain cross-check (MUST-1, 2026-08-29) -----------------------------
@@ -1776,6 +1856,7 @@ def verify_release_packet(
     path: Path,
     audit_csv: Path | None = None,
     public_keys: dict[str, bytes] | None = None,
+    pinned_fingerprints: set[str] | None = None,
     tsa_certs: list[bytes] | None = None,
 ) -> VerificationReport:
     """The whole check, factored out of main() so tests (and a future
@@ -2016,7 +2097,9 @@ def verify_release_packet(
     signature_status: str | None = None
     signature_detail = ""
     if schema_ok:
-        signature_status, signature_detail = check_packet_signature(manifest, public_keys or {})
+        signature_status, signature_detail = check_packet_signature(
+            manifest, public_keys or {}, pinned_fingerprints=pinned_fingerprints
+        )
 
     # RFC 3161 TSA anchor (rfc3161-tsa): the anchor's digest must equal
     # sha256 of the packet's OWN signature value (recomputed, never
@@ -2174,6 +2257,7 @@ def verify_release_packet_and_result(
     path: Path,
     audit_csv: Path | None = None,
     public_keys: dict[str, bytes] | None = None,
+    pinned_fingerprints: set[str] | None = None,
     tsa_certs: list[bytes] | None = None,
 ) -> CombinedReport:
     """When a directory contains BOTH release_packet.json and
@@ -2187,7 +2271,13 @@ def verify_release_packet_and_result(
     audit_csv threads through to the packet verifier's chain check;
     public_keys threads through to its signature check (MUST-2);
     tsa_certs threads through to its RFC 3161 anchor check."""
-    packet_report = verify_release_packet(path, audit_csv=audit_csv, public_keys=public_keys, tsa_certs=tsa_certs)
+    packet_report = verify_release_packet(
+        path,
+        audit_csv=audit_csv,
+        public_keys=public_keys,
+        pinned_fingerprints=pinned_fingerprints,
+        tsa_certs=tsa_certs,
+    )
     result_report = verify_release_result(path)
 
     agreement: list[CrossCheck] = []
@@ -2322,6 +2412,19 @@ def main(argv: list[str] | None = None) -> int:
              " assembly fails instead of re-hashing clean",
     )
     ap.add_argument(
+        "--key-fingerprint",
+        default=None,
+        action="append",
+        dest="key_fingerprints",
+        metavar="SHA256",
+        help="a custody key fingerprint (64-char hex) you obtained from the operator "
+             "OUT OF BAND -- by phone, in an engagement letter, from a packet you "
+             "already trust. When the packet publishes its own key and that key's "
+             "fingerprint matches one of these, the signature is reported as VERIFIED "
+             "rather than as a self-published key of unconfirmed provenance. Pinning "
+             "is your act, recorded in your records; a packet can never assert it.",
+    )
+    ap.add_argument(
         "--public-key", type=Path, default=None, action="append", dest="public_key_paths",
         help="optional (repeatable): the deployment's custody public key (PEM from"
              " GET /v1/custody-public-key, or a 64-char hex string) -- verifies the"
@@ -2357,17 +2460,38 @@ def main(argv: list[str] | None = None) -> int:
     #   3. otherwise -> the full packet verifier alone.
     path = args.path
     public_keys = _load_public_keys(args.public_key_paths) if args.public_key_paths else None
+    pinned_fingerprints: set[str] = set()
+    for raw in args.key_fingerprints or []:
+        candidate = raw.strip().lower().replace(":", "")
+        if len(candidate) != 64 or any(c not in "0123456789abcdef" for c in candidate):
+            # Plain print, matching this tool's own convention (it is
+            # stdlib-only and deliberately imports no sys).
+            print(f"error: --key-fingerprint must be 64 hex characters, got {raw!r}")
+            return 2
+        pinned_fingerprints.add(candidate)
     tsa_certs = _load_tsa_certs(args.tsa_cert_paths) if args.tsa_cert_paths else None
     has_both = path.is_dir() and (path / "release_packet.json").is_file() and (path / "release_result.json").is_file()
     is_result = path.name == "release_result.json" or (
         path.is_dir() and (path / "release_result.json").is_file() and not (path / "release_packet.json").is_file()
     )
     if has_both:
-        report = verify_release_packet_and_result(path, audit_csv=args.audit_csv, public_keys=public_keys, tsa_certs=tsa_certs)
+        report = verify_release_packet_and_result(
+            path,
+            audit_csv=args.audit_csv,
+            public_keys=public_keys,
+            pinned_fingerprints=pinned_fingerprints,
+            tsa_certs=tsa_certs,
+        )
     elif is_result:
         report = verify_release_result(path)
     else:
-        report = verify_release_packet(path, audit_csv=args.audit_csv, public_keys=public_keys, tsa_certs=tsa_certs)
+        report = verify_release_packet(
+            path,
+            audit_csv=args.audit_csv,
+            public_keys=public_keys,
+            pinned_fingerprints=pinned_fingerprints,
+            tsa_certs=tsa_certs,
+        )
     if args.verify_signature:
         # Strict mode can only be satisfied by the packet verifier -- a
         # bare release_result.json is never signed (signature_ref only
@@ -2382,6 +2506,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         packet_half = report.packet if isinstance(report, CombinedReport) else report
+        # Note that "self_key" deliberately does NOT satisfy strict mode: a
+        # signature checked against a key the packet supplied about itself
+        # is not the assurance --verify-signature exists to demand. Pin the
+        # fingerprint (--key-fingerprint) or supply the key out of band.
         if packet_half.signature_status != "verified":
             packet_half.valid = False
             if packet_half.signature_status == "mismatch":
