@@ -244,6 +244,21 @@ class Release(Base):
     status: Mapped[str] = mapped_column(String(12), default="queued", index=True)
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The most recent observed outcome of anchoring a packet for this
+    # release (migration 0011). Deliberately "last_", not "anchor_": a
+    # packet is rebuilt per download and legitimately differs each time --
+    # every download is its own audited custody event, so audit_refs
+    # advances and the signature over the packet's facts follows, and the
+    # TSA token attests to THOSE signature bytes. Anchoring is therefore a
+    # fact about one download, never a stable property of the release.
+    # These columns are the read-scoped denormalization of the
+    # `bundle.anchored` audit event, which holds every observation.
+    #
+    # NULL means "no packet has been downloaded yet" -- honest ignorance,
+    # never a fabricated "unanchored".
+    last_anchor_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_anchor_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_anchor_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class AttestationUse(Base):

@@ -2258,6 +2258,25 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # releases and pre-0010 rows carry null, never a fabricated
             # link.
             "predecessor_release_id": r.predecessor_release_id,
+            # Lane E3. What anchoring did the LAST time a packet for this
+            # release was built -- deliberately not presented as a property
+            # of the release, because a packet is rebuilt per download and
+            # its TSA token attests to that download's own signature bytes.
+            #
+            # null across the board means no packet has been downloaded yet.
+            # A UI must render that as "not yet known", never as
+            # "unanchored": the difference between an unanswered question
+            # and a negative answer is the whole reason these fields exist.
+            "last_anchor": (
+                {
+                    "type": r.last_anchor_type,
+                    "at": r.last_anchor_at,
+                    "digest": r.last_anchor_digest,
+                    "externally_anchored": r.last_anchor_type == "rfc3161-tsa",
+                }
+                if r.last_anchor_type
+                else None
+            ),
         }
 
     def _legal_justifications_from_manifest(manifest: dict) -> list[dict[str, object]]:
@@ -3656,6 +3675,51 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             }
             release_packet["signature"] = sign_release_packet(cfg, release_packet)
         release_packet_bytes = json.dumps(release_packet, indent=2, sort_keys=True).encode("utf-8")
+
+        # Lane E3: record what anchoring actually did.
+        #
+        # This cannot ride on the bundle.download event above -- that row is
+        # written BEFORE the packet is assembled, because release_packet.json
+        # cites its seq, and the audit log is hash-chained, so amending a
+        # committed row is not available and would not be honest if it were.
+        # The anchoring outcome is a fact discovered afterwards, so it gets
+        # its own event.
+        #
+        # The failure case is the one that matters. When the TSA is
+        # unreachable the release still succeeds -- one retry, 5s timeout,
+        # packet issued unanchored with that fact in its own anchor field --
+        # which is correct, because a release must never block on a third
+        # party. But until now the ONLY record of it lived in the packet the
+        # recipient holds: the operator's own log said a bundle was
+        # downloaded and nothing about whether the timestamp they believe
+        # they are getting was obtained.
+        final_anchor = release_packet["anchor"]
+        anchored_at = datetime.now(UTC).isoformat(timespec="seconds")
+        append_event(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            action="bundle.anchored",
+            payload={
+                "job_id": job.id,
+                "anchor_type": final_anchor["type"],
+                "anchor_digest": final_anchor.get("digest"),
+                # True only for an independent timestamp. An
+                # ed25519-operator anchor is this system signing its own
+                # output, which is not what "externally anchored" means.
+                "externally_anchored": final_anchor["type"] == "rfc3161-tsa",
+                # Distinguishes "we never asked" from "we asked and did not
+                # get one" -- the second is a third-party outage worth
+                # noticing across many releases, the first is configuration.
+                "anchoring_requested": anchor_enabled(),
+                "bundle_download_seq": bundle_event.seq,
+            },
+        )
+        if release is not None:
+            release.last_anchor_type = final_anchor["type"]
+            release.last_anchor_at = anchored_at
+            release.last_anchor_digest = final_anchor.get("digest")
+            s.commit()
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
