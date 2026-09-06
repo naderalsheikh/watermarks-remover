@@ -821,6 +821,35 @@ _PDF_UNSTRIPPABLE_SUBTYPES = (
 # and web/app/matters/job/page.tsx's copy of the same string in sync.
 PDF_CONTENT_REFUSAL_MARKER = "pdf content removal not implemented"
 
+# ODF (ODT/ODS/ODP) subtypes the engine cannot honestly act on. The generic
+# ODF cleaner (container_meta.clean_odt, shared by all three via the "odt"
+# sniff) drops AI/C2PA-marked parts and meta:generator, and Layer-A scrubs
+# visible paragraph text -- and nothing else. It has no inspector and no
+# remover for office:annotation, text:tracked-changes / text:change,
+# embedded objects, hyperlink-based external links, or non-AI dc:creator
+# authoring fields, so every action below would either silently no-op or
+# silently partial-strip while the record claimed a clean result. This
+# names what the engine can't do, not which single action value triggers
+# the check (same shape as _PDF_UNSTRIPPABLE_SUBTYPES; build an ODF
+# inspector/cleaner and this list shrinks to what is really implemented).
+_ODF_UNSTRIPPABLE_SUBTYPES = (
+    "authoring_props",
+    "comments_and_notes",
+    "tracked_changes",
+    "hidden_text",
+    "embeddings_ole",
+    "external_links",
+)
+
+# Stable, greppable marker distinguishing "the engine has no ODF
+# implementation for this yet" from a deliberate policy refusal, matched by
+# string for the same reason as PDF_CONTENT_REFUSAL_MARKER above (job.error
+# is a plain string all the way through the worker subprocess boundary) --
+# and for the same reason kept distinct from it: the frontend's capability
+# copy is PDF-specific, and one shared marker would make an ODF refusal
+# print PDF advice.
+ODF_CONTENT_REFUSAL_MARKER = "ODF content removal not implemented"
+
 
 def _apply_pdf(
     data: bytes, plan: ActionPlan, a: dict[str, str]
@@ -1228,6 +1257,46 @@ def _apply_actions_impl(data: bytes, plan: ActionPlan) -> tuple[bytes, list[Acti
         mutating = any(v in ("strip", "accept_all", "sanitize") for v in a.values())
         if not mutating:
             return data, [ActionRecord("file_metadata", "keep", f"{fmt} unchanged")]
+        if fmt == "odt":
+            # ODF (ODT/ODS/ODP -- .ods/.odp have no extension row of their
+            # own and sniff as "odt" here, same generic package shape): the
+            # generic cleaner below leaves comments, tracked changes,
+            # annotations, embedded objects, external links and non-AI
+            # authoring fields verbatim (see _ODF_UNSTRIPPABLE_SUBTYPES),
+            # while the resolved policy rows for this plan demand exactly
+            # those removals. Emitting the old single "sharing-clean
+            # executed" ActionRecord would claim a clean result the code
+            # never earned, so refuse -- no derivative, no packet, the job
+            # dies at plan-apply time exactly like a PDF refusal.
+            #
+            # Presence is not consulted (no plan.present_subtypes check,
+            # unlike _apply_pdf): the ODF inspector enumerates none of
+            # this content, so "not seen" means nothing and a presence-
+            # gated refusal would silently ship unremovable content the
+            # moment an inspector is added without this gate noticing.
+            # "refuse" is checked alongside the removal actions for the
+            # same reason _apply_pdf checks strip alongside refuse: the
+            # engine's inability doesn't depend on which label the policy
+            # row carries. strip_listed (privacy_only's authoring_props
+            # value) is deliberately NOT a demand: privacy_only isn't an
+            # outward-facing release path, its remaining demands are all
+            # keep, and the generic cleaner's generator/AI-marker scrub is
+            # still honest for it.
+            demanded = sorted(
+                st
+                for st in _ODF_UNSTRIPPABLE_SUBTYPES
+                if a.get(st) in ("strip", "sanitize", "accept_all", "refuse")
+            )
+            if demanded:
+                labels = ", ".join(SUBTYPE_LABELS.get(st, st) for st in demanded)
+                raise PolicyError(
+                    f"{ODF_CONTENT_REFUSAL_MARKER}: this policy requires removing {labels} "
+                    "from this ODF document (ODT/ODS/ODP), but no ODF inspector or "
+                    "cleaner for that content exists in this build (the generic ODF "
+                    "clean touches only AI/C2PA markers, meta:generator and "
+                    "invisible body text); no derivative was produced rather than "
+                    "releasing a partial result"
+                )
         with tempfile.TemporaryDirectory(prefix="wm-policy-") as tmp:
             tmpdir = Path(tmp)
             src = tmpdir / f"in.{fmt}"
