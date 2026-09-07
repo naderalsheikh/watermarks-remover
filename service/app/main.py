@@ -3968,9 +3968,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         user: str = Depends(principal),
         s: Session = Depends(db_session),
     ):
-        """FRCP 26(b)(5)(A) and FRE 502 compliant privilege log export.
+        """Privilege-log export: this matter's releases as CSV or JSON.
 
-        Aggregates all releases in the matter into an e-discovery privilege log.
+        The column set is shaped for an FRCP 26(b)(5)(A) privilege log, but
+        this endpoint asserts no compliance conclusion. Whether a log
+        satisfies Rule 26(b)(5)(A) or FRE 502 turns on the completeness and
+        adequacy of its content -- a judgement counsel makes about a
+        specific production, not a property this code enforces or tests.
+        It exports what the custody record already holds; it does not
+        certify that what the record holds is sufficient.
+
         Captures document identity, source/derivative cryptographic digests,
         release status and timestamps, specific finding categories withheld
         or retained, the legal withholding basis from the approved 9-term
