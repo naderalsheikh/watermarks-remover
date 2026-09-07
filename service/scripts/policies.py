@@ -75,6 +75,17 @@ ACTIONS = frozenset(
 LEGAL_JUSTIFICATION_BASES = frozenset(
     {
         "unspecified",
+        # Approved 9-term ballot (docs/legal-panel/WITHHOLDING_BASIS_BALLOT.md)
+        "attorney_client_privilege",
+        "work_product_protection",
+        "confidentiality_obligation",
+        "trade_secret_or_proprietary",
+        "privacy_or_data_protection",
+        "outside_agreed_scope",
+        "court_or_government_order",
+        "legal_or_regulatory_restriction",
+        "other",
+        # Legacy values retained for backwards compatibility
         "privilege",
         "work_product",
         "pii_confidentiality",
@@ -83,7 +94,6 @@ LEGAL_JUSTIFICATION_BASES = frozenset(
         "client_instruction",
         "litigation_hold",
         "gdpr_access",
-        "other",
     }
 )
 
@@ -440,6 +450,10 @@ def _normalize_legal_justifications(raw: Any) -> dict[str, dict[str, str]]:
             note = ""
         if not isinstance(note, str):
             raise PolicyError(f"legal_justification note for {st} must be a string")
+        if basis == "other" and not note.strip():
+            raise PolicyError(
+                f"legal_justification for {st} with basis 'other' requires an explanatory note"
+            )
         out[st] = {"basis": basis, "note": note[:1000]}
     return out
 

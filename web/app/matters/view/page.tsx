@@ -104,6 +104,7 @@ function ReleasePanel({
   const [purpose, setPurpose] = useState("");
   const [intendedExternal, setIntendedExternal] = useState(true);
   const [attest, setAttest] = useState(false);
+  const [signatureJustification, setSignatureJustification] = useState("");
   const [noDecisionAck, setNoDecisionAck] = useState(false);
   const [decisions, setDecisions] = useState<Record<string, "approve" | "keep">>({});
   // Per-kept-subtype legal basis + note (the PR 55/58 chain reaching the
@@ -136,6 +137,10 @@ function ReleasePanel({
   const { hasPerFindingReview, needsFallbackGate, approveSubtypeCounts, approveSubtypes } =
     computeProductionReviewState(isProduction, !!latestInspectJob, inspectQ);
 
+  const hasMissingOtherNote = Object.entries(bases).some(([st, row]) => {
+    return (decisions[st] ?? "keep") === "keep" && row.basis === "other" && !row.note.trim();
+  });
+
   async function submit() {
     setSubmitting(true);
     setSubmitError(null);
@@ -149,6 +154,12 @@ function ReleasePanel({
       // (nothing picked) omits the field entirely: a release with no
       // supplied basis is fully valid, never gated.
       const legal_justifications = buildLegalJustifications(decisions, bases);
+      const trimmedJustification = signatureJustification.trim();
+      const finalPurpose =
+        attest && trimmedJustification
+          ? (purpose.trim() ? `${purpose.trim()} · ` : "") +
+            `Signature attestation: ${trimmedJustification}`
+          : purpose;
       await api.post<ReleaseCreateResponse>(`/v1/matters/${matterId}/documents/${docId}/releases`, {
         profile_id: profileId,
         recipient_type: recipientType,
@@ -158,8 +169,8 @@ function ReleasePanel({
         // Release.purpose, new in PR 39) -- keeping them as separate
         // inputs here would be two near-duplicate text boxes for
         // something the operator experiences as one question ("why").
-        reason: purpose,
-        purpose,
+        reason: finalPurpose,
+        purpose: finalPurpose,
         intended_external: intendedExternal,
         signature_break_attestation: attest,
         ...(finding_decisions ? { finding_decisions } : {}),
@@ -290,6 +301,7 @@ function ReleasePanel({
                       onChange={(e) =>
                         setDecisions((d) => ({ ...d, [st]: e.target.value as "approve" | "keep" }))
                       }
+                      aria-label={`Decision for ${subtypeLabel(st)}`}
                       className="rounded border border-border bg-transparent px-1.5 py-1 text-xs focus-visible:border-accent"
                     >
                       <option value="keep">Keep</option>
@@ -329,9 +341,11 @@ function ReleasePanel({
                             [st]: { basis, note: e.target.value },
                           }))
                         }
-                        placeholder="Basis note (optional)"
+                        placeholder={basis === "other" ? "Basis note (required for 'Other')" : "Basis note (optional)"}
                         aria-label={`Basis note for kept ${subtypeLabel(st)}`}
-                        className="rounded border border-border bg-transparent px-1.5 py-1 text-xs focus-visible:border-accent"
+                        className={`rounded border bg-transparent px-1.5 py-1 text-xs focus-visible:border-accent ${
+                          basis === "other" && !note.trim() ? "border-amber-500/60 focus-visible:border-amber-500" : "border-border"
+                        }`}
                       />
                     </div>
                   )}
@@ -397,17 +411,54 @@ function ReleasePanel({
             packet itself, which is the only place that answer is authoritative — this screen
             cannot know it yet.
           </p>
-          <label className="mt-2 flex items-center gap-2">
-            <input type="checkbox" checked={attest} onChange={(e) => setAttest(e.target.checked)} />
+          <label className="mt-2 flex items-center gap-2 font-medium text-amber-800 dark:text-amber-300">
+            <input
+              type="checkbox"
+              checked={attest}
+              onChange={(e) => {
+                setAttest(e.target.checked);
+                if (!e.target.checked) setSignatureJustification("");
+              }}
+            />
             I attest to breaking a digital signature, if this document has one
           </label>
+          {attest && (
+            <div className="mt-2 space-y-1.5 rounded border border-amber-600/30 bg-amber-600/5 p-2.5">
+              <label className="block text-xs font-medium text-foreground">
+                Attestation rationale & authority (required)
+              </label>
+              <textarea
+                value={signatureJustification}
+                onChange={(e) => setSignatureJustification(e.target.value)}
+                rows={2}
+                placeholder="e.g. Authorizing partner: J. Doe. Signed original held in escrow; releasing redacted copy under Protective Order."
+                aria-label="Signature break attestation rationale"
+                className="w-full rounded border border-border bg-transparent p-1.5 text-xs focus-visible:border-accent"
+              />
+              <p className="text-[11px] text-muted">
+                <strong>Evidentiary note:</strong> Recorded in the release packet as the operator&apos;s
+                attestation. It does not constitute a legal determination by CounselClear.
+              </p>
+            </div>
+          )}
         </details>
+      )}
+      {hasMissingOtherNote && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          An explanatory note is required when asserting &apos;Other&apos; as a withholding basis.
+        </p>
       )}
       {submitError && <p className="text-xs text-red-600">{submitError}</p>}
       <div className="flex gap-2">
         <button
           onClick={submit}
-          disabled={submitting || !profileId || (needsFallbackGate && !noDecisionAck)}
+          disabled={
+            submitting ||
+            !profileId ||
+            (needsFallbackGate && !noDecisionAck) ||
+            (attest && !signatureJustification.trim()) ||
+            hasMissingOtherNote
+          }
           className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
           {submitting ? "Starting…" : "Prepare release packet"}
@@ -1187,6 +1238,7 @@ function MatterView({
           ref={fileInput}
           type="file"
           required
+          aria-label="Upload document to matter"
           disabled={!uploadGate.allowed}
           className="min-w-0 flex-1 text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-transparent file:px-3 file:py-1.5 file:text-sm disabled:opacity-50"
         />

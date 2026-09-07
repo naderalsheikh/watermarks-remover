@@ -247,3 +247,40 @@ def test_verifier_required_fields_track_published_schemas():
     assert set(verifier.REQUIRED_RELEASE_RESULT_FIELDS) == set(
         _schema("release_result.schema.json")["required"]
     )
+
+
+def test_all_ballot_terms_validate_against_artifact_schemas():
+    from policies import LEGAL_JUSTIFICATION_BASES
+
+    sample_finding = {
+        "finding_id": "f_0123456789abcdef",
+        "category": "revision_history",
+        "subtype": "comments_and_notes",
+        "format": "docx",
+        "location": {"pane": "comment"},
+        "action_recommended": "flag",
+        "action_allowed_by_policy": ["keep", "strip", "flag"],
+        "content_visible": True,
+        "risk_level": "high",
+        "confidence": "confirmed",
+        "removal_changes_visible_content": False,
+        "legal_justification": {"basis": "unspecified", "note": "Test note"},
+    }
+    for schema_name in (
+        "finding.schema.json",
+        "release_packet.schema.json",
+        "release_result.schema.json",
+        "manifest.schema.json",
+        "report.schema.json",
+    ):
+        schema = _schema(schema_name)
+        if "$defs" in schema and "legal_justification" in schema["$defs"]:
+            allowed_bases = set(schema["$defs"]["legal_justification"]["properties"]["basis"]["enum"])
+        elif "properties" in schema and "legal_justification" in schema["properties"]:
+            allowed_bases = set(
+                schema["properties"]["legal_justification"]["oneOf"][1]["properties"]["basis"]["enum"]
+            )
+        else:
+            raise ValueError(f"Could not locate legal_justification in {schema_name}")
+        for basis in LEGAL_JUSTIFICATION_BASES:
+            assert basis in allowed_bases, f"Basis {basis} missing from {schema_name}"

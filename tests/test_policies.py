@@ -432,6 +432,26 @@ def test_policy_rejects_invalid_legal_justification_payloads():
             "production",
             legal_justifications={"comments_and_notes": {"basis": "because_i_said_so"}},
         )
+    with pytest.raises(PolicyError, match="requires an explanatory note"):
+        plan_actions(
+            res,
+            "production",
+            legal_justifications={"comments_and_notes": {"basis": "other", "note": ""}},
+        )
+    with pytest.raises(PolicyError, match="requires an explanatory note"):
+        plan_actions(
+            res,
+            "production",
+            legal_justifications={"comments_and_notes": {"basis": "other"}},
+        )
+    plan_with_other = plan_actions(
+        res,
+        "production",
+        decisions={"comments_and_notes": "keep", "tracked_changes": "approve"},
+        legal_justifications={"comments_and_notes": {"basis": "other", "note": "Court protective order clause 4"}},
+    )
+    assert plan_with_other.actions["comments_and_notes"]["legal_justification"]["basis"] == "other"
+    assert plan_with_other.actions["comments_and_notes"]["legal_justification"]["note"] == "Court protective order clause 4"
 
 
 def test_apply_sharing_docx_strips_everything():
