@@ -850,7 +850,287 @@ def test_main_verifies_both_artifacts_when_both_present(tmp_path, capsys):
     assert "Agreement between release_packet.json and release_result.json" in text
 
 
-# --- doctrine guard: no engine/app dependency -----------------------------------
+# --- closed packet membership: an undeclared extra file fails -----------------
+
+
+def test_extra_undeclared_file_fails_verification_and_is_named(tmp_path):
+    """THE regression for closed packet membership: adding an undeclared
+    file (a second document, e.g. derivative/SECRET-second-document.docx)
+    to an otherwise-valid packet must fail verification, with the
+    undeclared path named in the report. The declared-name/hash checks
+    alone pass here -- every declared file is intact -- so without the
+    membership closure this packet verified and the extra filename
+    appeared nowhere in the report."""
+    files = _packet_files()
+    files["derivative/SECRET-second-document.docx"] = b"an undeclared second document"
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid, report.to_text()
+    text = report.to_text()
+    assert "derivative/SECRET-second-document.docx" in text
+    assert "undeclared file" in text
+    # The membership failure is its own named file check...
+    membership = next(fc for fc in report.file_checks if fc.name == "packet membership")
+    assert membership.status == "mismatch"
+    assert "derivative/SECRET-second-document.docx" in membership.detail
+    # ...and nothing else regressed: every declared file still matches.
+    assert all(fc.status == "match" for fc in report.file_checks if fc.name != "packet membership")
+
+
+def test_extra_undeclared_file_at_top_level_fails(tmp_path):
+    files = _packet_files()
+    files["SECRET-second-document.docx"] = b"undeclared, top level"
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files, name="packet.zip"))
+    assert not report.valid
+    assert "SECRET-second-document.docx" in report.to_text()
+
+
+def test_extra_undeclared_file_in_zip_fails(tmp_path):
+    """The reproduction from the custody review: the packet travels as a
+    .zip (the shape a recipient downloads), and the smuggled file rides
+    in the archive itself."""
+    files = _packet_files()
+    files["derivative/SECRET-second-document.docx"] = b"smuggled into the zip"
+    zip_path = _write_zip(tmp_path, files, name="packet.zip")
+    report = verifier.verify_release_packet(zip_path)
+    assert not report.valid, report.to_text()
+    assert "derivative/SECRET-second-document.docx" in report.to_text()
+
+
+def test_extra_undeclared_file_fails_even_when_signature_and_hashes_are_redone(tmp_path):
+    """The adversarial version: the extra file is added AND the packet is
+    made fully self-consistent about it -- hashes re-declared, signature
+    recomputed under the operator's key. Membership is still closed: no
+    amount of internal consistency turns an undeclared file into a
+    declared one, because release_packet.json has no field that could
+    declare it."""
+    files = _packet_files()
+    files["derivative/SECRET-second-document.docx"] = b"an undeclared second document"
+    files, keys = _sign_packet_files(files, _ed25519())
+    report = verifier.verify_release_packet(_write_dir(tmp_path, files), public_keys=keys)
+    assert not report.valid
+    assert report.signature_status == "verified"  # the signature itself checks out
+    assert "derivative/SECRET-second-document.docx" in report.to_text()
+
+
+def test_a_second_derivative_under_a_made_up_hash_key_is_undeclared(tmp_path):
+    """The closure derives the allowed set from what the verifier actually
+    READS out of the packet: the schema gives hashes.derivative one
+    filename slot, so a second derivative parked under a made-up hash key
+    (derivative_extra, derivative2, ...) is still undeclared -- the
+    verifier has no contract to compare it against, and a packet is only
+    as closed as the declarations it can parse. A second derivative can
+    only ever be smuggled by EDITING release_packet.json, which is
+    exactly what the MUST-2 signature binds: the second half of the
+    answer."""
+    files = _packet_files()
+    extra = b"declared second derivative"
+    packet = json.loads(files["release_packet.json"])
+    packet["hashes"]["derivative_extra"] = {
+        "filename": "second-document.docx",
+        "sha256": _sha256(extra),
+    }
+    files["derivative/second-document.docx"] = extra
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+    report = verifier.verify_release_packet(_write_dir(tmp_path, files))
+    assert not report.valid
+    assert "derivative/second-document.docx" in report.to_text()
+
+    # The same edit made AFTER signing is caught by the signature: the
+    # declared set is bound by the operator's key, which is what stops an
+    # attacker from renaming a smuggled file into a declared one.
+    signed_files, keys = _sign_packet_files(_packet_files(), _ed25519())
+    packet = json.loads(signed_files["release_packet.json"])
+    packet["hashes"]["derivative_extra"] = {
+        "filename": "second-document.docx",
+        "sha256": _sha256(extra),
+    }
+    signed_files["derivative/second-document.docx"] = extra
+    signed_files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+    report = verifier.verify_release_packet(
+        _write_dir(tmp_path / "s", signed_files), public_keys=keys
+    )
+    assert not report.valid
+    assert report.signature_status == "mismatch"
+
+
+def test_a_legitimate_packet_still_verifies_with_closure(tmp_path):
+    """Closure must not break a legitimate packet: the structural members,
+    the declared derivative, and an included original/ are exactly the
+    allowed set -- no more, no less."""
+    original_bytes = b"the untouched original document bytes"
+    files = _packet_files(original_sha256=_sha256(original_bytes))
+    files["original/input.docx"] = original_bytes
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert report.valid, report.to_text()
+    assert not any(fc.name == "packet membership" for fc in report.file_checks)
+
+
+def test_missing_sibling_does_not_double_report_as_undeclared(tmp_path):
+    """A packet MISSING a structural file reports exactly one defect (the
+    missing file), not a second confusing 'undeclared file' error -- the
+    allowed set is derived from what the packet format requires, not
+    from what happens to be present."""
+    files = _packet_files()
+    del files["README.txt"]
+    dir_path = _write_dir(tmp_path, files)
+    report = verifier.verify_release_packet(dir_path)
+    assert not report.valid
+    assert not any("undeclared file" in e for e in report.errors)
+    readme_check = next(fc for fc in report.file_checks if fc.name == "README.txt")
+    assert readme_check.status == "missing"
+
+
+def test_combined_directory_with_release_result_still_verifies(tmp_path):
+    """A done-release directory carrying release_result.json next to the
+    packet (the Airlock CLI's own output layout, PR 43) is a legitimate
+    structural shape -- release_result.json is an envelope member when
+    present, not an undeclared extra. The CLI's AIRLOCK_RESULT.json rides
+    the same layout."""
+    files = _packet_files(release_id="REL1", status="done")
+    out = _write_dir(tmp_path, files)
+    packet = json.loads((out / "release_packet.json").read_text())
+    result = _matching_result_for(packet, files)
+    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "AIRLOCK_RESULT.json").write_text(json.dumps({"status": "done"}, indent=2))
+    report = verifier.verify_release_packet_and_result(out)
+    assert report.valid, report.to_text()
+    assert not any(fc.name == "packet membership" for fc in report.packet.file_checks)
+
+
+# --- audit_refs cross-checked against the exported chain (--audit-csv) ---------
+
+
+def test_audit_refs_match_chain_rows(tmp_path):
+    """audit_refs' seq numbers resolve in the exported chain and name the
+    events their field names claim: bundle_download_seq -> bundle.download,
+    certificate_issued_seq -> certificate.issued. Reported as explicit
+    matches, not left as declared-only facts."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    chain = _chain_csv(
+        [
+            {"action": "document.upload", "actor_id": "operator",
+             "payload": {"document_id": "DOC1"}},
+            {"action": "bundle.download", "actor_id": "operator",
+             "payload": {"job_id": "JOB1", "include_original": False}},
+            {"action": "certificate.issued", "actor_id": "operator",
+             "payload": {"job_id": "JOB1", "document_id": "DOC1"}},
+            {"action": "job.sanitize", "actor_id": "operator",
+             "payload": {"job_id": "JOB1", "document_id": "DOC1",
+                         "status": "done", "verification_pass": True,
+                         "no_decision_count": 0,
+                         "manifest_sha256": packet["hashes"]["manifest_json_sha256"],
+                         "derivative_sha256": packet["hashes"]["derivative"]["sha256"]}},
+        ],
+        tmp_path,
+    )
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert report.valid, report.to_text()
+    refs = {cc.name: cc for cc in report.chain_hash_checks if cc.name.startswith("audit_refs")}
+    assert refs["audit_refs.bundle_download_seq vs audit chain"].status == "match"
+    assert refs["audit_refs.certificate_issued_seq vs audit chain"].status == "match"
+
+
+def test_audit_refs_seq_pointing_at_wrong_event_fails(tmp_path):
+    """A declared seq that EXISTS in the chain but names a different event
+    -- the packet's reference edited, or the packet assembled from
+    another matter's chain -- is a real mismatch, named per key."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    chain = _chain_csv(
+        [
+            {"action": "document.upload", "actor_id": "operator",
+             "payload": {"document_id": "DOC1"}},
+            {"action": "batch.created", "actor_id": "operator",
+             "payload": {"batch_id": "B1", "kind": "sanitize", "total": 1}},
+            {"action": "job.sanitize", "actor_id": "operator",
+             "payload": {"job_id": "JOB1", "document_id": "DOC1",
+                         "status": "done", "verification_pass": True,
+                         "no_decision_count": 0,
+                         "manifest_sha256": packet["hashes"]["manifest_json_sha256"],
+                         "derivative_sha256": packet["hashes"]["derivative"]["sha256"]}},
+        ],
+        tmp_path,
+    )
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert not report.valid
+    refs = {cc.name: cc for cc in report.chain_hash_checks if cc.name.startswith("audit_refs")}
+    assert refs["audit_refs.bundle_download_seq vs audit chain"].status == "mismatch"
+    assert "batch.created" in refs["audit_refs.bundle_download_seq vs audit chain"].detail
+    assert "bundle.download" in refs["audit_refs.bundle_download_seq vs audit chain"].detail
+    text = report.to_text()
+    assert "chain cross-check FAILED" in text
+
+
+def test_audit_refs_seq_absent_from_chain_fails(tmp_path):
+    """A declared seq outside the exported chain altogether: the refs cite
+    a chain this export is not."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    packet["audit_refs"] = {"bundle_download_seq": 99, "certificate_issued_seq": 100}
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+    chain = _chain_csv(
+        _chain_events_for_packet(
+            files, packet["hashes"]["manifest_json_sha256"],
+            packet["hashes"]["derivative"]["sha256"],
+        ),
+        tmp_path,
+    )
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert not report.valid
+    refs = {cc.name: cc for cc in report.chain_hash_checks if cc.name.startswith("audit_refs")}
+    assert refs["audit_refs.bundle_download_seq vs audit chain"].status == "mismatch"
+    assert "not present in the exported audit chain" in \
+        refs["audit_refs.bundle_download_seq vs audit chain"].detail
+
+
+def test_audit_refs_null_stays_uncheckable_not_a_failure(tmp_path):
+    """audit_refs declared but null (a legacy/pre-schema packet shape the
+    required field still allows): no refs checks can be built against
+    nulls -- 'unavailable' by absence of values, never a failure,
+    matching how every other additive field is treated."""
+    files = _packet_files()
+    packet = json.loads(files["release_packet.json"])
+    packet["audit_refs"] = None
+    files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
+    chain = _chain_csv(
+        _chain_events_for_packet(
+            files, packet["hashes"]["manifest_json_sha256"],
+            packet["hashes"]["derivative"]["sha256"],
+        ),
+        tmp_path,
+    )
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert report.valid, report.to_text()
+    assert not any(cc.name.startswith("audit_refs") for cc in report.chain_hash_checks)
+
+
+def test_audit_refs_checked_even_when_event_not_found(tmp_path):
+    """A chain that never saw this job fails on the missing event already;
+    the refs checks still run and are still reported -- the packet's refs
+    do not resolve in a chain that never recorded it, and that finding
+    must not vanish behind the missing-event error."""
+    files = _packet_files()
+    chain = _chain_csv(
+        [
+            {"action": "document.upload", "actor_id": "operator",
+             "payload": {"document_id": "OTHER"}},
+            {"action": "bundle.download", "actor_id": "operator",
+             "payload": {"job_id": "OTHER"}},
+        ],
+        tmp_path,
+    )
+    report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
+    assert not report.valid
+    assert not report.audit_chain.event_found
+    refs = {cc.name: cc for cc in report.chain_hash_checks if cc.name.startswith("audit_refs")}
+    assert refs["audit_refs.bundle_download_seq vs audit chain"].status == "match"
+    assert refs["audit_refs.certificate_issued_seq vs audit chain"].status == "mismatch"
+
+
+
 
 
 def test_verifier_never_imports_the_engine_or_app_internals():
@@ -903,9 +1183,19 @@ def _chain_csv(events: list[dict], tmp_path: Path, name: str = "audit.csv") -> P
 
 def _chain_events_for_packet(packet_files: dict[bytes], manifest_sha: str, deriv_sha: str,
                             job_id: str = "JOB1") -> list[dict]:
+    """A realistic matter chain for a pulled packet: the packet's own
+    audit_refs (bundle_download_seq=1, certificate_issued_seq=2 in the
+    _packet_files fixture) cite bundle.download/certificate.issued rows,
+    which job_bundle appends for every real packet -- so the synthetic
+    chain carries them at those seqs, the way a real export always does."""
     return [
         {"action": "document.upload", "actor_id": "operator",
          "payload": {"document_id": "DOC1"}},
+        {"action": "bundle.download", "actor_id": "operator",
+         "payload": {"job_id": job_id, "include_original": False}},
+        {"action": "certificate.issued", "actor_id": "operator",
+         "payload": {"job_id": job_id, "document_id": "DOC1", "kind": "sanitize",
+                     "policy_id": "external_sharing", "status": "done"}},
         {"action": "job.sanitize", "actor_id": "operator",
          "payload": {"job_id": job_id, "document_id": "DOC1", "policy_id": "external_sharing",
                      "status": "done", "verification_pass": True, "no_decision_count": 0,
@@ -989,7 +1279,7 @@ def test_audit_chain_detects_a_tampered_chain_row(tmp_path):
     report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
     assert not report.valid
     assert report.audit_chain is not None and not report.audit_chain.chain_ok
-    assert "hash mismatch at seq 1" in report.audit_chain.chain_detail
+    assert "hash mismatch at seq 3" in report.audit_chain.chain_detail
     assert "chain row hashes recomputed: FAILED" in report.to_text()
 
 

@@ -4,7 +4,10 @@
 Offline, stdlib-only, no engine/app dependency: recomputes every content
 hash a manifest declares against the bytes actually present, checks
 required fields, cross-checks a few identifiers between JSON documents
-where practical, and reports plainly what it could and could not verify
+where practical, verifies CLOSED PACKET MEMBERSHIP (every file in the
+archive must be declared by the packet's own manifest/structure -- an
+undeclared extra file fails, with the path named), and reports plainly
+what it could and could not verify
 -- most importantly, what binds a packet beyond its own claims: an
 exported audit chain (--audit-csv) and an Ed25519 custody signature
 (--public-key), both optional, both reported honestly when absent.
@@ -151,6 +154,25 @@ _FALLBACK_RELEASE_PACKET_FIELDS = (
 )
 
 REQUIRED_SIBLING_FILES = ("manifest.json", "report.json", "certificate.html", "README.txt")
+
+# Closed membership (2026-09-06): these structural members are part of
+# the packet format itself and need no per-packet declaration. Everything
+# else in the archive must be claimed by the packet's OWN declared
+# contents -- the derivative filename (nested under derivative/ or flat),
+# or an original/ member for an include_original packet (whose count and
+# bytes are cross-checked against original_sha256). Anything else fails
+# verification with the undeclared path named in the report.
+_PACKET_STRUCTURE_MEMBERS = frozenset(
+    {"release_packet.json", "manifest.json", "report.json", "certificate.html", "README.txt"}
+)
+# Envelope members of the two legitimate extraction layouts, structural
+# for exactly the same reason: a directory extracted from a combined
+# done-release output additionally carries release_result.json
+# (verify_release_packet_and_result verifies it as its own artifact), and
+# the Airlock CLI's own output directory (PR 43, deliberately kept
+# "a complete, self-verifying packet on its own") carries the CLI's
+# AIRLOCK_RESULT.json result record next to the extracted packet.
+_PACKET_ENVELOPE_MEMBERS = frozenset({"release_result.json", "AIRLOCK_RESULT.json"})
 
 
 def _published_schema_sha256(schema_name: str, version: int | None = None) -> str | None:
@@ -1012,24 +1034,34 @@ def _verify_audit_chain_rows(rows: list[dict]) -> tuple[bool, str]:
     return True, f"{len(rows)} events intact"
 
 
-def cross_check_audit_chain(csv_path: Path, packet_manifest: dict) -> AuditChainCheck:
+def cross_check_audit_chain(
+    csv_path: Path, packet_manifest: dict
+) -> tuple[AuditChainCheck, list[CrossCheck]]:
     """The --audit-csv check proper: verify the exported chain
-    independently, find THIS job's job.sanitize event, and pull the
-    chain-committed hashes out of it. The comparison against the
-    packet's declared hashes happens in verify_release_packet, which
-    owns the packet's file_checks/cross_checks so the two sides render
-    in one report."""
+    independently, find THIS job's job.sanitize event, pull the
+    chain-committed hashes out of it, and cross-check the packet's own
+    audit_refs seq numbers against the chain rows (an audit_refs entry
+    whose seq exists but names a different event -- or whose seq falls
+    outside the exported chain -- means this packet does not belong to
+    the chain it was checked against, or its references were edited).
+    The comparison against the packet's declared file hashes happens in
+    verify_release_packet, which owns the packet's file_checks/
+    cross_checks so the two sides render in one report. Returns
+    (check, refs_checks): refs_checks are rendered alongside the other
+    chain cross-checks and feed the packet verdict the same way."""
     job_id = packet_manifest.get("job_id")
+    packet_audit_refs = packet_manifest.get("audit_refs")
     check = AuditChainCheck(provided=True, job_id=job_id)
     rows, fatal = _load_audit_chain(csv_path)
     if fatal:
         check.errors.append(fatal)
-        return check
+        return check, []
     check.chain_ok, check.chain_detail = _verify_audit_chain_rows(rows)
     if not check.chain_ok:
         check.errors.append(
             "exported audit chain failed independent verification -- every row below is untrusted"
         )
+    refs_checks = _cross_check_audit_refs(packet_audit_refs, rows)
     events = [
         r for r in rows
         if r["action"] == "job.sanitize" and (r["payload"] or {}).get("job_id") == job_id
@@ -1039,12 +1071,71 @@ def cross_check_audit_chain(csv_path: Path, packet_manifest: dict) -> AuditChain
             "no job.sanitize event for this packet's job_id in the exported chain"
             " -- the packet cannot be checked against a chain that never saw it"
         )
-        return check
+        return check, refs_checks
     check.event_found = True
     payload = events[-1]["payload"]
     check.manifest_sha256 = payload.get("manifest_sha256")
     check.derivative_sha256 = payload.get("derivative_sha256")
-    return check
+    return check, refs_checks
+
+
+# The packet's audit_refs field -> the audit-chain action the seq number
+# must name, for a release packet (release_result.json's variant keys are
+# not compared here -- the result artifact is never checked with
+# --audit-csv; it carries no manifest/derivative hashes to bind).
+_PACKET_AUDIT_REF_KEYS = (
+    "bundle_download_seq",
+    "certificate_issued_seq",
+)
+
+
+def _cross_check_audit_refs(packet_audit_refs: object, rows: list[dict]) -> list[CrossCheck]:
+    """audit_refs vs the exported chain: every declared seq must exist in
+    the chain AND name the event type that field's meaning claims. A
+    seq pointing at a different event is a real MISMATCH (this packet's
+    references disagree with the chain it was handed with); a seq
+    outside the chain is a mismatch too -- the refs cite a chain this
+    export is not. Declared-but-absent seq values are 'unavailable'
+    (legacy/pre-schema packets), never a failure; undeclared keys are
+    the schema's additionalProperties and stay uncheckable here."""
+    if not isinstance(packet_audit_refs, dict) or not packet_audit_refs:
+        return []
+    by_seq = {r["seq"]: r for r in rows}
+    checks: list[CrossCheck] = []
+    for key in _PACKET_AUDIT_REF_KEYS:
+        if key not in packet_audit_refs:
+            continue
+        declared = packet_audit_refs[key]
+        if declared is None:
+            checks.append(
+                CrossCheck(
+                    f"audit_refs.{key} vs audit chain", "unavailable",
+                    "declared as null in release_packet.json",
+                )
+            )
+            continue
+        expected_action = {"bundle_download_seq": "bundle.download",
+                           "certificate_issued_seq": "certificate.issued"}[key]
+        row = by_seq.get(declared) if isinstance(declared, int) and not isinstance(declared, bool) else None
+        if row is None:
+            checks.append(
+                CrossCheck(
+                    f"audit_refs.{key} vs audit chain", "mismatch",
+                    f"declared seq {declared} is not present in the exported audit chain"
+                    " -- the packet's audit references do not resolve in this chain",
+                )
+            )
+        elif row["action"] != expected_action:
+            checks.append(
+                CrossCheck(
+                    f"audit_refs.{key} vs audit chain", "mismatch",
+                    f"declared seq {declared} names event {row['action']!r}"
+                    f", expected {expected_action!r}",
+                )
+            )
+        else:
+            checks.append(CrossCheck(f"audit_refs.{key} vs audit chain", "match"))
+    return checks
 
 
 # --- RFC 3161 TSA anchor verification (2026-09-01) ----------------------------
@@ -1975,6 +2066,49 @@ def verify_release_packet(
     else:
         file_checks.append(FileCheck("derivative", "missing", "no derivative filename declared"))
 
+    # Closed membership: the packet's own declared contents define the
+    # allowed set, so the check derives entirely from the packet (never a
+    # hardcoded list of names beyond the structural members the packet
+    # format itself defines). Every file in the archive must be one of:
+    #   - a structural member (release_packet.json + the required
+    #     siblings; release_result.json when a combined output directory
+    #     carries it next to the packet),
+    #   - the DECLARED derivative, in either legitimate layout
+    #     (derivative/<filename> or flat <filename> -- both accepted
+    #     above; anything else inside derivative/ is undeclared),
+    #   - or an original/ member, whose count and bytes are already
+    #     cross-checked against original_sha256 above.
+    # Anything else -- an undeclared extra file -- fails the packet with
+    # the path named: a manifest checks only what it declares, so a
+    # second document smuggled into an otherwise-valid zip must not
+    # verify. Structural siblings that are ABSENT are already handled by
+    # their own missing-file checks; they are allowed here so a packet
+    # missing (say) README.txt reports one missing file, not two defects.
+    allowed = set(_PACKET_STRUCTURE_MEMBERS)
+    allowed.update(n for n in files if n in _PACKET_ENVELOPE_MEMBERS)
+    if schema_ok:
+        allowed.update(REQUIRED_SIBLING_FILES)
+        if deriv_name:
+            allowed.update({f"derivative/{deriv_name}", deriv_name})
+        allowed.update(n for n in files if n.startswith("original/"))
+    unexpected = sorted(n for n in files if n not in allowed)
+    if unexpected:
+        errors.extend(
+            f"undeclared file in packet: {name!r} -- a release packet contains only its "
+            "declared members (manifest.json, report.json, certificate.html, README.txt, "
+            "release_packet.json, the declared derivative, optional original/); this "
+            "archive carries a file the packet's own manifest does not declare"
+            for name in unexpected
+        )
+        file_checks.append(
+            FileCheck(
+                "packet membership",
+                "mismatch",
+                f"{len(unexpected)} undeclared file(s) present: "
+                + ", ".join(repr(n) for n in unexpected),
+            )
+        )
+
     # Any required sibling file not already covered by a hash check above
     # (defensive -- every one of REQUIRED_SIBLING_FILES is already checked
     # by name above; this catches a future spec drift where a new required
@@ -2045,14 +2179,19 @@ def verify_release_packet(
     # MUST-1: when an exported audit chain is provided, the packet's
     # declared manifest/derivative hashes are checked against the
     # chain-committed values -- the only check in this tool that is NOT
-    # the packet agreeing with itself. A chain that fails independent
-    # verification fails the packet too: a tampered chain is not a
-    # better witness than no chain.
+    # the packet agreeing with itself. The packet's own audit_refs seq
+    # numbers are cross-checked against the same rows: a declared seq
+    # that resolves to a different event -- or to nothing -- means the
+    # packet does not belong to the chain it was handed with. A chain
+    # that fails independent verification fails the packet too: a
+    # tampered chain is not a better witness than no chain.
     audit_chain: AuditChainCheck | None = None
     chain_hash_checks: list[CrossCheck] = []
+    chain_refs_checks: list[CrossCheck] = []
     chain_failed = False
     if audit_csv is not None:
-        audit_chain = cross_check_audit_chain(audit_csv, manifest)
+        audit_chain, chain_refs_checks = cross_check_audit_chain(audit_csv, manifest)
+        chain_hash_checks.extend(chain_refs_checks)
         if not audit_chain.chain_ok or not audit_chain.event_found:
             chain_failed = True
         elif audit_chain.event_found:
