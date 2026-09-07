@@ -6,6 +6,15 @@ import { LEGAL_BASIS_VALUES, type LegalBasis, type LegalJustifications } from ".
 // rather than disappearing.
 export const LEGAL_BASIS_LABEL: Record<string, string> = {
   unspecified: "Unspecified",
+  attorney_client_privilege: "Attorney-client privilege",
+  work_product_protection: "Work product protection",
+  confidentiality_obligation: "Confidentiality obligation",
+  trade_secret_or_proprietary: "Trade secret / proprietary",
+  privacy_or_data_protection: "Privacy / data protection",
+  outside_agreed_scope: "Outside agreed scope",
+  court_or_government_order: "Court or government order",
+  legal_or_regulatory_restriction: "Legal or regulatory restriction",
+  other: "Other",
   privilege: "Privilege",
   work_product: "Work product",
   pii_confidentiality: "PII confidentiality",
@@ -14,7 +23,6 @@ export const LEGAL_BASIS_LABEL: Record<string, string> = {
   client_instruction: "Client instruction",
   litigation_hold: "Litigation hold",
   gdpr_access: "GDPR access request",
-  other: "Other",
 };
 
 export function legalBasisLabel(basis: string): string {
@@ -68,4 +76,20 @@ export const FALLBACK_LEGAL_BASIS_DISCLOSURE =
   "show them as unspecified, not as a legal determination). Run Inspect first to supply " +
   "a per-finding legal basis for kept findings.";
 
-export const KNOWN_LEGAL_BASES: readonly string[] = LEGAL_BASIS_VALUES;
+// Approved 9-term ballot (docs/legal-panel/WITHHOLDING_BASIS_BALLOT.md) plus unspecified fallback.
+// Legacy/excluded terms (e.g. litigation_hold, client_instruction, relevance) remain
+// in LEGAL_BASIS_VALUES for parsing existing records, but are not offered in the UI for new releases.
+export const ACTIVE_LEGAL_BASES: readonly LegalBasis[] = [
+  "unspecified",
+  "attorney_client_privilege",
+  "work_product_protection",
+  "confidentiality_obligation",
+  "trade_secret_or_proprietary",
+  "privacy_or_data_protection",
+  "outside_agreed_scope",
+  "court_or_government_order",
+  "legal_or_regulatory_restriction",
+  "other",
+] as const;
+
+export const KNOWN_LEGAL_BASES: readonly string[] = ACTIVE_LEGAL_BASES;

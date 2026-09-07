@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACTIVE_LEGAL_BASES,
   buildLegalJustifications,
   KNOWN_LEGAL_BASES,
   LEGAL_BASIS_LABEL,
@@ -78,7 +79,7 @@ describe("buildLegalJustifications", () => {
 });
 
 describe("legal basis vocabulary", () => {
-  it("matches LEGAL_BASIS_VALUES from types.ts (the backend's controlled 10-value enum)", () => {
+  it("matches LEGAL_BASIS_VALUES from types.ts (the backend's full enum)", () => {
     // The label map must cover exactly the controlled vocabulary —
     // a missing entry would render a raw slug (acceptable fallback), but
     // an EXTRA entry would advertise a basis the backend rejects with a
@@ -86,8 +87,11 @@ describe("legal basis vocabulary", () => {
     expect(Object.keys(LEGAL_BASIS_LABEL).sort()).toEqual([...LEGAL_BASIS_VALUES].sort());
   });
 
-  it("exposes the known list for the <select> so the two can never drift", () => {
-    expect(KNOWN_LEGAL_BASES).toEqual(LEGAL_BASIS_VALUES);
+  it("exposes the approved ballot list for the operator <select>", () => {
+    expect(KNOWN_LEGAL_BASES).toEqual(ACTIVE_LEGAL_BASES);
+    for (const basis of ACTIVE_LEGAL_BASES) {
+      expect(LEGAL_BASIS_VALUES).toContain(basis);
+    }
   });
 
   it("falls back to the raw slug for an unmapped basis", () => {

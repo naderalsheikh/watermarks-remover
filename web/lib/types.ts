@@ -392,6 +392,17 @@ export const KNOWN_PERMS = [
 // up as a visible job failure, not silent drift.
 export const LEGAL_BASIS_VALUES = [
   "unspecified",
+  // Approved 9-term ballot (docs/legal-panel/WITHHOLDING_BASIS_BALLOT.md)
+  "attorney_client_privilege",
+  "work_product_protection",
+  "confidentiality_obligation",
+  "trade_secret_or_proprietary",
+  "privacy_or_data_protection",
+  "outside_agreed_scope",
+  "court_or_government_order",
+  "legal_or_regulatory_restriction",
+  "other",
+  // Legacy values retained for backwards compatibility
   "privilege",
   "work_product",
   "pii_confidentiality",
@@ -400,7 +411,6 @@ export const LEGAL_BASIS_VALUES = [
   "client_instruction",
   "litigation_hold",
   "gdpr_access",
-  "other",
 ] as const;
 
 export type LegalBasis = (typeof LEGAL_BASIS_VALUES)[number];

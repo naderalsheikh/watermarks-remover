@@ -130,6 +130,15 @@
         "basis": {
           "enum": [
             "unspecified",
+            "attorney_client_privilege",
+            "work_product_protection",
+            "confidentiality_obligation",
+            "trade_secret_or_proprietary",
+            "privacy_or_data_protection",
+            "outside_agreed_scope",
+            "court_or_government_order",
+            "legal_or_regulatory_restriction",
+            "other",
             "privilege",
             "work_product",
             "pii_confidentiality",
@@ -137,8 +146,7 @@
             "court_order",
             "client_instruction",
             "litigation_hold",
-            "gdpr_access",
-            "other"
+            "gdpr_access"
           ]
         },
         "note": { "type": "string", "maxLength": 1000 }
