@@ -36,7 +36,9 @@ import type {
   ReleaseProfilesResponse,
 } from "@/lib/types";
 import { Header } from "@/components/Header";
+import { SelectionCheckbox } from "@/components/SelectionCheckbox";
 import { StatusBadge } from "@/components/StatusBadge";
+import { selectionSummary, toggleVisibleSelection } from "@/lib/documentSelection";
 
 const PAGE_SIZE = 50;
 
@@ -579,6 +581,7 @@ function BulkRunPanel({
   kind,
   releaseProfiles,
   recipientTypes,
+  hiddenCount,
   onClose,
   onDone,
 }: {
@@ -587,6 +590,7 @@ function BulkRunPanel({
   kind: "inspect" | "sanitize";
   releaseProfiles: ReleaseProfile[];
   recipientTypes: string[];
+  hiddenCount?: number;
   onClose: () => void;
   onDone: (batch: BatchResponse) => void;
 }) {
@@ -641,6 +645,11 @@ function BulkRunPanel({
             {kind === "sanitize" ? "Bulk release" : "Bulk inspect"} — {docIds.length} document
             {docIds.length === 1 ? "" : "s"} selected
           </p>
+          {hiddenCount != null && hiddenCount > 0 && (
+            <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
+              Includes {hiddenCount} document{hiddenCount === 1 ? "" : "s"} hidden by the active status filter.
+            </p>
+          )}
           {kind === "inspect" ? (
             <p className="mt-1 text-xs text-muted">
               Inspection is read-only: it only reports what&apos;s inside each document. No
@@ -1036,8 +1045,6 @@ function MatterView({
   const bulkSafeReleaseProfiles = (releaseProfilesQ.data?.release_profiles ?? []).filter((p) =>
     bulkSafePolicyIds.has(p.policy_id),
   );
-  const allLoadedSelected =
-    docsQ.items.length > 0 && docsQ.items.every((d) => selected.has(d.id));
 
   async function upload(e: React.FormEvent) {
     e.preventDefault();
@@ -1073,6 +1080,8 @@ function MatterView({
     }
     return true;
   });
+  const visibleDocIds = filteredDocs.map((d) => d.id);
+  const selection = selectionSummary(selected, visibleDocIds);
 
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
@@ -1233,6 +1242,7 @@ function MatterView({
                   kind={bulkAction}
                   releaseProfiles={bulkSafeReleaseProfiles}
                   recipientTypes={releaseProfilesQ.data?.recipient_types ?? []}
+                  hiddenCount={selection.hiddenSelected}
                   onClose={() => setBulkAction(null)}
                   onDone={(newBatch) => {
                     setBatch(newBatch);
@@ -1252,12 +1262,29 @@ function MatterView({
                     <span className="text-sm font-medium">
                       {selected.size} of {docsQ.items.length} loaded documents selected
                     </span>
+                    {selection.hiddenSelected > 0 && (
+                      <span className="rounded bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                        {selection.visibleSelected} visible · {selection.hiddenSelected} hidden by active filter
+                      </span>
+                    )}
                     <button
                       onClick={() => setSelected(new Set())}
                       className="text-xs text-muted hover:text-foreground"
                     >
                       Clear
                     </button>
+                    {selection.hiddenSelected > 0 && (
+                      <button
+                        onClick={() =>
+                          setSelected(
+                            new Set([...selected].filter((id) => new Set(visibleDocIds).has(id)))
+                          )
+                        }
+                        className="text-xs text-amber-700 hover:underline dark:text-amber-300"
+                      >
+                        Clear hidden
+                      </button>
+                    )}
                     <div className="ml-auto flex gap-2">
                       {hasMatterPerm(perms, "inspect") && (
                         <button
@@ -1341,20 +1368,15 @@ function MatterView({
             <p className="text-sm text-muted">No loaded documents match this status filter.</p>
           ) : (
             <>
-              <label className="mb-2 flex items-center gap-2 text-xs text-muted">
-                <input
-                  type="checkbox"
-                  checked={allLoadedSelected}
-                  onChange={(e) =>
-                    setSelected(
-                      e.target.checked
-                        ? new Set(docsQ.items.map((d) => d.id))
-                        : new Set(),
-                    )
-                  }
-                />
-                Select all {docsQ.items.length} loaded documents
-              </label>
+              <SelectionCheckbox
+                checked={selection.allVisibleSelected}
+                mixed={selection.someVisibleSelected}
+                onChange={(checked) =>
+                  setSelected(toggleVisibleSelection(selected, visibleDocIds, checked))
+                }
+              >
+                Select all {filteredDocs.length} visible document{filteredDocs.length === 1 ? "" : "s"}
+              </SelectionCheckbox>
               <ul className="divide-y divide-border rounded-md border border-border shadow-card">
                 {filteredDocs.map((doc) => (
                   <DocumentRow
