@@ -613,7 +613,7 @@ def _render_job_certificate_html(
             f"{'passed' if v_pass else 'FAILED'}</span></p><ul>{checks_html}</ul>"
         )
 
-    # Per-finding disposition ledger (manifest.dispositions, schema v2).
+    # Per-finding disposition ledger (manifest.dispositions, schema v3).
     # Answers the question the flat actions list could not: for each
     # finding that was PRESENT before sanitization, what did the policy
     # decide, and what did the post-sanitize re-inspect then observe? A
@@ -830,8 +830,11 @@ POLICIES = [
         "label": "Privacy only",
         "description": (
             "Minimal, no-visible-change: strips only PII authoring fields "
-            "and GPS location. Keeps comments, tracked changes, and C2PA "
-            "provenance untouched."
+            "and GPS location. Keeps comments and tracked changes, and C2PA "
+            "provenance untouched (documents and images only — an audio or "
+            "video input has all its metadata stripped, C2PA included). "
+            "The per-job certificate and disposition ledger record what "
+            "actually happened."
         ),
         # Decision-free like external_sharing; its keeps are policy-default
         # keeps, never no-decision keeps, so no manifest marker is produced.

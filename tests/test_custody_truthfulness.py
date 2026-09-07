@@ -568,6 +568,23 @@ def test_privacy_only_does_not_strip_correlators():
     assert "<dc:creator></dc:creator>" in core, "identity is still scrubbed"
 
 
+def test_privacy_only_description_discloses_the_av_metadata_strip():
+    """The operator-facing description promises C2PA provenance is kept,
+    but the engine strips ALL metadata -- C2PA included -- from audio and
+    video inputs under privacy_only (clean_av(strip_all_metadata=True);
+    the disposition ledger records the finding removed_unplanned). The
+    copy must disclose that instead of overclaiming, in the same register
+    the external_sharing description uses (a093878)."""
+    from app.main import POLICIES
+
+    description = next(p["description"] for p in POLICIES if p["id"] == "privacy_only")
+    assert "audio" in description and "video" in description, (
+        "privacy_only's description must disclose the AV exception: "
+        "C2PA is kept for documents/images but stripped from AV inputs"
+    )
+    assert "C2PA" in description
+
+
 def _clean_docx() -> bytes:
     """A DOCX carrying NONE of the authoring exhaust: no w:rsid* anywhere,
     no w:rsids session table, no w14/w15:docId, no session counters -- the
