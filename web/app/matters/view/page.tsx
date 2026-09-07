@@ -1003,6 +1003,9 @@ function ReportsAndExports({
         <a href={`/v1/matters/${matterId}/jobs/export`} className={linkClass}>
           Jobs CSV <span className="font-normal text-muted">— downloads immediately</span>
         </a>
+        <a href={`/v1/matters/${matterId}/privilege-log?format=csv`} className={linkClass}>
+          Privilege Log CSV <span className="font-normal text-muted">— downloads immediately</span>
+        </a>
         {hasMatterPerm(perms, "admin") && (
           <a href={`/v1/matters/${matterId}/audit/export`} className={linkClass}>
             Audit CSV <span className="font-normal text-muted">— downloads immediately</span>

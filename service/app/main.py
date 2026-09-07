@@ -3961,6 +3961,148 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/v1/matters/{matter_id}/privilege-log")
+    def export_privilege_log(
+        matter_id: str,
+        format: str = "csv",
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        """FRCP 26(b)(5)(A) and FRE 502 compliant privilege log export.
+
+        Aggregates all releases in the matter into an e-discovery privilege log.
+        Captures document identity, source/derivative cryptographic digests,
+        release status and timestamps, specific finding categories withheld
+        or retained, the legal withholding basis from the approved 9-term
+        vocabulary, operator justifications, and reviewer attribution.
+
+        Read-gated, same as Jobs CSV and Documents list: an export is
+        matter-scoped and safe to generate for any reader authorized on the
+        matter.
+
+        Accepts ?format=csv (default) or ?format=json.
+        """
+        _require(matter_id, "read", s, user)
+        _matter(matter_id, s)
+        fmt = (format or "csv").strip().lower()
+        if fmt not in ("csv", "json"):
+            raise HTTPException(400, f"unsupported format: {format}; expected 'csv' or 'json'")
+
+        releases = (
+            s.query(Release, Document, Job)
+            .join(Document, Document.id == Release.document_id)
+            .join(Job, Job.id == Release.job_id)
+            .filter(Release.matter_id == matter_id)
+            .order_by(Release.created_utc.asc())
+            .all()
+        )
+
+        records: list[dict] = []
+        for release, doc, job in releases:
+            result = job.result_json or {}
+            manifest = result.get("manifest") or {} if job.kind == "sanitize" else {}
+            derivative_sha256 = manifest.get("derivative", {}).get("sha256") or ""
+            dispositions = [
+                d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)
+            ] if job.kind == "sanitize" else []
+            legal_justifications: dict = job.legal_justifications or {}
+
+            common = {
+                "release_id": release.id,
+                "document_id": doc.id,
+                "document_filename": doc.filename,
+                "source_sha256": doc.sha256,
+                "derivative_sha256": derivative_sha256,
+                "release_status": release.status,
+                "released_utc": release.finished_utc or release.created_utc,
+                "policy_id": release.policy_id,
+                "recipient_type": release.recipient_type,
+                "recipient_name": release.recipient_name,
+                "reviewer_id": release.requested_by,
+            }
+
+            if dispositions:
+                for d in dispositions:
+                    sub = str(d.get("subtype") or "")
+                    act = str(d.get("action") or "")
+                    post = str(d.get("postcondition") or "")
+                    just = legal_justifications.get(sub) if isinstance(legal_justifications, dict) else None
+                    basis = d.get("legal_basis") or (just.get("basis") if isinstance(just, dict) else None) or "unspecified"
+                    note = (just.get("note") if isinstance(just, dict) else None) or d.get("reason") or ""
+                    rec = dict(common)
+                    rec.update({
+                        "finding_subtype": sub,
+                        "action": act,
+                        "postcondition": post,
+                        "legal_basis": basis,
+                        "operator_note": note,
+                    })
+                    records.append(rec)
+            elif legal_justifications:
+                for sub, just in legal_justifications.items():
+                    act = (job.finding_decisions or {}).get(sub, "keep")
+                    basis = (just.get("basis") if isinstance(just, dict) else None) or "unspecified"
+                    note = (just.get("note") if isinstance(just, dict) else None) or ""
+                    rec = dict(common)
+                    rec.update({
+                        "finding_subtype": str(sub),
+                        "action": str(act),
+                        "postcondition": "",
+                        "legal_basis": basis,
+                        "operator_note": note,
+                    })
+                    records.append(rec)
+            else:
+                rec = dict(common)
+                rec.update({
+                    "finding_subtype": "",
+                    "action": "refuse" if release.status == "refused" else (job.kind or ""),
+                    "postcondition": "",
+                    "legal_basis": "unspecified",
+                    "operator_note": job.error if release.status in ("refused", "failed") else "",
+                })
+                records.append(rec)
+
+        if fmt == "json":
+            return JSONResponse({
+                "matter_id": matter_id,
+                "total_records": len(records),
+                "records": records,
+            })
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        fieldnames = [
+            "release_id",
+            "document_id",
+            "document_filename",
+            "source_sha256",
+            "derivative_sha256",
+            "release_status",
+            "released_utc",
+            "policy_id",
+            "recipient_type",
+            "recipient_name",
+            "finding_subtype",
+            "action",
+            "postcondition",
+            "legal_basis",
+            "operator_note",
+            "reviewer_id",
+        ]
+        writer.writerow(fieldnames)
+        for r in records:
+            writer.writerow([r.get(f, "") for f in fieldnames])
+
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="privilege_log_{matter_id}.csv"',
+                "X-Total-Records": str(len(records)),
+            },
+        )
+
     @app.get("/v1/matters/{matter_id}/summary")
     def matter_summary(
         matter_id: str,
