@@ -48,14 +48,14 @@ RUN git clone --depth 1 --filter=blob:none --sparse \
         '/README.md' \
     && test "$(git -C /opt/markllm rev-parse HEAD)" = "${MARKLLM_REF}"
 
-COPY scripts/requirements-markllm.txt /app/requirements-markllm.txt
-COPY scripts/detect_text_watermark.py /app/detect_text_watermark.py
-COPY scripts/common.py /app/common.py
+COPY research/harnesses/requirements-markllm.txt /app/requirements-markllm.txt
+COPY research/harnesses/detect_text_watermark.py /app/detect_text_watermark.py
+COPY service/scripts/common.py /app/common.py
 # Benchmark + Layer B rewrite machinery (all stdlib; no extra deps).
-COPY scripts/bench_synthid_text.py /app/bench_synthid_text.py
-COPY scripts/rewrite_text.py /app/rewrite_text.py
-COPY scripts/text_detectors.py /app/text_detectors.py
-COPY scripts/text_unicode.py /app/text_unicode.py
+COPY research/harnesses/bench_synthid_text.py /app/bench_synthid_text.py
+COPY service/scripts/rewrite_text.py /app/rewrite_text.py
+COPY service/scripts/text_detectors.py /app/text_detectors.py
+COPY service/scripts/text_unicode.py /app/text_unicode.py
 
 # Default: CPU torch (like Dockerfile.markdiffusion). CUDA users build with
 # --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cuXXX and run

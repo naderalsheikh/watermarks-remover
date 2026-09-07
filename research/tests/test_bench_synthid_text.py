@@ -16,9 +16,11 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "service" / "scripts"
+HARNESSES = ROOT / "research" / "harnesses"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(HARNESSES))
 
 import bench_synthid_text as bench
 from bench_synthid_text import (
@@ -36,7 +38,7 @@ DETECT_NEG = {"available": True, "is_watermarked": False, "score": -1.0}
 def _args(**overrides):
     values = dict(
         markllm_dir="fake-markllm",
-        corpus=SCRIPTS.parents[1] / "benchmarks" / "corpus",
+        corpus=ROOT / "research" / "benchmarks" / "corpus",
         docs=3,
         seeds=1,
         seed_base=1,

@@ -212,8 +212,8 @@ services:
   wr-markllm:
     profiles: [harness]
     build:
-      context: service
-      dockerfile: Dockerfile.markllm
+      context: .
+      dockerfile: research/docker/Dockerfile.markllm
     image: ghcr.io/guillaumemeyer/watermarks-remover:markllm-latest
     # One-shot CLI: `up` just confirms the image; run real jobs with
     # `docker compose run --rm wr-markllm detect /data/wm.txt --scheme kgw`.
@@ -241,13 +241,13 @@ services:
       #     /app/bench_synthid_text.py --markllm-dir /opt/markllm \
       #     --corpus /bench-corpus --out-dir /data ...
       - bench-out:/data
-      - ./benchmarks/corpus:/bench-corpus:ro
+      - ./research/benchmarks/corpus:/bench-corpus:ro
 
   wr-markdiffusion:
     profiles: [harness]
     build:
-      context: service
-      dockerfile: Dockerfile.markdiffusion
+      context: .
+      dockerfile: research/docker/Dockerfile.markdiffusion
     image: ghcr.io/guillaumemeyer/watermarks-remover:markdiffusion-latest
     command: ["--help"]
     read_only: true
@@ -264,8 +264,8 @@ services:
   wr-ctrlregen:
     profiles: [heavy]
     build:
-      context: service
-      dockerfile: Dockerfile.ctrlregen
+      context: .
+      dockerfile: research/docker/Dockerfile.ctrlregen
     # Local-only tag: upstream `noai-watermark` ships no LICENSE (all-rights-
     # reserved), so this image is never published.
     image: watermarks-remover-ctrlregen:local
@@ -284,8 +284,8 @@ services:
   wr-synthid:
     profiles: [heavy]
     build:
-      context: service
-      dockerfile: Dockerfile.synthid
+      context: .
+      dockerfile: research/docker/Dockerfile.synthid
     # Local-only tag: upstream `reverse-SynthID` is under a non-commercial
     # Research License, so this image is never published.
     image: watermarks-remover-synthid-scorer:local
@@ -305,8 +305,8 @@ services:
   wr-synthid-score:
     profiles: [heavy]
     build:
-      context: service
-      dockerfile: Dockerfile.synthid
+      context: .
+      dockerfile: research/docker/Dockerfile.synthid
     image: watermarks-remover-synthid-scorer:local
     entrypoint: ["python3"]
     command: ["/app/synthid_score_server.py", "--host", "0.0.0.0", "--port", "8766"]

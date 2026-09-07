@@ -39,6 +39,12 @@ from typing import Any
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
+try:
+    _SERVICE_SCRIPTS = Path(__file__).resolve().parents[2] / "service" / "scripts"
+    if _SERVICE_SCRIPTS.is_dir():
+        sys.path.insert(0, str(_SERVICE_SCRIPTS))
+except IndexError:
+    pass
 
 from common import emit_json, eprint, read_text_input, safe_write_bytes  # noqa: E402
 

@@ -10,11 +10,13 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "service" / "scripts"
+HARNESSES = ROOT / "research" / "harnesses"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(HARNESSES))
 
-DETECT_SCRIPT = SCRIPTS / "detect_text_watermark.py"
+DETECT_SCRIPT = HARNESSES / "detect_text_watermark.py"
 
 FAKE_TRANSFORMERS = (
     "import sys\n"

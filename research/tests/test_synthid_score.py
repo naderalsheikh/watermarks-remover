@@ -11,14 +11,16 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "service" / "scripts"
+HARNESSES = ROOT / "research" / "harnesses"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(HARNESSES))
 
 import image_meta
 from image_meta import ImageInspectReport, run_synthid_score
 
-SCORE_SCRIPT = SCRIPTS / "score_synthid.py"
+SCORE_SCRIPT = HARNESSES / "score_synthid.py"
 
 
 def test_score_synthid_cli_unavailable_without_upstream(

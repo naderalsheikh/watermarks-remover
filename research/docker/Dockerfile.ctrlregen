@@ -41,9 +41,9 @@ RUN git clone --depth 1 --filter=blob:none --sparse \
     && git checkout --detach "${NOAI_WATERMARK_REF}" \
     && git sparse-checkout set --no-cone '/src/'
 
-COPY scripts/requirements-ctrlregen.txt /app/requirements-ctrlregen.txt
-COPY scripts/clean_ctrlregen.py /app/clean_ctrlregen.py
-COPY scripts/common.py /app/common.py
+COPY research/harnesses/requirements-ctrlregen.txt /app/requirements-ctrlregen.txt
+COPY research/harnesses/clean_ctrlregen.py /app/clean_ctrlregen.py
+COPY service/scripts/common.py /app/common.py
 
 # torch is installed first (CPU wheels on linux) so the pinned ML deps can
 # resolve against it. Model weights are downloaded at runtime, not build time.

@@ -13,14 +13,16 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "service" / "scripts"
+HARNESSES = ROOT / "research" / "harnesses"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(HARNESSES))
 
 import image_meta
 from image_meta import run_ctrlregen_clean
 
-CLEAN_SCRIPT = SCRIPTS / "clean_ctrlregen.py"
+CLEAN_SCRIPT = HARNESSES / "clean_ctrlregen.py"
 
 FAKE_PIL = """\
 class Image:

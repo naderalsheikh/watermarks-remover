@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "service" / "scripts" / "score_synthid.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "research" / "harnesses" / "score_synthid.py"
 
 
 def _write_stub_upstream(root: Path) -> Path:

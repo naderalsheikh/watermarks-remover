@@ -29,6 +29,11 @@ ignore = [
   "RUF001",
   "RUF003",
 ]
+"research/tests/**" = [
+  "E402",
+  "RUF001",
+  "RUF003",
+]
 
 # FastAPI's documented DI idiom is `param: T = Depends(...)` in defaults;
 # B008 would flag every route signature in the control plane.

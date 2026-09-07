@@ -11,8 +11,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "service" / "scripts"
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS = ROOT / "service" / "scripts"
+HARNESSES = ROOT / "research" / "harnesses"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(HARNESSES))
 
 from detect_text_watermark import SCHEMES
 

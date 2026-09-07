@@ -47,6 +47,12 @@ from urllib.parse import urlparse
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
+try:
+    _SERVICE_SCRIPTS = Path(__file__).resolve().parents[2] / "service" / "scripts"
+    if _SERVICE_SCRIPTS.is_dir():
+        sys.path.insert(0, str(_SERVICE_SCRIPTS))
+except IndexError:
+    _SERVICE_SCRIPTS = SCRIPTS_DIR
 
 from common import eprint  # noqa: E402
 from detect_text_watermark import SCHEMES  # noqa: E402  (single source of scheme names)
@@ -55,7 +61,7 @@ from text_unicode import clean_text  # noqa: E402
 
 _RESOLVED_SCRIPT = Path(__file__).resolve()
 try:
-    DEFAULT_CORPUS = _RESOLVED_SCRIPT.parents[2] / "benchmarks" / "corpus"
+    DEFAULT_CORPUS = _RESOLVED_SCRIPT.parents[1] / "benchmarks" / "corpus"
 except IndexError:
     # Container layout (/app/bench_synthid_text.py): no repo root above us;
     # callers pass --corpus explicitly.
@@ -617,7 +623,11 @@ class Benchmark:
         self.args = args
         self.upstream = upstream
         self.script = SCRIPTS_DIR / "detect_text_watermark.py"
-        self.rewrite_script = SCRIPTS_DIR / "rewrite_text.py"
+        self.rewrite_script = (
+            (SCRIPTS_DIR / "rewrite_text.py")
+            if (SCRIPTS_DIR / "rewrite_text.py").exists()
+            else (_SERVICE_SCRIPTS / "rewrite_text.py")
+        )
         self.python = str(_venv_python(upstream) or sys.executable)
         self.variants = parse_variants(args.variants)
         self.corpus = load_corpus(args.corpus, args.docs)

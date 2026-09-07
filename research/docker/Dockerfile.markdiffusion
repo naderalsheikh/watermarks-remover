@@ -24,9 +24,9 @@ RUN apt-get update \
         passwd \
     && rm -rf /var/lib/apt/lists/*
 
-COPY scripts/requirements-markdiffusion.txt /app/requirements-markdiffusion.txt
-COPY scripts/markdiffusion_harness.py /app/markdiffusion_harness.py
-COPY scripts/common.py /app/common.py
+COPY research/harnesses/requirements-markdiffusion.txt /app/requirements-markdiffusion.txt
+COPY research/harnesses/markdiffusion_harness.py /app/markdiffusion_harness.py
+COPY service/scripts/common.py /app/common.py
 
 # torch is pinned (with everything else) in requirements-markdiffusion.txt; the
 # CPU index keeps the image small. No GPU wheel index inside the image — CUDA

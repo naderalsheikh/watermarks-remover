@@ -7,6 +7,7 @@
 	install-skill install-cursor-text-skill clean
 
 SCRIPTS := service/scripts
+HARNESSES := research/harnesses
 PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
 test:
@@ -35,14 +36,14 @@ smoke-synthid:
 	@if [ -z "$(REVERSE_SYNTHID_DIR)" ]; then \
 	  echo "smoke-synthid skipped (set REVERSE_SYNTHID_DIR)"; \
 	else \
-	  $(PYTHON) $(SCRIPTS)/score_synthid.py --help >/dev/null && echo "score_synthid adapter present"; \
+	  $(PYTHON) $(HARNESSES)/score_synthid.py --help >/dev/null && echo "score_synthid adapter present"; \
 	fi
 
 bootstrap-synthid:
-	./service/scripts/setup_synthid.sh
+	./research/harnesses/setup_synthid.sh
 
 docker-synthid-build:
-	docker build -f service/Dockerfile.synthid -t watermarks-remover-synthid-scorer service/
+	docker build -f research/docker/Dockerfile.synthid -t watermarks-remover-synthid-scorer service/
 
 docker-synthid-help:
 	docker run --rm watermarks-remover-synthid-scorer --help
@@ -51,14 +52,14 @@ smoke-ctrlregen:
 	@if [ -z "$(NOAI_WATERMARK_DIR)" ]; then \
 	  echo "smoke-ctrlregen skipped (set NOAI_WATERMARK_DIR)"; \
 	else \
-	  $(PYTHON) $(SCRIPTS)/clean_ctrlregen.py --help >/dev/null && echo "clean_ctrlregen adapter present"; \
+	  $(PYTHON) $(HARNESSES)/clean_ctrlregen.py --help >/dev/null && echo "clean_ctrlregen adapter present"; \
 	fi
 
 bootstrap-ctrlregen:
-	./service/scripts/setup_ctrlregen.sh
+	./research/harnesses/setup_ctrlregen.sh
 
 docker-ctrlregen-build:
-	docker build -f service/Dockerfile.ctrlregen -t watermarks-remover-ctrlregen service/
+	docker build -f research/docker/Dockerfile.ctrlregen -t watermarks-remover-ctrlregen service/
 
 docker-ctrlregen-help:
 	docker run --rm watermarks-remover-ctrlregen --help
@@ -67,14 +68,14 @@ smoke-markllm:
 	@if [ -z "$(MARKLLM_DIR)" ]; then \
 	  echo "smoke-markllm skipped (set MARKLLM_DIR)"; \
 	else \
-	  $(PYTHON) $(SCRIPTS)/detect_text_watermark.py --help >/dev/null && echo "detect_text_watermark adapter present"; \
+	  $(PYTHON) $(HARNESSES)/detect_text_watermark.py --help >/dev/null && echo "detect_text_watermark adapter present"; \
 	fi
 
 bootstrap-markllm:
-	./service/scripts/setup_markllm.sh
+	./research/harnesses/setup_markllm.sh
 
 docker-markllm-build:
-	docker build -f service/Dockerfile.markllm -t watermarks-remover-markllm service/
+	docker build -f research/docker/Dockerfile.markllm -t watermarks-remover-markllm service/
 
 docker-markllm-help:
 	docker run --rm watermarks-remover-markllm --help
@@ -83,19 +84,21 @@ smoke-markdiffusion:
 	@if [ -z "$(MARKDIFFUSION_DIR)" ]; then \
 	  echo "smoke-markdiffusion skipped (set MARKDIFFUSION_DIR)"; \
 	else \
-	  $(PYTHON) $(SCRIPTS)/markdiffusion_harness.py --help >/dev/null && echo "markdiffusion_harness adapter present"; \
+	  $(PYTHON) $(HARNESSES)/markdiffusion_harness.py --help >/dev/null && echo "markdiffusion_harness adapter present"; \
+	fi
+
 bench-synthid-text:
 	@if [ -z "$(MARKLLM_DIR)" ]; then \
 	  echo "bench-synthid-text skipped (set MARKLLM_DIR; see docs/synthid-text-benchmark.md)"; \
 	else \
-	  echo "run: $(PYTHON) $(SCRIPTS)/bench_synthid_text.py --markllm-dir $(MARKLLM_DIR) --rewrite-model <model> --rewrite-backend <backend>"; \
+	  echo "run: $(PYTHON) $(HARNESSES)/bench_synthid_text.py --markllm-dir $(MARKLLM_DIR) --rewrite-model <model> --rewrite-backend <backend>"; \
 	fi
 
 bootstrap-markdiffusion:
-	./service/scripts/setup_markdiffusion.sh
+	./research/harnesses/setup_markdiffusion.sh
 
 docker-markdiffusion-build:
-	docker build -f service/Dockerfile.markdiffusion -t watermarks-remover-markdiffusion service/
+	docker build -f research/docker/Dockerfile.markdiffusion -t watermarks-remover-markdiffusion service/
 
 docker-markdiffusion-help:
 	docker run --rm watermarks-remover-markdiffusion --help

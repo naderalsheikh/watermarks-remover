@@ -13,14 +13,16 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "service" / "scripts"
+HARNESSES = ROOT / "research" / "harnesses"
 sys.path.insert(0, str(SCRIPTS))
+sys.path.insert(0, str(HARNESSES))
 
 import image_meta
 from image_meta import run_markdiffusion_purify
 
-HARNESS_SCRIPT = SCRIPTS / "markdiffusion_harness.py"
+HARNESS_SCRIPT = HARNESSES / "markdiffusion_harness.py"
 
 FAKE_PIL = """\
 class Image:
