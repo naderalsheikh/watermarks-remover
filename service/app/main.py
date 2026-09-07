@@ -622,7 +622,10 @@ def _render_job_certificate_html(
     dispositions_html = ""
     if dispositions:
         _POSTCONDITION_LABEL = {
-            "removed_confirmed": ("chain-ok", "removed — confirmed absent on re-inspect"),
+            "removed_confirmed": (
+                "chain-ok",
+                "no longer observed by the post-sanitize re-inspect",
+            ),
             # RED, never green: the policy promised preservation and the
             # engine destroyed the finding. Recorded as the opposite of a
             # confirmed removal (schema v3; v2 mislabelled it

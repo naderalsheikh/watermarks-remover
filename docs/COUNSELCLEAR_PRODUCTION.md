@@ -318,8 +318,10 @@ arithmetic even if every key file is lost. That fixes availability and
 nothing else: a key a packet supplies about itself proves nothing about
 whose key it is, because anyone able to alter the packet could also have
 replaced that field. The verifier reports such a check as
-`VERIFIED under a SELF-PUBLISHED key (provenance unconfirmed)` and never as
-plain `VERIFIED`.
+`SELF-PUBLISHED KEY -- signature checks out, provenance unconfirmed` and
+never as plain `VERIFIED`. The caution leads; the affirmative word never
+opens the line, because a truncated quote or a screenshot carries only the
+opening.
 
 **So send recipients the fingerprint, not just the key.** It is printed in
 every packet's `README.txt` and by the verifier on every run:

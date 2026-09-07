@@ -373,7 +373,7 @@ function AnchorBadge({ release }: { release: Release | null }) {
   const label = !anchor
     ? "Anchoring: not yet known"
     : anchor.externally_anchored
-      ? "Externally anchored (RFC 3161)"
+      ? "Timestamp obtained (RFC 3161) — not verified here"
       : "Operator signature only";
   return (
     <span

@@ -437,7 +437,7 @@ _SIGNATURE_MARKERS = {
     # Never the bare word VERIFIED. The maths is sound and the provenance
     # is not, and a reader skimming for a green word must not be able to
     # mistake one for the other.
-    "self_key": "VERIFIED under a SELF-PUBLISHED key (provenance unconfirmed)",
+    "self_key": "SELF-PUBLISHED KEY -- signature checks out, provenance unconfirmed",
     "unsigned": "UNSIGNED (packet predates signatures)",
     "no_key": "NOT VERIFIED (no --public-key given)",
     "unknown_key": "NOT VERIFIED (key not provided)",
