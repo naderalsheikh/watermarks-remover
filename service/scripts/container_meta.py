@@ -2435,11 +2435,11 @@ def docx_hidden_model(styles_xml: bytes) -> DocxHiddenModel:
             if base and base != style_id:  # self-reference is not a chain
                 parent[style_id] = base
 
-    def resolve(style_id: str, seen: frozenset[str]) -> bool | None:
+    def resolve(style_id: str, seen: frozenset[str], depth: int = 0) -> bool | None:
         # `seen` guards a w:basedOn CYCLE, which a hostile or merely broken
         # styles.xml can contain and which would otherwise recurse until the
         # interpreter's stack limit.
-        if style_id in seen:
+        if depth > MAX_XML_DEPTH or style_id in seen:
             return None
         state = own.get(style_id)
         if state is not None:
@@ -2447,7 +2447,7 @@ def docx_hidden_model(styles_xml: bytes) -> DocxHiddenModel:
         base = parent.get(style_id)
         if base is None:
             return None
-        return resolve(base, seen | {style_id})
+        return resolve(base, seen | {style_id}, depth=depth + 1)
 
     return DocxHiddenModel(
         default=default,
@@ -2482,13 +2482,20 @@ def _run_text(r_elem) -> str:
     return "".join(t.text or "" for t in r_elem.iter(_W_T))
 
 
-def _walk_hidden_runs(elem, model: DocxHiddenModel, para_style_id, visit):
+MAX_XML_DEPTH: int = 300
+
+
+def _walk_hidden_runs(elem, model: DocxHiddenModel, para_style_id, visit, depth: int = 0):
     """Shared traversal for the remover and the extractor.
 
     ``visit(run)`` returns True to DROP the run. One traversal, so the two
     callers cannot drift into different answers about which runs are
     concealed -- see :class:`DocxHiddenModel`.
     """
+    if depth > MAX_XML_DEPTH:
+        raise UnsupportedCleanError(
+            f"document XML nesting depth exceeds maximum supported limit ({MAX_XML_DEPTH})"
+        )
     if elem.tag == _W_P:
         para_style_id = _para_style_id(elem)
     kept = []
@@ -2506,7 +2513,7 @@ def _walk_hidden_runs(elem, model: DocxHiddenModel, para_style_id, visit):
                 continue
             kept.append(child)
             continue
-        _walk_hidden_runs(child, model, para_style_id, visit)
+        _walk_hidden_runs(child, model, para_style_id, visit, depth=depth + 1)
         kept.append(child)
     elem[:] = kept
 
@@ -2621,7 +2628,11 @@ def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
         "rows_deleted": 0, "paragraphs_merged": 0,
     }
 
-    def walk(elem) -> None:
+    def walk(elem, depth: int = 0) -> None:
+        if depth > MAX_XML_DEPTH:
+            raise UnsupportedCleanError(
+                f"document XML nesting depth exceeds maximum supported limit ({MAX_XML_DEPTH})"
+            )
         kept = []
         para_mark_deleted: set[int] = set()  # id(child) for pre-walk detection
         for child in list(elem):
@@ -2644,7 +2655,7 @@ def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
             if strip_comment_markers and tag in _DOCX_COMMENT_MARKER_TAGS:
                 stats["markers"] += 1
                 continue
-            walk(child)
+            walk(child, depth=depth + 1)
             if tag in _DOCX_ACCEPT_UNWRAP:
                 # Splice the (already transformed) children in place of the wrapper.
                 kept.extend(list(child))

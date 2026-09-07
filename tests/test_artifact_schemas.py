@@ -252,20 +252,6 @@ def test_verifier_required_fields_track_published_schemas():
 def test_all_ballot_terms_validate_against_artifact_schemas():
     from policies import LEGAL_JUSTIFICATION_BASES
 
-    sample_finding = {
-        "finding_id": "f_0123456789abcdef",
-        "category": "revision_history",
-        "subtype": "comments_and_notes",
-        "format": "docx",
-        "location": {"pane": "comment"},
-        "action_recommended": "flag",
-        "action_allowed_by_policy": ["keep", "strip", "flag"],
-        "content_visible": True,
-        "risk_level": "high",
-        "confidence": "confirmed",
-        "removal_changes_visible_content": False,
-        "legal_justification": {"basis": "unspecified", "note": "Test note"},
-    }
     for schema_name in (
         "finding.schema.json",
         "release_packet.schema.json",

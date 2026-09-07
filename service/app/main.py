@@ -22,7 +22,7 @@ from common import MAX_INPUT_BYTES  # a size constant, not a parser
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
-from sqlalchemy import func, text, update
+from sqlalchemy import func, or_, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -3014,6 +3014,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         worker subprocess (out of scope per the approved proposal). Any
         child already running or terminal is left untouched; the response
         reports how many were actually cancelled."""
+        # Baseline permission on the matter must precede the batch lookup (F3.1):
+        # an unauthorized caller must receive 403 unconditionally, never 404 for
+        # non-existent batch IDs vs 403 for existing ones.
+        _require(matter_id, "read", s, user)
         batch = s.get(Batch, batch_id)
         if not batch or batch.matter_id != matter_id:
             raise HTTPException(404, "batch not found")
@@ -3759,9 +3763,26 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
         )
         if release is not None:
-            release.last_anchor_type = final_anchor["type"]
-            release.last_anchor_at = anchored_at
-            release.last_anchor_digest = final_anchor.get("digest")
+            # F3.2: Atomic compare-and-set update on last_anchor_at.
+            # Avoids lossy overwrite race when concurrent bundle downloads happen.
+            # First writer wins for concurrent requests within the same timestamp,
+            # and subsequent downloads only update if strictly newer.
+            stmt = (
+                update(Release)
+                .where(
+                    Release.id == release.id,
+                    or_(
+                        Release.last_anchor_at.is_(None),
+                        Release.last_anchor_at < anchored_at,
+                    ),
+                )
+                .values(
+                    last_anchor_type=final_anchor["type"],
+                    last_anchor_at=anchored_at,
+                    last_anchor_digest=final_anchor.get("digest"),
+                )
+            )
+            s.execute(stmt)
             s.commit()
 
         buf = io.BytesIO()

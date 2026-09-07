@@ -1,4 +1,4 @@
-import { LEGAL_BASIS_VALUES, type LegalBasis, type LegalJustifications } from "./types";
+import { type LegalBasis, type LegalJustifications } from "./types";
 
 // Human-readable labels for the controlled legal-basis vocabulary, same
 // deliberate-literal pattern as RECIPIENT_TYPE_LABEL above: a basis added

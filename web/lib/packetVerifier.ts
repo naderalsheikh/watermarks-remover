@@ -69,13 +69,55 @@ export async function computeSha256(data: ArrayBuffer | Uint8Array | string): Pr
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function parseJsonSafely(text: string): { data?: any; error?: string } {
+export function parseJsonSafely<T = unknown>(text: string): { data?: T; error?: string } {
   try {
-    return { data: JSON.parse(text) };
+    return { data: JSON.parse(text) as T };
   } catch (err) {
     return { error: err instanceof Error ? err.message : "Invalid JSON syntax" };
   }
 }
+
+export type RawPacket = {
+  spec_version?: string | number;
+  hashes?: {
+    derivative?: { filename?: string; sha256?: string; bytes?: number };
+    manifest_json_sha256?: string;
+    report_json_sha256?: string;
+    certificate_html_sha256?: string;
+  };
+  manifest_sha256?: string;
+  audit_refs?: Record<string, unknown>;
+  release_id?: string;
+  job_id?: string;
+  packet_id?: string;
+  document_id?: string;
+  matter_id?: string;
+  policy?: { id?: string } | null;
+  policy_id?: string;
+  status?: string;
+  generated_at?: string;
+  original_sha256?: string;
+  derivative?: { filename?: string; sha256?: string; bytes?: number };
+  anchor?: {
+    type?: string;
+    signature?: string;
+    digest?: string;
+    reference?: string;
+  };
+  action_records?: Array<{ action?: string; subtype?: string }>;
+  actions?: Array<string | { action?: string; subtype?: string }>;
+  legal_justifications?:
+    | Array<{
+        subtype?: string;
+        action?: string;
+        basis?: string;
+        note?: string;
+        legal_justification?: { basis?: string; note?: string };
+      }>
+    | Record<string, unknown>;
+  limitations?: unknown[];
+  [key: string]: unknown;
+};
 
 export async function verifyReleasePacket(
   packetRaw: string | object,
@@ -88,7 +130,9 @@ export async function verifyReleasePacket(
 ): Promise<VerificationReport> {
   const checks: CheckResult[] = [];
   const parsed =
-    typeof packetRaw === "string" ? parseJsonSafely(packetRaw) : { data: packetRaw };
+    typeof packetRaw === "string"
+      ? parseJsonSafely<RawPacket>(packetRaw)
+      : { data: packetRaw as RawPacket };
 
   if (parsed.error || !parsed.data) {
     return {
@@ -364,10 +408,10 @@ export async function verifyReleasePacket(
   } else if (p.legal_justifications && typeof p.legal_justifications === "object") {
     for (const [subtype, item] of Object.entries(p.legal_justifications)) {
       if (item && typeof item === "object") {
-        const raw = item as Record<string, any>;
+        const raw = item as Record<string, unknown>;
         const lj =
           raw.legal_justification && typeof raw.legal_justification === "object"
-            ? raw.legal_justification
+            ? (raw.legal_justification as Record<string, unknown>)
             : null;
         legalJustifications.push({
           subtype,

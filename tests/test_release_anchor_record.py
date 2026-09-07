@@ -244,3 +244,106 @@ def test_anchored_event_does_not_amend_the_download_event(tmp_path, monkeypatch)
     assert anchored[0]["seq"] > download[0]["seq"]
     # And the chain still verifies with the extra event in it.
     assert c.get(f"/v1/matters/{mid}/audit").json()["chain_ok"] is True
+
+
+def test_concurrent_anchor_write_race_guarded_by_cas(tmp_path, monkeypatch):
+    """Regression test for F3.2 (lossy anchor write race):
+    Concurrent bundle downloads with distinct TSA anchor tokens must not
+    arbitrarily clobber the Release row with a stale/concurrent write, and
+    both observations must be immutably recorded in the bundle.anchored audit chain."""
+    import itertools
+    import threading
+
+    import app.main as main_mod
+    from app import tsa as tsa_mod
+
+    counter = itertools.count(1)
+
+    def fake_anchor(sig_bytes):
+        n = next(counter)
+        return {"type": "rfc3161-tsa", "digest": f"{n:064x}", "reference": "tsa://test"}
+
+    monkeypatch.setattr(main_mod, "request_anchor", fake_anchor)
+    monkeypatch.setattr(main_mod, "anchor_enabled", lambda: True)
+    monkeypatch.setattr(tsa_mod, "request_anchor", fake_anchor)
+
+    c = _client(tmp_path, monkeypatch, "off")
+    mid, rid, jid = _release(c)
+
+    results = {}
+    barrier = threading.Barrier(2, timeout=15)
+    orig_get = c.get
+
+    def hit(tag):
+        barrier.wait()
+        r = orig_get(f"/v1/matters/{mid}/jobs/{jid}/bundle")
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        packet = json.loads(z.read("release_packet.json"))
+        results[tag] = (packet.get("anchor") or {}).get("digest")
+
+    t1 = threading.Thread(target=lambda: hit("A"))
+    t2 = threading.Thread(target=lambda: hit("B"))
+    t1.start()
+    t2.start()
+    t1.join(30)
+    t2.join(30)
+
+    # Both downloads succeeded and acquired distinct anchor digests
+    assert results.get("A") and results.get("B")
+    assert results["A"] != results["B"]
+
+    # Both observations are immutably captured in the audit log
+    anchored_events = list(_anchored_events(c, mid))
+    assert len(anchored_events) == 2
+    event_digests = {e["payload"]["anchor_digest"] for e in anchored_events}
+    assert results["A"] in event_digests
+    assert results["B"] in event_digests
+
+    # The Release row holds a valid anchor from one of the downloads
+    last = c.get(f"/v1/matters/{mid}/releases/{rid}").json()["last_anchor"]
+    assert last["type"] == "rfc3161-tsa"
+    assert last["digest"] in (results["A"], results["B"])
+    assert last["externally_anchored"] is True
+
+
+def test_anchor_cas_prevents_stale_overwrite(tmp_path, monkeypatch):
+    """Proves CAS specifically refuses to overwrite with an older or identical timestamp."""
+    from app.db import make_session_factory
+    from app.models import Release
+    from sqlalchemy import or_, update
+
+    c = _client(tmp_path, monkeypatch, "off")
+    mid, rid, jid = _release(c)
+    # First download sets last_anchor_at
+    c.get(f"/v1/matters/{mid}/jobs/{jid}/bundle")
+    first_last = c.get(f"/v1/matters/{mid}/releases/{rid}").json()["last_anchor"]
+    first_digest = first_last["digest"]
+    first_at = first_last["at"]
+
+    cfg = Config(tmp_path / "data")
+    engine = make_engine(cfg)
+    sf = make_session_factory(engine)
+    with sf() as s:
+        stmt = (
+            update(Release)
+            .where(
+                Release.id == rid,
+                or_(
+                    Release.last_anchor_at.is_(None),
+                    Release.last_anchor_at < first_at,  # Same timestamp should be rejected
+                ),
+            )
+            .values(
+                last_anchor_type="rfc3161-tsa",
+                last_anchor_at=first_at,
+                last_anchor_digest="stale_digest_should_not_overwrite",
+            )
+        )
+        res = s.execute(stmt)
+        s.commit()
+        assert res.rowcount == 0, "CAS must not update row with equal or older timestamp"
+
+    # Row still retains first_digest
+    re_read = c.get(f"/v1/matters/{mid}/releases/{rid}").json()["last_anchor"]
+    assert re_read["digest"] == first_digest
+

@@ -34,6 +34,7 @@ from common import (
 from container_meta import (
     AUTHORING_EXHAUST_RETAINED,
     MAX_ZIP_DECOMPRESSED_BYTES,
+    UnsupportedCleanError,
     clean_container,
     detect_container_format,
     extract_ooxml_plaintext,
@@ -920,7 +921,7 @@ def clean_to_bundle(
             legal_justifications=legal_justifications,
         )
         cleaned, records = _run_capped(lambda: apply_actions(data, plan), Caps().apply_timeout_s)
-    except PolicyError as e:
+    except (PolicyError, UnsupportedCleanError) as e:
         raise custody_mod.CustodyError(f"plan refused: {e}") from e
 
     layer_b: dict[str, Any] | None = None

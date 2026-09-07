@@ -858,3 +858,33 @@ def test_bulk_safe_flags_match_policy_engine():
     assert declared["privacy_only"] is True
     assert declared["production"] is False
     assert declared["evidence_preservation"] is False
+
+
+def test_cancel_batch_unauthorized_oracle_prevented(env):
+    """Regression test for F3.1 (cancel_batch existence oracle):
+    An unauthorized caller must receive identical 403 responses whether a batch ID
+    exists or not, preventing batch ID enumeration across matters."""
+    c, _sf, cfg = env
+    mid = _matter(c)
+    d = _upload(c, mid, "spa.txt")
+    batch = _create_batch(c, mid, [d], "sanitize").json()
+    bid = batch["batch"]["id"] if "batch" in batch else batch["id"]
+
+    mallory_cookie = issue_session(cfg, "oidc:mallory")
+    headers = {"Cookie": f"cc_session={mallory_cookie}"}
+
+    # Real batch on matter mallory cannot read
+    r_real = c.post(f"/v1/matters/{mid}/batches/{bid}/cancel", headers=headers)
+    assert r_real.status_code == 403
+    assert r_real.json() == {"detail": "missing permission: read"}
+
+    # Non-existent batch on matter mallory cannot read
+    r_fake = c.post(f"/v1/matters/{mid}/batches/0000000000000000/cancel", headers=headers)
+    assert r_fake.status_code == 403
+    assert r_fake.json() == {"detail": "missing permission: read"}
+
+    # Non-existent matter
+    r_fake_matter = c.post(f"/v1/matters/nonexistent-matter/batches/{bid}/cancel", headers=headers)
+    assert r_fake_matter.status_code == 403
+    assert r_fake_matter.json() == {"detail": "missing permission: read"}
+

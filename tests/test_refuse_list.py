@@ -17,12 +17,14 @@ import pytest
 from container_meta import (
     UnsupportedCleanError,
     clean_container,
+    clean_docx,
     container_clean_refusal,
     detect_container_format,
     inspect_container,
     office_zip_risks,
 )
-from engine_api import classify_bytes, clean_bytes
+from custody import CustodyError
+from engine_api import classify_bytes, clean_bytes, clean_to_bundle
 from findings import findings_for_report
 
 
@@ -200,3 +202,37 @@ def test_findings_project_macro_and_signature_signals(tmp_path):
         if f.subtype in ("macros_vba", "cms_or_xml_dsig"):
             assert f.action_recommended == "refuse"
             assert f.risk_level == "critical"
+
+
+def test_excessive_xml_nesting_depth_refusal(tmp_path):
+    """F1.1: Deeply nested XML (> MAX_XML_DEPTH) raises UnsupportedCleanError
+    and produces a clean 'plan refused' CustodyError rather than RecursionError / 500.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/></Types>',
+        )
+        z.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/></Relationships>',
+        )
+        # 350 nested elements (exceeds MAX_XML_DEPTH = 300)
+        xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+        xml += "<w:p>" * 350 + "<w:r><w:t>deep text</w:t></w:r>" + "</w:p>" * 350
+        xml += "</w:body></w:document>"
+        z.writestr("word/document.xml", xml.encode("utf-8"))
+    data = buf.getvalue()
+
+    # 1. Direct cleaner raises UnsupportedCleanError
+    with pytest.raises(UnsupportedCleanError, match="exceeds maximum supported limit"):
+        clean_docx(data, strip_hidden_text=True)
+
+    # 2. clean_to_bundle catches UnsupportedCleanError and surfaces clean refusal CustodyError
+    src = _write(tmp_path, "hostile_depth.docx", data)
+    out_dir = tmp_path / "bundle_out"
+    with pytest.raises(CustodyError, match="plan refused: document XML nesting depth exceeds maximum supported limit"):
+        clean_to_bundle(src, out_dir, policy_id="external_sharing")
