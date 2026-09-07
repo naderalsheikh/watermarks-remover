@@ -1112,17 +1112,58 @@ _DOCX_COMMENT_PARTS = (
     "word/commentsExtensible.xml",
     "word/people.xml",
 )
-_DOCX_INS_RE = re.compile(rb"<w:(?:ins|moveTo)\b")
-_DOCX_DEL_RE = re.compile(rb"<w:(?:del|moveFrom|delText)\b")
-_DOCX_FMT_CHANGE_RE = re.compile(rb"<w:(?:rPrChange|pPrChange|sectPrChange|tblPrChange)\b")
-_DOCX_ROW_DEL_RE = re.compile(rb"<w:trPr\b[^>]*>(?:(?!</w:trPr>).)*?<w:del\b", re.S)
-_DOCX_CELL_REVISION_RE = re.compile(rb"<w:(?:cellIns|cellDel|cellMerge)\b")
-_DOCX_VANISH_RE = re.compile(rb"<w:vanish\b")
+# Namespace-prefix tolerance (custody-audit Task 5). OOXML prefixes are
+# ARBITRARY: binding the wordprocessingml-2006-main URI to "wx:" instead of
+# "w:" is spec-valid XML a conforming parser opens identically, and every one
+# of these detectors previously matched the literal bytes "<w:ins", "<w:del",
+# "<w:delText", "<w:vanish" -- so a re-prefixed document was reported as
+# carrying no tracked changes and no hidden text, never ran Accept All, and
+# passed verification with a clean record while the deleted clause survived.
+# The XLSX/PPTX detectors were already prefix-tolerant (xlsx_legal.py's
+# "(?:\w+:)?" dialect); this is the DOCX side catching up.
+#
+# Two dialects, chosen per name:
+#
+# - _WX_TAG (any prefix) for element names whose base name is unique to
+#   WordprocessingML ("ins", "del", "delText", "vanish", "color", ...).
+#   Nothing else in a word/*.xml part defines those names, so a blind prefix
+#   cannot collide.
+#
+# - _WML_TAG (w: or w9: only) for the TWO names DrawingML also defines:
+#   a:moveTo opens every custGeom path segment and a:highlight styles shape
+#   text -- both sit inside ordinary word/document.xml. A blind dialect
+#   there would widen _DOCX_LEGAL_MARKUP_RE (the gate for the whole
+#   XML-aware pass) to nearly every document containing a shape, silently
+#   re-serializing kept parts and churning golden fixtures. Only "w" (2006
+#   main) and "w9" (2004 transitional -- same vocabulary, seen in the wild
+#   on Word 2003/2007 XML) are bound to wordprocessingml in documents Word
+#   writes or accepts, so the scoped dialect is exact for them.
+_WX_TAG = rb"<(?:\w+:)?"  # element name unique to WordprocessingML
+_WML_TAG = rb"<(?:w|w9):"  # element name shared with DrawingML
+_WX_CLOSE = rb"</(?:\w+:)?"
+# Attribute names are prefix-tolerant too, but they are NOT elements: no
+# "<" in the pattern. `w:val` on w:color/w:rPr rides the same arbitrary
+# namespace binding as its element.
+_WX_ATTR = rb"(?:\w+:)?"
+
+_DOCX_INS_RE = re.compile(_WX_TAG + rb"ins\b|" + _WML_TAG + rb"moveTo\b")
+_DOCX_DEL_RE = re.compile(_WX_TAG + rb"(?:del|moveFrom|delText)\b")
+_DOCX_FMT_CHANGE_RE = re.compile(_WX_TAG + rb"(?:rPrChange|pPrChange|sectPrChange|tblPrChange)\b")
+_DOCX_ROW_DEL_RE = re.compile(
+    _WX_TAG + rb"trPr\b[^>]*>(?:(?!" + _WX_CLOSE + rb"trPr>).)*?" + _WX_TAG + rb"del\b",
+    re.S,
+)
+_DOCX_CELL_REVISION_RE = re.compile(_WX_TAG + rb"(?:cellIns|cellDel|cellMerge)\b")
+_DOCX_VANISH_RE = re.compile(_WX_TAG + rb"vanish\b")
 # ["'] backreference, not a hardcoded double quote: XML allows either
 # quote style (issue #130's fix, _target_attr, is the same pattern) — a
 # double-quote-only match let white-on-white text written with single
 # quotes (w:val='FFFFFF') hide from this exact privilege-risk detector.
-_DOCX_WHITE_RE = re.compile(rb'<w:color\b[^>]*w:val=(["\'])[Ff]{6}\1')
+# The colour ELEMENT and its val ATTRIBUTE are prefix-tolerant too: both
+# ride the document's (arbitrary) namespace binding.
+_DOCX_WHITE_RE = re.compile(
+    _WX_TAG + rb"color\b[^>]*" + _WX_ATTR + rb"val=([\"'])[Ff]{6}\1"
+)
 # Body-bearing parts, i.e. parts that can carry actual text runs. Every
 # other word/*.xml part (styles.xml, numbering.xml, settings.xml,
 # theme/*.xml, fontTable.xml ...) is Word's formatting machinery: a white
@@ -1142,20 +1183,36 @@ _DOCX_BODY_PART_RE = re.compile(
 # A white colour inside run properties, i.e. actually applied to a run of
 # text rather than declared in a style. Scoped to <w:rPr>...</w:rPr> so a
 # paragraph-mark colour (w:pPr/w:rPr) or a table style does not inflate it.
+# Prefix-tolerant on both the rPr and color elements (namespace prefixes are
+# arbitrary -- see the _WX_TAG note above).
 _DOCX_APPLIED_WHITE_RE = re.compile(
-    rb"<w:rPr\b(?:(?!</w:rPr>).)*?<w:color\b[^>]*w:val=([\"'])[Ff]{6}\1",
+    _WX_TAG + rb"rPr\b(?:(?!" + _WX_CLOSE + rb"rPr>).)*?"
+    + _WX_TAG + rb"color\b[^>]*" + _WX_ATTR + rb"val=([\"'])[Ff]{6}\1",
     re.S,
 )
 
 
 def _is_docx_body_part(name: str) -> bool:
     return bool(_DOCX_BODY_PART_RE.match(name))
-_DOCX_HIGHLIGHT_RE = re.compile(rb"<w:highlight\b")
-_DOCX_COMMENT_MARKER_RE = re.compile(rb"<w:(?:commentRangeStart|commentRangeEnd|commentReference)\b")
+# highlight is a DrawingML name too (a:highlight, shape-text run property),
+# so it gets the scoped dialect — see the _WML_TAG note.
+_DOCX_HIGHLIGHT_RE = re.compile(_WML_TAG + rb"highlight\b")
+# commentRangeStart/End/Reference are unique to WordprocessingML.
+_DOCX_COMMENT_MARKER_RE = re.compile(_WX_TAG + rb"(?:commentRangeStart|commentRangeEnd|commentReference)\b")
 # Anything that makes a part worth an XML-aware pass on clean.
+#
+# Prefix tolerance matters double here: this regex is the GATE for the whole
+# XML-aware pass, so with the literal <w: bytes a re-prefixed document never
+# reached _docx_accept_all at all -- no Accept All, no comment markers, no
+# hidden-text strip, and a verify record that passed clean. The two
+# DrawingML-shared names (moveTo, highlight) use the scoped dialect so
+# widening the gate does not sweep in every document with a shape.
 _DOCX_LEGAL_MARKUP_RE = re.compile(
-    rb"<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange"
-    rb"|tblPrChange|delText|commentRangeStart|commentRangeEnd|commentReference"
+    # NB: moveTo is NOT in this blind group -- DrawingML's a:moveTo would
+    # match it in every custGeom path. It (and highlight) sit in the scoped
+    # group at the bottom, bound to w:/w9: only.
+    _WX_TAG + rb"(?:ins|del|moveFrom|rPrChange|pPrChange|sectPrChange"
+    rb"|tblPrChange|delText"
     # Same "worth an XML-aware pass" gate, extended for the row/cell/grid
     # change wrappers and range bookmarks _DOCX_ACCEPT_DROP now handles —
     # a part carrying only these and nothing from the list above would
@@ -1171,6 +1228,8 @@ _DOCX_LEGAL_MARKUP_RE = re.compile(
     # but a part carrying them still deserves the XML-aware pass for
     # whatever else it contains.
     rb"|cellIns|cellDel|cellMerge)\b"
+    # DrawingML-shared names, scoped (see _WML_TAG).
+    b"|" + _WML_TAG + rb"(?:moveTo|highlight)\b"
 )
 
 
@@ -1191,7 +1250,7 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
     comment_count = 0
     if "word/comments.xml" in names:
         raw = _read_zip_member(zf, zf.getinfo("word/comments.xml"), budget)
-        comment_count = len(re.findall(rb"<w:comment\b", raw))
+        comment_count = len(re.findall(_WX_TAG + rb"comment\b", raw))
     ins = de = fmt_changes = vanish = white = highlight = markers = embeddings = 0
     row_dels = cell_revs = 0
     white_applied = 0
@@ -1428,7 +1487,7 @@ def _inspect_ooxml_layer_a(data: bytes, fmt: str) -> tuple[int, list[dict], list
                 xml = _read_zip_member(zf, info, budget).decode("utf-8", errors="surrogateescape")
                 if fmt == "docx":
                     n, h = _inspect_text_runs(
-                        xml, re.compile(r"<w:t\b[^>]*>"), re.compile(r"</w:t>")
+                        xml, _W_T_OPEN_RE, _W_T_CLOSE_RE
                     )
                 elif fmt == "xlsx":
                     n, h = _inspect_text_runs(xml, re.compile(r"<t\b[^>]*>"), re.compile(r"</t>"))
@@ -1475,7 +1534,7 @@ def extract_ooxml_plaintext(data: bytes, fmt: str) -> str:
                     continue
                 xml = _read_zip_member(zf, info, budget).decode("utf-8", errors="surrogateescape")
                 if fmt == "docx":
-                    open_re, close_re = re.compile(r"<w:t\b[^>]*>"), re.compile(r"</w:t>")
+                    open_re, close_re = _W_T_OPEN_RE, _W_T_CLOSE_RE
                 elif fmt == "xlsx":
                     open_re, close_re = re.compile(r"<t\b[^>]*>"), re.compile(r"</t>")
                 else:
@@ -1489,8 +1548,14 @@ def extract_ooxml_plaintext(data: bytes, fmt: str) -> str:
     return "\n".join(chunks)
 
 
-_W_DELTEXT_OPEN_RE = re.compile(r"<w:delText\b[^>]*>")
-_W_DELTEXT_CLOSE_RE = re.compile(r"</w:delText>")
+# Namespace-prefix tolerance: the 2006-main URI may be bound to any prefix
+# (spec-valid XML), so the w:t run iterators, the delText oracle and the
+# scrub twin all use the (?:\w+:)? dialect. "t" and "delText" are unique to
+# WordprocessingML, so a blind prefix cannot collide with DrawingML here.
+_W_T_OPEN_RE = re.compile(r"<(?:\w+:)?t\b[^>]*>")
+_W_T_CLOSE_RE = re.compile(r"</(?:\w+:)?t>")
+_W_DELTEXT_OPEN_RE = re.compile(r"<(?:\w+:)?delText\b[^>]*>")
+_W_DELTEXT_CLOSE_RE = re.compile(r"</(?:\w+:)?delText>")
 
 
 def extract_docx_deleted_text(data: bytes, *, min_len: int = 4) -> list[str]:
@@ -1566,9 +1631,10 @@ def _scrub_docx_text(xml_text: str) -> tuple[str, int, int]:
     Only ``w:t`` nodes are touched: field codes (``w:instrText``), run/paragraph
     properties and the surrounding XML are left byte-identical. If leading or
     trailing whitespace survives the clean, the node keeps
-    ``xml:space="preserve"`` so Word does not trim it.
+    ``xml:space="preserve"`` so Word does not trim it. The element match is
+    namespace-prefix tolerant (see _W_T_OPEN_RE).
     """
-    return _scrub_text_runs(xml_text, re.compile(r"<w:t\b[^>]*>"), re.compile(r"</w:t>"))
+    return _scrub_text_runs(xml_text, _W_T_OPEN_RE, _W_T_CLOSE_RE)
 
 
 def _scrub_xlsx_text(xml_text: str) -> tuple[str, int, int]:
