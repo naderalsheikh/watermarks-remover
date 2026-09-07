@@ -95,7 +95,40 @@ The demo seed now acknowledges two findings, which makes the walkthrough better 
 
 **Consequence: the gate is retired for hidden text.** The approve-but-unremovable set shrank from four subtypes to three (`hidden_structure`, `pdf_acroform`, `layer_a_non_body`). The gate forced acknowledgement while removal was impossible; removal now happens and nobody is asked. That is the two halves composing as designed.
 
-**B3 — Re-scrub the Aurelia deliverable.** UNBLOCKED as of 2026-09-05; not yet done. Until it is, the honest client communication is: *the derivative retains hidden-text formatting; the current release's certificate now discloses this as a limitation; no configuration of the product removes it today.* Do not re-issue a packet claiming otherwise.
+**B3 — Re-scrub the Aurelia deliverable. RE-SCOPED 2026-09-07 after running today's engine over the actual source document; NOT issued.**
+
+The matter is real and local: `SJO — Aurelia Build Group, LLC (Contractor Agreement)` (`data/counselclear-sjo/`, matter `03b44ae916864d4d`, `is_demo=0`), one document `sjo_agreement.docx` (54,828 bytes, `sha256:d448675852…`), two `done` releases to `Aurelia Build Group, LLC (counterparty)` under `external_sharing`, both 2026-09-02. The source file is still on disk, so the re-scrub is executable — and executing it, read-only into a scratch directory, produced a different answer from the one this plan assumed.
+
+**What the concealment actually is.** The 2026-09-02 manifest recorded `docx-hidden-text: vanish=0 white=119 highlight=0`, and this plan has since read "119" as 119 concealed things. Lane A's A2 split says otherwise. Today's inspect of the same bytes:
+
+```
+hidden_vanish: 0
+hidden_white: 119
+hidden_white_rule_parts: {"word/styles.xml": 119}
+hidden_white_applied_runs: 0
+hidden_white_applied_parts: []
+```
+
+**119 white-font style *declarations* in `word/styles.xml`, and not one run in any body part applying them.** Nothing is concealed in this document. The finding is unused Word template boilerplate. A2 was written to make exactly this distinction visible and it worked — the first time it was pointed at the document that motivated the lane, it reclassified the finding.
+
+**Consequence for the client communication, which was wrong.** The sentence this plan told us to say — *the derivative retains hidden-text formatting … no configuration of the product removes it today* — is true about the file and materially misleading about the exposure. It invites a reader to picture concealed text in a contract sent to a counterparty. What is retained is a style table. Any superseding communication should say that, and should not repeat this plan's earlier framing.
+
+**Two defects, both reproduced.**
+
+*B3-D1 — the white-only refusal does not fire, and the job dies at the verify gate instead.* `policies.py:513-533` gates `WHITE_ONLY_HIDDEN_REFUSAL` on `hidden_vanish == 0 and hidden_white_applied_runs > 0`. Aurelia has `applied_runs == 0`, so it falls past the refusal into a strip with nothing to strip, the strip no-ops, the detector still reports `hidden_white: 119`, and `reinspect_targeted_gone` fails:
+
+```
+engine_api.clean_to_bundle(src, out, policy_id="external_sharing")
+-> CustodyError: verification failed: reinspect_targeted_gone
+```
+
+This is precisely the outcome the B-stripper section says it designed against — *"rather than letting `strip` silently no-op and die later at the re-inspect gate"* — reached by the one input shape the refusal's condition does not cover. The operator gets a generic gate failure naming no remedy, on a document with nothing hidden in it. The refusal's condition should be `hidden_vanish == 0 and hidden_white > 0`, or the declarations-only case needs its own message.
+
+*B3-D2 — open question, not a fix to make quietly.* `hidden_text_formatting` is raised at all on `applied_runs == 0`. A style declaration nothing uses conceals nothing, and raising it forces every such document through an acknowledgement whose recorded basis will always be "there was nothing there". Suppressing it would let Aurelia release clean with no acknowledgement — but it is a detector-semantics change with blast radius across every DOCX from a Word template, and it trades a false positive for a possible false negative. Decide it deliberately; do not let it ride along with D1.
+
+**What a superseding release would produce, if issued.** Verified by running it with `decisions={"hidden_text": "keep"}`, the acknowledge path, into a scratch bundle. It succeeds, and the record is materially better than 2026-09-02's: schema **v3** against v1, a real `dispositions` ledger (`hidden_text | flag | retained_as_planned | operator_acknowledged | retained_finding: true`), `residual_metadata` naming what was kept and why — and **2,122 `w:rsid*` edit-session attributes stripped that the 2026-09-02 derivative still carries**, because A4 did not exist then. That last item is a real privacy improvement to the counterparty deliverable and is the strongest argument for re-issuing.
+
+**Not issued, deliberately.** Producing a superseding custody packet for a live counterparty is an outward-facing legal act, and the acknowledge path requires a `legal_justification` that a person has to write — the scratch run recorded `basis: "unspecified", note: ""`, which is not a basis anyone should sign. Nothing was written to `data/counselclear-sjo/`. The owner decides whether to issue; the engineering blocker (D1) should be fixed first so the release does not depend on an operator knowing to pass an acknowledgement flag to get past a gate that should have refused with a named remedy.
 
 **Done criteria:** proposal merged; gate implemented with a regression test that a hidden-text document cannot reach a `done` external release without either removal or an affirmative recorded decision; stripper implemented with a postcondition check proving the concealed text is absent from the derivative's plaintext; superseding release issued for the Aurelia matter.
 
