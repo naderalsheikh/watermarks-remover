@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError } from "./api";
+import { createPaginationScope } from "./paginationScope";
 
 export type Page<T, M = undefined> = { items: T[]; total: number; meta?: M };
 
@@ -49,7 +50,10 @@ export function usePaginatedList<T, M = undefined>(
     meta: undefined,
     error: null,
   });
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadingMoreKey, setLoadingMoreKey] = useState<string | null>(null);
+  const scopeRef = useRef<ReturnType<
+    typeof createPaginationScope<Page<T, M>>
+  > | null>(null);
 
   const fetchPageRef = useRef(fetchPage);
   useEffect(() => {
@@ -57,12 +61,10 @@ export function usePaginatedList<T, M = undefined>(
   });
 
   useEffect(() => {
-    let cancelled = false;
-    setLoadingMore(true);
-    fetchPageRef
-      .current(0)
-      .then((page) => {
-        if (cancelled) return;
+    const scope = createPaginationScope<Page<T, M>>(requestKey);
+    scopeRef.current = scope;
+    void scope.run(0, fetchPageRef.current, {
+      onPage: (page) => {
         setState({
           requestKey,
           items: page.items,
@@ -70,9 +72,8 @@ export function usePaginatedList<T, M = undefined>(
           meta: page.meta,
           error: null,
         });
-      })
-      .catch((e: unknown) => {
-        if (cancelled) return;
+      },
+      onError: (e: unknown) => {
         if (e instanceof ApiError && e.status === 401) {
           router.replace("/login");
           return;
@@ -84,37 +85,41 @@ export function usePaginatedList<T, M = undefined>(
           meta: undefined,
           error: e instanceof Error ? e.message : String(e),
         });
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingMore(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      },
+      onSettled: () => setLoadingMoreKey((current) => current === requestKey ? null : current),
+    });
+    return () => scope.cancel();
   }, [requestKey, router]);
 
   const loading = state.requestKey !== requestKey;
+  const loadingMore = loadingMoreKey === requestKey;
 
   async function loadMore() {
-    setLoadingMore(true);
-    try {
-      const page = await fetchPageRef.current(state.items.length);
-      setState((s) => ({
-        requestKey: s.requestKey,
-        items: [...s.items, ...page.items],
-        total: page.total,
-        meta: page.meta,
-        error: null,
-      }));
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 401) {
-        router.replace("/login");
-        return;
-      }
-      setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e) }));
-    } finally {
-      setLoadingMore(false);
-    }
+    const scope = scopeRef.current;
+    if (loading || state.items.length >= state.total || scope?.requestKey !== requestKey) return;
+    const offset = state.items.length;
+    await scope.run(offset, fetchPageRef.current, {
+      onStart: () => setLoadingMoreKey(requestKey),
+      onPage: (page) => {
+        setState((s) => s.requestKey === requestKey && s.items.length === offset ? {
+          requestKey,
+          items: [...s.items, ...page.items],
+          total: page.total,
+          meta: page.meta,
+          error: null,
+        } : s);
+      },
+      onError: (e: unknown) => {
+        if (e instanceof ApiError && e.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        setState((s) => s.requestKey === requestKey ? {
+          ...s, error: e instanceof Error ? e.message : String(e),
+        } : s);
+      },
+      onSettled: () => setLoadingMoreKey((current) => current === requestKey ? null : current),
+    });
   }
 
   return {
@@ -126,6 +131,10 @@ export function usePaginatedList<T, M = undefined>(
     loadingMore,
     hasMore: !loading && state.items.length < state.total,
     loadMore,
-    reload: () => setTick((t) => t + 1),
+    reload: () => {
+      // Invalidate immediately: an old page may settle before the next effect.
+      scopeRef.current?.cancel();
+      setTick((t) => t + 1);
+    },
   };
 }

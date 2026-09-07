@@ -39,6 +39,7 @@ import { Header } from "@/components/Header";
 import { SelectionCheckbox } from "@/components/SelectionCheckbox";
 import { StatusBadge } from "@/components/StatusBadge";
 import { selectionSummary, toggleVisibleSelection } from "@/lib/documentSelection";
+import { documentResultLink } from "@/lib/documentResultLink";
 
 const PAGE_SIZE = 50;
 
@@ -513,6 +514,7 @@ function DocumentRow({
     .filter((j) => j.document_id === doc.id)
     .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
   const nextStep = documentNextStep(docJobs, releaseProfiles);
+  const resultLink = documentResultLink(docJobs);
 
   useEffect(() => {
     if (highlighted) rowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -545,9 +547,9 @@ function DocumentRow({
           className="mt-1 shrink-0"
         />
         <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0">
-              <p className="truncate font-medium">{doc.filename}</p>
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0 lg:flex-1">
+              <p className="break-words font-medium [overflow-wrap:anywhere]">{doc.filename}</p>
               <p className="truncate font-mono text-xs text-muted" title={doc.sha256}>
                 {formatBytes(doc.bytes)} · sha256:{doc.sha256.slice(0, 16)}…
               </p>
@@ -556,7 +558,16 @@ function DocumentRow({
                 <span className="text-muted"> — {nextStep.detail}</span>
               </p>
             </div>
-            <div className="flex shrink-0 gap-2">
+            <div className="flex shrink-0 flex-wrap gap-2">
+              {resultLink && (
+                <Link
+                  href={`/matters/job?matter=${matterId}&job=${resultLink.jobId}`}
+                  aria-label={`${resultLink.label} for ${doc.filename}`}
+                  className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:opacity-90"
+                >
+                  {resultLink.label} →
+                </Link>
+              )}
               <button
                 onClick={inspect}
                 disabled={inspecting || !inspectGate.allowed}
@@ -698,7 +709,7 @@ function BulkRunPanel({
           </p>
           {hiddenCount != null && hiddenCount > 0 && (
             <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
-              Includes {hiddenCount} document{hiddenCount === 1 ? "" : "s"} hidden by the active status filter.
+              Includes {hiddenCount} document{hiddenCount === 1 ? "" : "s"} outside the current view (search, filters, or unloaded pages).
             </p>
           )}
           {kind === "inspect" ? (
@@ -978,7 +989,7 @@ function ReportsAndExports({
   perms: string[] | undefined;
 }) {
   const linkClass =
-    "shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]";
+    "max-w-full rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.03]";
   return (
     <div className="mb-4 rounded-md border border-border p-3 shadow-card">
       <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
@@ -1034,6 +1045,7 @@ function MatterView({
   const perms = matterQ.data?.perms;
   const uploadGate = permissionGate(perms, "upload");
   const [docSearch, setDocSearch] = useState("");
+  const searchInput = useRef<HTMLInputElement>(null);
   const debouncedDocSearch = useDebouncedValue(docSearch.trim(), 300);
   const docsQ = usePaginatedList<Document>(
     (offset) =>
@@ -1120,6 +1132,11 @@ function MatterView({
   }
 
   const [statusFilter, setStatusFilter] = useState<"all" | StatusTone>("all");
+  function resetDocumentFilters() {
+    setDocSearch("");
+    setStatusFilter("all");
+    searchInput.current?.focus();
+  }
   // docSearch above already narrowed docsQ.items on the server; this filter
   // only applies the status facet, and only over what's loaded so far
   // (accumulated via "Load more") — status isn't a server-side query
@@ -1134,7 +1151,8 @@ function MatterView({
     }
     return true;
   });
-  const visibleDocIds = filteredDocs.map((d) => d.id);
+  const docsPending = docsQ.loading || docSearch.trim() !== debouncedDocSearch;
+  const visibleDocIds = docsPending ? [] : filteredDocs.map((d) => d.id);
   const selection = selectionSummary(selected, visibleDocIds);
 
   return (
@@ -1192,7 +1210,7 @@ function MatterView({
 
       {matterQ.data && <ReportsAndExports matterId={matterId} perms={perms} />}
 
-      {!docsQ.loading && (
+      {!docsQ.loading && !docsQ.error && !debouncedDocSearch && (
         <MatterStats
           documents={docsQ.items}
           documentsTotal={docsQ.total}
@@ -1263,164 +1281,202 @@ function MatterView({
         </p>
       )}
 
-      {docsQ.loading && (
+      <section
+        aria-labelledby="documents-heading"
+        className="mb-4 space-y-3 rounded-lg border border-border p-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="documents-heading" className="text-sm font-semibold">Documents</h2>
+          <p role="status" className="text-xs text-muted">
+            {docsPending
+              ? "Updating documents…"
+              : docsQ.error
+                ? "Couldn’t load documents"
+                : `${filteredDocs.length} shown · ${docsQ.total} ${debouncedDocSearch ? "matching" : "total"}`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            ref={searchInput}
+            type="search"
+            aria-describedby="document-search-help"
+            value={docSearch}
+            onChange={(e) => setDocSearch(e.target.value)}
+            placeholder="Search documents by filename…"
+            aria-label="Search documents by filename"
+            className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-1.5 text-sm focus-visible:border-accent"
+          />
+          {docSearch && (
+            <button
+              type="button"
+              onClick={() => {
+                setDocSearch("");
+                searchInput.current?.focus();
+              }}
+              className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+            >
+              Clear search
+            </button>
+          )}
+        </div>
+        <p id="document-search-help" className="text-xs text-muted">
+          Search covers every filename in this matter. Status filters cover loaded documents
+          and loaded job history only.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            onClick={() => setStatusFilter("all")}
+            aria-pressed={statusFilter === "all"}
+            className={`rounded-md px-2 py-1.5 text-xs ${statusFilter === "all"
+              ? "bg-accent text-white"
+              : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+              }`}
+          >
+            All
+          </button>
+          {(Object.keys(STATUS_TONE_LABEL) as StatusTone[]).map((tone) => (
+            <button
+              key={tone}
+              onClick={() => setStatusFilter(tone)}
+              aria-pressed={statusFilter === tone}
+              className={`rounded-md px-2 py-1.5 text-xs ${statusFilter === tone
+                ? "bg-accent text-white"
+                : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                }`}
+            >
+              {STATUS_TONE_LABEL[tone]}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {batch && <BulkResults matterId={matterId} batch={batch} onUpdate={setBatch} />}
+
+      {bulkAction && (
+        <BulkRunPanel
+          matterId={matterId}
+          docIds={[...selected]}
+          kind={bulkAction}
+          releaseProfiles={bulkSafeReleaseProfiles}
+          recipientTypes={releaseProfilesQ.data?.recipient_types ?? []}
+          hiddenCount={selection.hiddenSelected}
+          onClose={() => setBulkAction(null)}
+          onDone={(newBatch) => {
+            setBatch(newBatch);
+            setSelected(new Set());
+            // The batch's children are now real queued Job rows --
+            // reflect that immediately rather than waiting for the
+            // batch to finish.
+            jobsQ.reload();
+            docsQ.reload();
+          }}
+        />
+      )}
+
+      {selected.size > 0 && !bulkAction && (
+        <div className="mb-3 rounded-md border border-border bg-black/[0.02] px-3 py-2 dark:bg-white/[0.02]">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm font-medium">
+              {selected.size} document{selected.size === 1 ? "" : "s"} selected
+            </span>
+            {selection.hiddenSelected > 0 && (
+              <span className="rounded bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                {selection.visibleSelected} visible · {selection.hiddenSelected} outside this view
+              </span>
+            )}
+            <button
+              onClick={() => setSelected(new Set())}
+              className="text-xs text-muted hover:text-foreground"
+            >
+              Clear
+            </button>
+            {selection.hiddenSelected > 0 && (
+              <button
+                disabled={docsPending}
+                onClick={() =>
+                  setSelected(
+                    new Set(visibleDocIds.filter((id) => selected.has(id)))
+                  )
+                }
+                className="text-xs text-amber-700 hover:underline dark:text-amber-300"
+              >
+                Keep only visible
+              </button>
+            )}
+            <div className="ml-auto flex gap-2">
+              {hasMatterPerm(perms, "inspect") && (
+                <button
+                  onClick={() => setBulkAction("inspect")}
+                  disabled={isOverBulkCap(selected.size) || docsPending}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+                >
+                  Bulk inspect
+                </button>
+              )}
+              {hasMatterPerm(perms, "sanitize") && bulkSafeReleaseProfiles.length > 0 && (
+                <button
+                  onClick={() => setBulkAction("sanitize")}
+                  disabled={isOverBulkCap(selected.size) || docsPending}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
+                >
+                  Bulk release…
+                </button>
+              )}
+            </div>
+          </div>
+          {/* The total includes selections outside the current view;
+              enforce the server's cap before opening the bulk panel. */}
+          {isOverBulkCap(selected.size) && (
+            <p className="mt-2 text-xs text-red-600">
+              Bulk actions are limited to {BULK_MAX_DOCUMENTS} documents at a time.
+              Deselect {bulkCapOverflow(selected.size)} to continue.
+            </p>
+          )}
+        </div>
+      )}
+      {docsPending && (
         <div className="animate-pulse space-y-2">
           <div className="h-14 rounded-md bg-black/[0.04] dark:bg-white/[0.04]" />
           <div className="h-14 rounded-md bg-black/[0.04] dark:bg-white/[0.04]" />
         </div>
       )}
-      {docsQ.error && <p className="text-sm text-red-600">{docsQ.error}</p>}
-      {!docsQ.loading && docsQ.items.length === 0 && (
+      {!docsQ.loading && docsQ.error && (
+        <div role="alert" className="mb-3 rounded-md border border-red-600/30 bg-red-600/5 p-3 text-sm">
+          <p className="text-red-600">Couldn&apos;t load documents: {docsQ.error}</p>
+          <button type="button" onClick={docsQ.reload} className="mt-2 font-medium underline">
+            Retry loading documents
+          </button>
+        </div>
+      )}
+      {!docsPending && !docsQ.error && docsQ.items.length === 0 && (
         <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
           {debouncedDocSearch
             ? `No documents match "${debouncedDocSearch}".`
             : "No documents yet — upload one above to inspect or release it."}
+          {debouncedDocSearch && (
+            <button type="button" onClick={resetDocumentFilters} className="mt-3 block w-full font-medium text-accent hover:underline">
+              Clear filters and show all documents
+            </button>
+          )}
         </div>
       )}
 
-          {!docsQ.loading && docsQ.items.length > 0 && (
-            <>
-              {docsQ.total > docsQ.items.length && (
-                <p className="mb-2 text-xs text-muted">
-                  Loaded {docsQ.items.length} of {docsQ.total}
-                  {debouncedDocSearch ? " matching" : ""} documents — the status filter below only
-                  covers what&apos;s loaded.
-                </p>
-              )}
-
-              {batch && <BulkResults matterId={matterId} batch={batch} onUpdate={setBatch} />}
-
-              {bulkAction && (
-                <BulkRunPanel
-                  matterId={matterId}
-                  docIds={[...selected]}
-                  kind={bulkAction}
-                  releaseProfiles={bulkSafeReleaseProfiles}
-                  recipientTypes={releaseProfilesQ.data?.recipient_types ?? []}
-                  hiddenCount={selection.hiddenSelected}
-                  onClose={() => setBulkAction(null)}
-                  onDone={(newBatch) => {
-                    setBatch(newBatch);
-                    setSelected(new Set());
-                    // The batch's children are now real queued Job rows --
-                    // reflect that immediately rather than waiting for the
-                    // batch to finish.
-                    jobsQ.reload();
-                    docsQ.reload();
-                  }}
-                />
-              )}
-
-              {selected.size > 0 && !bulkAction && (
-                <div className="mb-3 rounded-md border border-border bg-black/[0.02] px-3 py-2 dark:bg-white/[0.02]">
-                  <div className="flex flex-wrap items-center gap-3">
-                    <span className="text-sm font-medium">
-                      {selected.size} of {docsQ.items.length} loaded documents selected
-                    </span>
-                    {selection.hiddenSelected > 0 && (
-                      <span className="rounded bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
-                        {selection.visibleSelected} visible · {selection.hiddenSelected} hidden by active filter
-                      </span>
-                    )}
-                    <button
-                      onClick={() => setSelected(new Set())}
-                      className="text-xs text-muted hover:text-foreground"
-                    >
-                      Clear
-                    </button>
-                    {selection.hiddenSelected > 0 && (
-                      <button
-                        onClick={() =>
-                          setSelected(
-                            new Set([...selected].filter((id) => new Set(visibleDocIds).has(id)))
-                          )
-                        }
-                        className="text-xs text-amber-700 hover:underline dark:text-amber-300"
-                      >
-                        Clear hidden
-                      </button>
-                    )}
-                    <div className="ml-auto flex gap-2">
-                      {hasMatterPerm(perms, "inspect") && (
-                        <button
-                          onClick={() => setBulkAction("inspect")}
-                          disabled={isOverBulkCap(selected.size)}
-                          className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
-                        >
-                          Bulk inspect
-                        </button>
-                      )}
-                      {hasMatterPerm(perms, "sanitize") && bulkSafeReleaseProfiles.length > 0 && (
-                        <button
-                          onClick={() => setBulkAction("sanitize")}
-                          disabled={isOverBulkCap(selected.size)}
-                          className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
-                        >
-                          Bulk release…
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  {/* Disclosed here, before the pre-submit panel even
-                      opens, not just inside it -- the backend hard-caps a
-                      batch at 100 documents (service/app/main.py
-                      create_batch); "select all loaded" across a few
-                      pages can exceed that with nothing in the
-                      confirmation panel warning about it, so a submit
-                      would otherwise only fail with a raw 400 after the
-                      user already clicked through. */}
-                  {isOverBulkCap(selected.size) && (
-                    <p className="mt-2 text-xs text-red-600">
-                      Bulk actions are limited to {BULK_MAX_DOCUMENTS} documents at a time.
-                      Deselect {bulkCapOverflow(selected.size)} to continue.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              <div className="mb-3 space-y-2">
-            <input
-              value={docSearch}
-              onChange={(e) => setDocSearch(e.target.value)}
-              placeholder="Search documents by filename…"
-              aria-label="Search documents by filename"
-              className="w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm focus-visible:border-accent"
-            />
-            <p className="text-xs text-muted">
-              Searches every document in this matter on the server. The status filter below only
-              covers documents already loaded.
+      {!docsPending && docsQ.items.length > 0 && (
+        <>
+          {docsQ.total > docsQ.items.length && (
+            <p className="mb-2 text-xs text-muted">
+              Loaded {docsQ.items.length} of {docsQ.total}
+              {debouncedDocSearch ? " matching" : ""} documents — the status filters above only
+              cover what&apos;s loaded.
             </p>
-            <div className="flex flex-wrap gap-1.5">
-              <button
-                onClick={() => setStatusFilter("all")}
-                aria-pressed={statusFilter === "all"}
-                className={`rounded-md px-2 py-1.5 text-xs ${
-                  statusFilter === "all"
-                    ? "bg-accent text-white"
-                    : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-                }`}
-              >
-                All
-              </button>
-              {(Object.keys(STATUS_TONE_LABEL) as StatusTone[]).map((tone) => (
-                <button
-                  key={tone}
-                  onClick={() => setStatusFilter(tone)}
-                  aria-pressed={statusFilter === tone}
-                  className={`rounded-md px-2 py-1.5 text-xs ${
-                    statusFilter === tone
-                      ? "bg-accent text-white"
-                      : "border border-border hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
-                  }`}
-                >
-                  {STATUS_TONE_LABEL[tone]}
-                </button>
-              ))}
-            </div>
-          </div>
-
+          )}
           {filteredDocs.length === 0 ? (
-            <p className="text-sm text-muted">No loaded documents match this status filter.</p>
+            <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
+              <p>No loaded documents match this status filter.</p>
+              <button type="button" onClick={resetDocumentFilters} className="mt-3 font-medium text-accent hover:underline">
+                Clear filters and show all documents
+              </button>
+            </div>
           ) : (
             <>
               <SelectionCheckbox
@@ -1485,7 +1541,7 @@ function MatterViewInner() {
   // Audit-log document cross-links (web/app/matters/audit/page.tsx) land
   // here with ?doc= — scrolled to and highlighted in DocumentRow below,
   // since there's no separate per-document page to link to instead.
-  return <MatterView matterId={id} highlightDocId={params.get("doc")} />;
+  return <MatterView key={id} matterId={id} highlightDocId={params.get("doc")} />;
 }
 
 export default function MatterViewPage() {
