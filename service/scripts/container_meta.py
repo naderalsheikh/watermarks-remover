@@ -2490,6 +2490,16 @@ def extract_docx_hidden_text(data: bytes) -> list[str]:
     concealed words are gone from the file", and only the second is worth
     making to a recipient. Mirrors ``extract_docx_deleted_text``, which does
     the same job for Accept All.
+
+    Walks every CONTENT part (``_is_docx_content_part``), not the remover's
+    narrower body-part set: this oracle exists to catch concealed text the
+    stripper's scope decision skipped (word/glossary/header1.xml, a future
+    body-bearing part name), so it must see everything the detector sees.
+    A part the stripper skips therefore surfaces here as a ``remaining``
+    fragment and fails ``hidden_text_removed`` loudly, instead of being
+    invisible to the one check that exists to catch the skip. The extra
+    parts (styles, settings, numbering, theme...) carry no ``w:r``/``w:t``
+    runs, so widening cannot mint false fragments.
     """
     import xml.etree.ElementTree as ET
 
@@ -2503,7 +2513,7 @@ def extract_docx_hidden_text(data: bytes) -> list[str]:
                 styles = _read_zip_member(zf, zf.getinfo("word/styles.xml"), budget)
             model = docx_hidden_model(styles)
             for info in zf.infolist():
-                if not _is_docx_body_part(info.filename):
+                if not _is_docx_content_part(info.filename):
                     continue
                 raw = _read_zip_member(zf, info, budget)
                 try:

@@ -929,6 +929,11 @@ def _body_of(blob: bytes) -> str:
         return zf.read("word/document.xml").decode()
 
 
+def _glossary_part_of(blob: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        return zf.read("word/glossary/header1.xml").decode()
+
+
 def test_vanish_text_is_removed_not_unhidden():
     """The single most important property. Un-hiding would surface
     privileged text into the visible document -- the exact disclosure the
@@ -1150,3 +1155,82 @@ def test_verify_does_not_false_positive_on_dual_use_fragments():
     result = verify_derivative(original, cleaned, plan, name="d.docx")
     check = next(c for c in result["checks"] if c["name"] == "hidden_text_removed")
     assert check["pass"], check
+
+
+def _glossary_docx() -> bytes:
+    """A DOCX with a concealed run in the body AND another in a glossary
+    sub-part. ``word/glossary/document.xml`` is on the remover's body-part
+    list, but ``word/glossary/header1.xml`` is not — the remover skips it,
+    and (before the Task 3 fix) the verify oracle walked the same narrow
+    list, so the skip was invisible to the check that exists to catch it."""
+    glossary_ns = (
+        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    )
+    return _docx(
+        {
+            "word/document.xml": _document(
+                "<w:p><w:r><w:t>Visible body.</w:t></w:r></w:p>"
+                '<w:p><w:r><w:rPr><w:vanish/></w:rPr>'
+                "<w:t>BODY SECRET</w:t></w:r></w:p>"
+            ),
+            "word/glossary/document.xml": (
+                f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                f"<w:glossaryDocument {glossary_ns}>"
+                "<w:docParts><w:docPart><w:docPartGallery w:val=\"Cover Pages\"/>"
+                "<w:docPartObj/></w:docPart></w:docParts></w:glossaryDocument>"
+            ).encode(),
+            "word/glossary/header1.xml": (
+                f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                f'<w:hdr {glossary_ns}>'
+                "<w:p><w:r><w:t>Glossary header.</w:t></w:r></w:p>"
+                '<w:p><w:r><w:rPr><w:vanish/></w:rPr>'
+                "<w:t>GLOSSARY SECRET</w:t></w:r></w:p></w:hdr>"
+            ).encode(),
+        }
+    )
+
+
+def test_verify_oracle_sees_parts_outside_the_removers_scope():
+    """The glossary reproduction. The oracle extract_docx_hidden_text walked
+    the same narrow body-part set the remover walks, so any part the remover
+    skipped was invisible to the check that exists to catch the remover
+    skipping it -- hidden_text_removed printed 'confirmed absent' about text
+    that was still there.
+
+    The oracle must see every content part the detector sees. It must NOT be
+    scoped down to the remover's set, because a part the remover skips has to
+    become a loud hidden_text_removed failure, not a false confirmation."""
+    assert container_meta.extract_docx_hidden_text(_glossary_docx()) == [
+        "BODY SECRET",
+        "GLOSSARY SECRET",
+    ]
+
+
+def test_glossary_hidden_text_fails_hidden_text_removed_not_confirms_absent():
+    """End to end: under a strip-hidden-text policy, a derivative that still
+    carries the glossary vanish run must FAIL hidden_text_removed. The old
+    oracle reported '1 concealed fragment(s) confirmed absent' -- a named
+    content-level certification of absence over text that is present.
+
+    The job fails overall either way (the byte-regex re-inspect is broader
+    than the oracle was), but the record must not contain a check that
+    affirmatively lied; the remover's scope decision itself is left alone
+    (widen it or not is a separate decision)."""
+    from engine_api import inspect_bytes
+    from verify import verify_derivative
+
+    original = _glossary_docx()
+    plan = plan_actions(inspect_bytes(original, "d.docx"), "external_sharing")
+    cleaned, _actions = container_meta.clean_docx(original, strip_hidden_text=True)
+
+    # The remover's scope decision is unchanged: the glossary sub-part is
+    # outside the body-part set it strips, so the run survives in it.
+    assert "GLOSSARY SECRET" in _glossary_part_of(cleaned)
+    assert "BODY SECRET" not in _body_of(cleaned), "body run is still removed"
+
+    result = verify_derivative(original, cleaned, plan, name="d.docx")
+    check = next(c for c in result["checks"] if c["name"] == "hidden_text_removed")
+    assert not check["pass"], check
+    assert "confirmed absent" not in check["detail"]
+    assert "still concealed" in check["detail"], check["detail"]
+    assert result["pass"] is False
