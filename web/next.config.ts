@@ -19,7 +19,14 @@ const nextConfig: NextConfig = {
           return [{ source: "/v1/:path*", destination: `${api}/v1/:path*` }];
         },
       }
-    : { output: "export" }),
+    : {
+        output: "export",
+        // trailingSlash makes the export emit `dashboard/index.html` (not
+        // `dashboard.html`), so a static host — nginx or the API's optional
+        // COUNSELCLEAR_STATIC_DIR mount (single-origin PaaS deploys) — can
+        // resolve `/dashboard` to a directory index with html=True.
+        trailingSlash: true,
+      }),
 };
 
 export default nextConfig;

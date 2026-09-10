@@ -11,6 +11,7 @@ import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { hasMatterPerm, permissionGate, releaseGate } from "@/lib/matterPermissions";
 import { BULK_MAX_DOCUMENTS, bulkCapOverflow, isOverBulkCap } from "@/lib/bulkCap";
 import { isCancelledResult } from "@/lib/batchCancel";
+import { ACCEPT_ATTR, validateUploadFilename } from "@/lib/uploadValidation";
 import {
   STATUS_TONE_CLASS,
   STATUS_TONE_LABEL,
@@ -1024,6 +1025,13 @@ function MatterView({
     e.preventDefault();
     const file = fileInput.current?.files?.[0];
     if (!file) return;
+    // Client-side guard: reject clearly-unsupported types up front with a
+    // friendly message. The API re-validates and malware-scans regardless.
+    const rejection = validateUploadFilename(file.name);
+    if (rejection) {
+      setUploadError(rejection);
+      return;
+    }
     setUploading(true);
     setUploadError(null);
     try {
@@ -1159,7 +1167,9 @@ function MatterView({
           ref={fileInput}
           type="file"
           required
+          accept={ACCEPT_ATTR}
           disabled={!uploadGate.allowed}
+          onChange={() => setUploadError(null)}
           className="min-w-0 flex-1 text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-transparent file:px-3 file:py-1.5 file:text-sm disabled:opacity-50"
         />
         <button
@@ -1168,7 +1178,17 @@ function MatterView({
           title={uploadGate.title}
           className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
-          {uploading ? "Uploading…" : "Upload"}
+          {uploading ? (
+            <span className="inline-flex items-center gap-2">
+              <span
+                aria-hidden
+                className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white"
+              />
+              Uploading…
+            </span>
+          ) : (
+            "Upload"
+          )}
         </button>
       </form>
       <p className="mb-8 h-4 text-xs text-muted">

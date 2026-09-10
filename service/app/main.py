@@ -21,6 +21,7 @@ import schemas_meta  # published-schema registry: pins artifacts to contracts (P
 from common import MAX_INPUT_BYTES  # a size constant, not a parser
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, text, update
 from sqlalchemy.exc import IntegrityError
@@ -72,6 +73,7 @@ from .security import (
 from .storage import StorageError as StorageError_
 from .storage import original_key, storage_from_config
 from .tsa import anchor_enabled, request_anchor
+from .version import PRODUCT, __version__
 
 # scripts.policies.NO_DECISION_MARKER, literal here for the same PR 17
 # reason as POLICIES below: main.py must not import the engine. Used only
@@ -1386,8 +1388,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         """Liveness only: the process is up and serving HTTP. No DB, no
         dependencies — a probe wired to this should never restart the
         container over a transient database outage; use /health/ready for
-        that instead (see docs/COUNSELCLEAR_PRODUCTION.md)."""
-        return {"ok": True}
+        that instead (see docs/COUNSELCLEAR_PRODUCTION.md).
+
+        Carries the running product/version so a probe or operator can pin
+        exactly which build answered without a second round-trip."""
+        return {"ok": True, "status": "ok", "product": PRODUCT, "version": __version__}
+
+    @app.get("/version")
+    def version():
+        """Unauthenticated build identifier: product name and semantic
+        version of the running image. Lets a deploy pipeline or uptime
+        monitor confirm which release is live (see /health for liveness)."""
+        return {"product": PRODUCT, "version": __version__}
 
     @app.get("/health/ready")
     def health_ready(s: Session = Depends(db_session)):
@@ -4106,5 +4118,26 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if include_result and j.result_json:
             out["result"] = j.result_json
         return out
+
+    # --- optional single-origin static frontend -----------------------------
+    # Off by default: production normally runs nginx in front (static export at
+    # `/`, `/v1/*` proxied to this API — see deploy/nginx-counselclear.conf.example),
+    # keeping the SameSite=Strict cc_session cookie same-origin. Some PaaS
+    # targets (e.g. one Render web service) can't run that split; setting
+    # COUNSELCLEAR_STATIC_DIR to the built `web/out` export makes this API
+    # serve the UI itself on the same origin. Mounted LAST so every /v1,
+    # /health, /version, /docs route registered above still wins; unknown
+    # paths fall through to the static files. html=True resolves `/dashboard`
+    # to `dashboard/index.html` (the export uses trailingSlash — see
+    # web/next.config.ts).
+    static_dir = os.environ.get("COUNSELCLEAR_STATIC_DIR", "").strip()
+    if static_dir:
+        static_path = Path(static_dir)
+        if static_path.is_dir():
+            app.mount("/", StaticFiles(directory=str(static_path), html=True), name="ui")
+        else:
+            logging.getLogger("counselclear").warning(
+                "COUNSELCLEAR_STATIC_DIR=%s is not a directory; UI not mounted", static_dir
+            )
 
     return app

@@ -39,6 +39,9 @@
 !/requirements-dev.txt
 !/ruff.toml
 !/SECURITY.md
+!/DEPLOY.md
+!/render.yaml
+!/.env.production.example
 
 # Exceptions even inside allowed trees
 .env

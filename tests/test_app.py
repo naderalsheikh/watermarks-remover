@@ -38,7 +38,13 @@ def test_health_is_unauthenticated(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
     c = TestClient(create_app(tmp_path / "d"))
     r = c.get("/health")
-    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert r.status_code == 200
+    body = r.json()
+    # Back-compat: the original liveness flag stays; version/product are
+    # additive so a probe can pin the running build (pilot-ready).
+    assert body["ok"] is True
+    assert body["status"] == "ok"
+    assert body["product"] and body["version"]
 
 
 def test_v1_root_is_a_helpful_unauthenticated_message_not_a_bare_404(tmp_path, monkeypatch):
