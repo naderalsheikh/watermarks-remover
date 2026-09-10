@@ -1,0 +1,66 @@
+# Render.com Blueprint — one-click CounselClear deploy.
+#   https://render.com/docs/blueprint-spec
+#
+# One web service builds deploy/Dockerfile.render (API + baked-in UI on a
+# single origin) and mounts a persistent disk at /data for the SQLite
+# database, write-once document custody store, and audit chain.
+#
+# WHY NOT THE FREE PLAN: Render's free web services have an EPHEMERAL disk
+# and spin down when idle — every restart would wipe the custody store and
+# audit chain. That is unacceptable for a legal record, so the smallest plan
+# that supports a persistent disk (`starter`) is the floor here. Everything
+# else stays minimal. To trial with zero cost and accept data loss, drop the
+# `disk:` block and set plan `free` — do NOT do this for a real pilot.
+#
+# Deploy: push this file to the repo's default branch, then in the Render
+# dashboard → New → Blueprint → pick this repo. Set the secret env vars
+# marked `sync: false` (see DEPLOY.md) on first deploy.
+
+services:
+  - type: web
+    name: clearcounsel
+    runtime: docker
+    dockerfilePath: ./deploy/Dockerfile.render
+    dockerContext: .
+    plan: starter
+    region: oregon
+    branch: main
+    autoDeploy: true
+    # Liveness probe with no DB dependency (see service/app/main.py /health).
+    healthCheckPath: /health
+    disk:
+      name: cc-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      # Shared operator password for local login. REQUIRED unless you switch
+      # to OIDC SSO (set the three COUNSELCLEAR_OIDC_* vars instead). Set as
+      # a secret in the dashboard — never commit it.
+      - key: COUNSELCLEAR_LOCAL_PASSWORD
+        sync: false
+      # Persistent state root (matches the mounted disk).
+      - key: COUNSELCLEAR_DATA_ROOT
+        value: /data
+      # Behind Render's TLS edge: always mark the session cookie Secure.
+      - key: COUNSELCLEAR_COOKIE_SECURE
+        value: "true"
+      # In-process job worker (no docker-in-docker on a PaaS container). This
+      # is the same default the compose legal profile ships; see compose.yaml
+      # for the isolation tradeoff.
+      - key: COUNSELCLEAR_WORKER_MODE
+        value: subprocess
+      # Keep interactive API docs closed on a public deployment (fail-closed
+      # default; opt in only for a private staging box).
+      - key: COUNSELCLEAR_ENABLE_DOCS
+        value: ""
+      # --- Optional OIDC SSO (leave unset to use the local password) --------
+      # Set all three to switch to SSO; local login is then disabled and the
+      # allowlist below is fail-closed (empty = nobody can log in).
+      - key: COUNSELCLEAR_OIDC_ISSUER
+        sync: false
+      - key: COUNSELCLEAR_OIDC_CLIENT_ID
+        sync: false
+      - key: COUNSELCLEAR_OIDC_CLIENT_SECRET
+        sync: false
+      - key: COUNSELCLEAR_OIDC_ALLOWED
+        sync: false

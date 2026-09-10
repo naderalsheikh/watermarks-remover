@@ -38,7 +38,46 @@ def test_health_is_unauthenticated(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
     c = TestClient(create_app(tmp_path / "d"))
     r = c.get("/health")
-    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert r.status_code == 200
+    body = r.json()
+    # Back-compat: the original liveness flag stays; version/product are
+    # additive so a probe can pin the running build.
+    assert body["ok"] is True
+    assert body["status"] == "ok"
+    assert body["product"] and body["version"]
+
+
+def test_version_is_unauthenticated(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    c = TestClient(create_app(tmp_path / "d"))
+    r = c.get("/version")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["product"] and body["version"]
+
+
+def test_static_dir_unset_leaves_root_unmounted(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    monkeypatch.delenv("COUNSELCLEAR_STATIC_DIR", raising=False)
+    c = TestClient(create_app(tmp_path / "d"))
+    assert c.get("/health").status_code == 200
+    assert c.get("/").status_code == 404
+
+
+def test_static_dir_serves_ui_without_shadowing_api_routes(tmp_path, monkeypatch):
+    static_dir = tmp_path / "web_out"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html>ui</html>")
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    monkeypatch.setenv("COUNSELCLEAR_STATIC_DIR", str(static_dir))
+    c = TestClient(create_app(tmp_path / "d"))
+    # A route registered above the static mount still wins.
+    assert c.get("/health").status_code == 200
+    assert c.get("/version").status_code == 200
+    # An unknown path falls through to the mounted static UI.
+    r = c.get("/")
+    assert r.status_code == 200
+    assert "ui" in r.text
 
 
 def test_v1_root_is_a_helpful_unauthenticated_message_not_a_bare_404(tmp_path, monkeypatch):
