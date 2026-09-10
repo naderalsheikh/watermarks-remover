@@ -13,6 +13,23 @@ _ _ _ ____ ___ ____ ____ _  _ ____ ____ _  _ ____    ____ ____ _  _ ____ _  _ __
 [![Stars](https://img.shields.io/github/stars/guillaumemeyer/watermarks-remover)](https://github.com/guillaumemeyer/watermarks-remover/stargazers)
 [![Forks](https://img.shields.io/github/forks/guillaumemeyer/watermarks-remover)](https://github.com/guillaumemeyer/watermarks-remover/forks)
 
+## What CounselClear does
+
+CounselClear is a **release gate for legal documents**: before a lawyer or
+paralegal sends a file to opposing counsel, a court, or a client, CounselClear
+inspects it for AI-provenance and hidden markings (Unicode fingerprints, C2PA
+and embedded metadata, statistical watermarks) across DOCX, PDF, Markdown, and
+HTML, strips what the matter's policy allows, and issues a signed audit
+certificate proving exactly what was removed and when. Every action is
+recorded in a tamper-evident, hash-chained custody log — proof of what
+happened to the document you released, not an assertion that it is "clean."
+It is API-first (built for future Clio/iManage integration) with a web UI a
+paralegal can use without reading a manual.
+
+> **Deploying a pilot:** see [`DEPLOY.md`](DEPLOY.md) and
+> [`render.yaml`](render.yaml) for the single-web-service (Render/PaaS) path,
+> or the split nginx + API deployment under `deploy/`.
+
 This repository currently contains **two distinct surfaces**:
 
 1. **CounselClear**: the Release Gate product for policy-governed document release, custody records, verification, and offline review artifacts.

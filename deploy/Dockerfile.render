@@ -1,0 +1,79 @@
+# Single-service CounselClear image for PaaS targets (Render.com / Fly.io /
+# Railway) that run ONE container per web service and can't run the usual
+# nginx-in-front split (static export at `/`, `/v1/*` proxied to cc-api).
+#
+# It bakes the Next.js static export into the same image as the FastAPI API
+# and serves both on ONE origin/port via COUNSELCLEAR_STATIC_DIR — which
+# keeps the SameSite=Strict cc_session cookie same-origin, exactly as the
+# nginx deployment does. For the classic split deployment keep using
+# service/Dockerfile.counselclear + deploy/nginx-counselclear.conf.example.
+#
+# Build context is the REPO ROOT (needs both web/ and service/):
+#   docker build -f deploy/Dockerfile.render -t counselclear-render .
+#
+# render.yaml at the repo root wires this up for one-click deploys.
+
+# ---- stage 1: build the Next.js static export --------------------------------
+FROM node:22-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+# Production build => `output: "export"` + trailingSlash (see web/next.config.ts),
+# emitting a static site under /web/out with `dashboard/index.html` etc.
+RUN NODE_ENV=production npm run build
+
+# ---- stage 2: API image + baked-in UI ---------------------------------------
+# Same digest-pinned base and hardening as service/Dockerfile.counselclear.
+FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
+
+ARG VERSION=dev
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        clamav \
+        clamav-freshclam \
+        libarchive-zip-perl \
+        libimage-exiftool-perl \
+        qpdf \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build-time virus-definition seed (a floor, not a substitute for runtime
+# freshclam) — see service/Dockerfile.counselclear for the rationale.
+RUN freshclam --stdout || echo "freshclam failed at build time (no network?); clamav db empty until updated at runtime" \
+    && chmod -R a+rX /var/lib/clamav
+
+COPY service/requirements-app.txt /app/requirements-app.txt
+RUN python3 -m pip install --no-cache-dir "pip==26.2.1" \
+    && python3 -m pip install --no-cache-dir -r /app/requirements-app.txt \
+    && rm /app/requirements-app.txt
+
+# MIT requires the copyright notice to travel with substantial portions of
+# the Software, and this image is a distribution of exactly that — same
+# requirement as service/Dockerfile.counselclear (tests/test_image_license_compliance.py
+# enforces it there; this file ships the same two artifacts by the same
+# reasoning even though that test doesn't reach this Dockerfile).
+COPY LICENSE /app/LICENSE
+COPY service/THIRD-PARTY-NOTICES.md /app/THIRD-PARTY-NOTICES.md
+COPY service/scripts /app/scripts
+COPY service/app /app/app
+# Baked UI export served by the API on the same origin.
+COPY --from=web /web/out /app/web_out
+RUN chmod -R a+rX /app/scripts /app/app /app/web_out
+
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin remover
+USER remover
+
+ENV WATERMARKS_SERVER_VERSION=${VERSION} \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    COUNSELCLEAR_DATA_ROOT=/data \
+    COUNSELCLEAR_STATIC_DIR=/app/web_out
+
+WORKDIR /app
+# PaaS platforms inject $PORT; default to 8443 for a plain `docker run`.
+# --proxy-headers makes cookie_secure=auto honour X-Forwarded-Proto behind
+# the platform's TLS-terminating edge, so the session cookie gets Secure.
+ENTRYPOINT []
+CMD ["sh", "-c", "python3 -m uvicorn app.asgi:app --host 0.0.0.0 --port ${PORT:-8443} --proxy-headers --forwarded-allow-ips='*'"]
