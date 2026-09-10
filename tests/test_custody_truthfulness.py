@@ -368,21 +368,20 @@ def test_build_dispositions_postconditions():
 def test_style_level_white_is_not_reported_as_concealed_text():
     """The review's second finding: 'white=119' counted FFFFFF colour
     declarations across every word/*.xml part — styles and numbering
-    included — and read to a reviewer as 119 pieces of concealed text."""
+    included — and read to a reviewer as 119 pieces of concealed text.
+
+    The trigger is gated on the APPLIED count (not the raw one), so a
+    document with zero applied white runs must not produce a hidden-text
+    finding at all -- the raw counters stay populated in the report for
+    transparency, they just no longer decide whether the finding fires
+    (the identical fix applied to highlight, see section 6 below)."""
     _c2pa, _ai, findings, details = container_meta.inspect_docx(_style_only_white_docx(119))
     legal = details["docx_legal"]
-    assert legal["hidden_white"] == 119, "the rule-level count is still reported"
+    assert legal["hidden_white"] == 119, "the raw rule-level count is still reported"
     assert legal["hidden_white_applied_runs"] == 0, "no run of text is actually white"
     assert legal["hidden_white_rule_parts"] == {"word/styles.xml": 119}
     assert legal["hidden_white_applied_parts"] == []
-
-    (hidden,) = [f for f in findings if f.startswith("docx-hidden-text:")]
-    assert "white_applied_runs=0" in hidden
-    assert "white_rules=119" in hidden
-    # The finding string must name its own detection basis, so a reader can
-    # tell a style condition from concealed text without the original file.
-    assert "style and numbering definitions included" in hidden
-    assert "word/styles.xml" in hidden
+    assert not [f for f in findings if f.startswith("docx-hidden-text:")], findings
 
 
 def test_applied_white_run_is_counted_separately():
@@ -1251,3 +1250,142 @@ def test_glossary_hidden_text_fails_hidden_text_removed_not_confirms_absent():
     assert "confirmed absent" not in check["detail"]
     assert "still concealed" in check["detail"], check["detail"]
     assert result["pass"] is False
+
+
+# --- 6. highlight formatting is stripped, never the highlighted words -------
+#
+# A real user document had one run carrying <w:highlight> (visible
+# highlighter colour), no w:vanish, no white-on-white text. The detector
+# correctly flagged hidden_text; external_sharing correctly planned "strip";
+# the remover had no code path for highlight at all, so "strip" silently did
+# nothing, and reinspect_targeted_gone correctly refused the release rather
+# than ship a false "cleared" claim. These tests assert the fix: highlight
+# formatting is removed, the words underneath are never touched, a style-only
+# highlight declaration (styles.xml noise, not concealment) does not
+# spuriously trigger the finding, and an operator may still choose to keep
+# the highlighting via the existing hidden_text "keep" decision.
+
+
+def _highlight_docx(styles: str | None = None, body: str | None = None) -> bytes:
+    body = body or (
+        "<w:p><w:r><w:t>Agreement body.</w:t></w:r></w:p>"
+        '<w:p><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr>'
+        "<w:t>HIGHLIGHTED CLAUSE</w:t></w:r></w:p>"
+    )
+    parts = {"word/document.xml": _document(body)}
+    if styles:
+        parts["word/styles.xml"] = _styles(styles)
+    return _docx(parts)
+
+
+def test_highlight_only_concealment_is_stripped_not_deleted():
+    """The core requirement: only the formatting mark comes off. Deleting
+    visible evidentiary text to satisfy a hidden-text promise would be a far
+    more dangerous failure than the bug this fixes."""
+    cleaned, actions = container_meta.clean_docx(_highlight_docx(), strip_hidden_text=True)
+    body = _body_of(cleaned)
+    assert "HIGHLIGHTED CLAUSE" in body, "the highlighted WORDS must survive"
+    assert "w:highlight" not in body, "the highlight MARK must be gone"
+    assert "Agreement body." in body, "unrelated visible text must survive"
+    assert any(
+        a.startswith("hidden-text: removed highlight formatting") for a in actions
+    ), actions
+
+
+def test_highlight_val_none_is_not_touched():
+    """<w:highlight w:val="none"/> is an explicit "not highlighted" --
+    already renders with no highlight at all. Removing it would be a no-op
+    on the page but a needless mutation of the XML; leaving it alone is both
+    correct and simpler."""
+    body = '<w:p><w:r><w:rPr><w:highlight w:val="none"/></w:rPr><w:t>PLAIN RUN</w:t></w:r></w:p>'
+    cleaned, actions = container_meta.clean_docx(
+        _highlight_docx(body=body), strip_hidden_text=True
+    )
+    assert "PLAIN RUN" in _body_of(cleaned)
+    assert 'w:val="none"' in _body_of(cleaned)
+    assert not any("highlight formatting" in a for a in actions), actions
+
+
+def test_style_level_highlight_is_not_reported_as_concealed_text():
+    """Mirrors test_style_level_white_is_not_reported_as_concealed_text: a
+    <w:style> declaring highlight, with no run in the body directly
+    formatted, must not read as a hidden-text finding -- that's styles.xml
+    machinery, not marked-up text on the page. Also proves no style cascade
+    is resolved for highlight (v1 scope): a run using the style via
+    w:rStyle is NOT counted as applied."""
+    data = _highlight_docx(
+        styles='<w:style w:styleId="Hi"><w:rPr><w:highlight w:val="yellow"/></w:rPr></w:style>',
+        body='<w:p><w:r><w:rPr><w:rStyle w:val="Hi"/></w:rPr>'
+        "<w:t>STYLED NOT DIRECT</w:t></w:r></w:p>",
+    )
+    _c2pa, _ai, findings, details = container_meta.inspect_docx(data)
+    legal = details["docx_legal"]
+    assert legal["hidden_highlight"] == 1, "the rule-level count is still reported"
+    assert legal["hidden_highlight_applied_runs"] == 0, "no run is directly highlighted"
+    assert legal["hidden_highlight_applied_parts"] == []
+    assert not [f for f in findings if f.startswith("docx-hidden-text:")], findings
+
+
+def test_applied_highlight_run_is_counted_separately():
+    body = (
+        "<w:p><w:r><w:t>visible</w:t></w:r>"
+        '<w:r><w:rPr><w:highlight w:val="cyan"/></w:rPr><w:t>marked</w:t></w:r></w:p>'
+    )
+    data = _docx({"word/document.xml": _document(body)})
+    _c2pa, _ai, findings, details = container_meta.inspect_docx(data)
+    legal = details["docx_legal"]
+    assert legal["hidden_highlight_applied_runs"] == 1
+    assert legal["hidden_highlight_applied_parts"] == ["word/document.xml"]
+    (hidden,) = [f for f in findings if f.startswith("docx-hidden-text:")]
+    assert "highlight_applied_runs=1" in hidden
+    assert "highlight_rules=1" in hidden
+
+
+def test_operator_may_keep_highlight_formatting_via_hidden_text_decision():
+    """The existing hidden_text "keep" override, reused unchanged: keyed on
+    the subtype, not on which signal (vanish/white/highlight) triggered it,
+    so a highlight-only document already reaches the same downgrade
+    branch -- no new decision key needed."""
+    from engine_api import inspect_bytes
+
+    data = _highlight_docx()
+    plan = plan_actions(inspect_bytes(data, "h.docx"), "external_sharing", {"hidden_text": "keep"})
+    assert plan.actions["hidden_text"]["action"] == "flag"
+    assert plan.actions["hidden_text"]["reason"] == "operator_acknowledged"
+    cleaned, _records = apply_actions(data, plan)
+    assert "w:highlight" in _body_of(cleaned), "acknowledged highlight formatting stays"
+    assert "HIGHLIGHTED CLAUSE" in _body_of(cleaned)
+
+
+def test_highlight_strip_is_not_gated_by_white_only_refusal():
+    """The separate WHITE_ONLY_HIDDEN_REFUSAL gate is keyed on
+    hidden_white_applied_runs and must stay indifferent to highlight -- once
+    highlight is properly strippable there is no "can't confirm this is
+    safe" case requiring a forced refusal the way white-on-white has. This
+    directly encodes the original bug report: the job did not refuse at
+    plan time, it failed later at verify."""
+    from engine_api import inspect_bytes
+
+    data = _highlight_docx()
+    plan = plan_actions(inspect_bytes(data, "h.docx"), "external_sharing")
+    assert plan.actions["hidden_text"]["action"] == "strip"
+
+
+def test_verify_passes_for_highlight_only_document_after_strip():
+    """The end-to-end closure test that reproduces and proves the fix: this
+    exact sequence, against this exact policy, is what failed with
+    'verification failed: reinspect_targeted_gone' before the fix."""
+    from engine_api import inspect_bytes
+    from verify import verify_derivative
+
+    data = _highlight_docx()
+    name = "h.docx"
+    result = inspect_bytes(data, name)
+    plan = plan_actions(result, "external_sharing", None)
+    cleaned, _records = apply_actions(data, plan)
+    verification = verify_derivative(
+        data, cleaned, plan, pre_present=set(plan.present_subtypes), name=name
+    )
+    check = next(c for c in verification["checks"] if c["name"] == "reinspect_targeted_gone")
+    assert check["pass"], check
+    assert verification["pass"] is True, verification

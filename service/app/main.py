@@ -815,11 +815,12 @@ POLICIES = [
         "description": (
             "For sending outside the firm: strips comments (DOCX, XLSX, "
             "PPTX), embedded objects (DOCX only), external links (XLSX "
-            "only), and custom XML (OOXML formats), and accepts all "
-            "tracked changes; flags headers/footers and hidden content "
-            "for review. Formats without a strip for an action keep that "
-            "content — the per-job certificate and disposition ledger "
-            "record what actually happened."
+            "only), custom XML (OOXML formats), and hidden-text formatting "
+            "(w:vanish runs and highlighter marks, DOCX only), and accepts "
+            "all tracked changes. Flags headers/footers and hidden "
+            "sheets/rows/slides for review. Formats without a strip for an "
+            "action keep that content — the per-job certificate and "
+            "disposition ledger record what actually happened."
         ),
         # bulk_safe: the subtype table has NO approve-default cells, so a
         # sanitize needs no per-finding decisions (main.py stays out of the
@@ -883,8 +884,13 @@ RELEASE_PROFILES = [
         "description": "Sending to the other side of a deal or matter: strips "
         "comments (DOCX, XLSX, PPTX), embedded objects (DOCX only), external "
         "links (XLSX only), and custom XML (OOXML formats), and accepts all "
-        "tracked changes. Formats without a strip for an action keep that "
-        "content — the certificate records what actually happened.",
+        "tracked changes so only the final text remains, and strips "
+        "hidden-text formatting from DOCX runs (concealed w:vanish text is "
+        "removed; highlighter marks are removed without touching the "
+        "highlighted words — see the per-job finding record for exactly "
+        "what was found). Stripping is only as complete as each format "
+        "allows — content a format can't strip is left intact, and the "
+        "certificate records exactly what happened.",
     },
     {
         "id": "public_filing_anonymized",

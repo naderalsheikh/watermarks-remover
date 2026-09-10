@@ -122,7 +122,8 @@ DEFAULT_POLICIES: dict[str, dict[str, str]] = {
         # real removal through _APPROVE_RESOLVES_TO, retiring the
         # "your approval cannot be honoured" refusal for this subtype.
         #
-        # The removal is PARTIAL by design -- w:vanish yes, white-on-white
+        # The removal is PARTIAL by design -- w:vanish and highlight
+        # formatting (marks removed, text never touched) yes, white-on-white
         # no, because whether white text is invisible depends on background
         # shading this engine does not resolve. _WHITE_ONLY_HIDDEN_REFUSAL
         # below keeps that honest rather than letting "strip" overclaim.
@@ -570,11 +571,15 @@ def plan_actions(
             # The one subtype where an operator may decline a strip.
             #
             # hidden_text's remover is deliberately partial: it deletes
-            # w:vanish runs and leaves white-on-white text alone. A document
+            # w:vanish runs, strips highlight formatting (mark only, never
+            # the text), and leaves white-on-white text alone. A document
             # whose concealment is white-only therefore has no removal path,
             # and without this branch it would have no RELEASE path either
             # -- every outward-facing policy resolves hidden_text to strip,
-            # so refusing would be a dead end rather than a decision.
+            # so refusing would be a dead end rather than a decision. This
+            # also lets an operator who WANTS to keep visible highlighter
+            # marks (not concealment -- see container_meta._docx_strip_
+            # highlight) decline that too, via the same lever.
             #
             # Scoped to hidden_text on purpose, not offered for strip
             # generally: an operator must not be able to decline the

@@ -43,6 +43,8 @@
         "embeddings": 0,
         "format_changes": 0,
         "hidden_highlight": 0,
+        "hidden_highlight_applied_parts": [],
+        "hidden_highlight_applied_runs": 0,
         "hidden_vanish": 0,
         "hidden_vanish_parts": [],
         "hidden_white": 0,

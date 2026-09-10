@@ -51,3 +51,12 @@ export function computeProductionReviewState(
   const needsFallbackGate = isProduction && !hasPerFindingReview;
   return { hasPerFindingReview, needsFallbackGate, approveSubtypeCounts, approveSubtypes };
 }
+
+// Unlike the approve-default grid above, this isn't gated on isProduction:
+// policy_subtype is set unconditionally by the worker (not only for
+// production's approve-default cells), so any policy that resolves
+// hidden_text to a strip -- today, exactly external_sharing -- can use this
+// to decide whether to offer a "keep this instead of stripping it" control.
+export function hasHiddenTextFinding(inspect: InspectFetchState): boolean {
+  return (inspect.data?.result?.findings ?? []).some((f) => f.policy_subtype === "hidden_text");
+}

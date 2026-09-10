@@ -4,7 +4,7 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
-import { computeProductionReviewState } from "@/lib/productionReview";
+import { computeProductionReviewState, hasHiddenTextFinding } from "@/lib/productionReview";
 import { useApiData } from "@/lib/useApi";
 import { usePaginatedList } from "@/lib/usePaginatedList";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
@@ -115,6 +115,7 @@ function ReleasePanel({
   const [bases, setBases] = useState<Record<string, SubtypeBasisState>>({});
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [keepHiddenText, setKeepHiddenText] = useState(false);
   const selectedProfile = releaseProfiles.find((p) => p.id === profileId);
   const isProduction = selectedProfile?.policy_id === "production";
 
@@ -127,16 +128,27 @@ function ReleasePanel({
   // fallback (warn, gate on an acknowledgment, let the manifest disclose
   // whatever got kept). Without an inspect job, there's nothing to show
   // per-finding, so the fallback is what runs.
+  //
+  // Fetched whenever an inspect job exists, not only under production: the
+  // hidden-text keep-override below (any policy resolving hidden_text to
+  // strip -- today, external_sharing) needs the same findings.
   const latestInspectJob = docJobs.find((j) => j.kind === "inspect" && j.status === "done");
   const inspectQ = useApiData(
     () =>
-      isProduction && latestInspectJob
+      latestInspectJob
         ? api.get<Job>(`/v1/matters/${matterId}/jobs/${latestInspectJob.id}`)
         : Promise.resolve(null),
-    `inspect-for-decisions:${matterId}:${docId}:${isProduction}:${latestInspectJob?.id ?? ""}`,
+    `inspect-for-decisions:${matterId}:${docId}:${latestInspectJob?.id ?? ""}`,
   );
   const { hasPerFindingReview, needsFallbackGate, approveSubtypeCounts, approveSubtypes } =
     computeProductionReviewState(isProduction, !!latestInspectJob, inspectQ);
+  // external_sharing (via the counterparty_deal_room profile) is the only
+  // named policy that resolves hidden_text to an outright "strip" -- the
+  // one place an operator has no existing per-finding control to decline
+  // it (production's grid covers hidden_text there; privacy_only /
+  // evidence_preservation never strip it in the first place).
+  const showHiddenTextKeep =
+    selectedProfile?.policy_id === "external_sharing" && hasHiddenTextFinding(inspectQ);
 
   const hasMissingOtherNote = Object.entries(bases).some(([st, row]) => {
     return (decisions[st] ?? "keep") === "keep" && row.basis === "other" && !row.note.trim();
@@ -146,10 +158,18 @@ function ReleasePanel({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const finding_decisions =
-        hasPerFindingReview && approveSubtypes.length > 0
+      // The two sources are mutually exclusive in practice (showHiddenTextKeep
+      // is only ever true for a non-production policy), but merged rather
+      // than either-or so that stays a fact about today's policies, not an
+      // assumption this code silently depends on.
+      const findingDecisionsMap: Record<string, "approve" | "keep"> = {
+        ...(hasPerFindingReview && approveSubtypes.length > 0
           ? Object.fromEntries(approveSubtypes.map((st) => [st, decisions[st] ?? "keep"]))
-          : undefined;
+          : {}),
+        ...(keepHiddenText ? { hidden_text: "keep" as const } : {}),
+      };
+      const finding_decisions =
+        Object.keys(findingDecisionsMap).length > 0 ? findingDecisionsMap : undefined;
       // legal_justifications from the per-row basis picks: kept subtypes
       // with a real basis only -- see buildLegalJustifications. undefined
       // (nothing picked) omits the field entirely: a release with no
@@ -360,6 +380,63 @@ function ReleasePanel({
         <p className="text-xs text-muted">
           No approve-default findings present in the latest inspection — nothing to decide.
         </p>
+      )}
+      {showHiddenTextKeep && (
+        <div className="rounded-md border border-border p-3 text-xs">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={keepHiddenText}
+              onChange={(e) => setKeepHiddenText(e.target.checked)}
+            />
+            Keep hidden-text formatting (highlighting, concealed runs) instead of stripping it
+          </label>
+          <p className="mt-1 text-muted">
+            By default this policy strips hidden-text formatting: concealed (
+            <code>w:vanish</code>) text is removed, and highlighter marks are removed without
+            touching the highlighted words. Checking this keeps it instead — the release still
+            proceeds, and the retained finding is recorded as a limitation on the certificate.
+          </p>
+          {keepHiddenText && (
+            <div className="mt-2 grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-2">
+              <select
+                value={bases["hidden_text"]?.basis ?? "unspecified"}
+                onChange={(e) =>
+                  setBases((b) => ({
+                    ...b,
+                    hidden_text: {
+                      basis: e.target.value as SubtypeBasisState["basis"],
+                      note: b["hidden_text"]?.note ?? "",
+                    },
+                  }))
+                }
+                aria-label="Legal basis for kept hidden-text formatting"
+                className="rounded border border-border bg-transparent px-1.5 py-1 text-xs focus-visible:border-accent"
+              >
+                {KNOWN_LEGAL_BASES.map((v) => (
+                  <option key={v} value={v}>
+                    Basis: {LEGAL_BASIS_LABEL[v] ?? v}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={bases["hidden_text"]?.note ?? ""}
+                onChange={(e) =>
+                  setBases((b) => ({
+                    ...b,
+                    hidden_text: {
+                      basis: b["hidden_text"]?.basis ?? "unspecified",
+                      note: e.target.value,
+                    },
+                  }))
+                }
+                placeholder="Basis note (optional)"
+                aria-label="Basis note for kept hidden-text formatting"
+                className="rounded border border-border bg-transparent px-1.5 py-1 text-xs focus-visible:border-accent"
+              />
+            </div>
+          )}
+        </div>
       )}
       <div>
         <label className="mb-1 block text-xs font-medium">Purpose / reason (optional)</label>
