@@ -81,11 +81,52 @@ the disk regardless).
 1. `autoDeploy: true` in `render.yaml` means every push to `main` triggers a
    new Render build + deploy automatically.
 2. GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs
-   on every push to `main` and every PR: Python tests + ruff lint/format, and
-   the `web` job (npm lint, unit tests, and `next build` type-check/export).
+   on every push to `main` and every PR: Python tests + ruff lint/format. Add
+   the frontend `web` job too (see "Manual step" below) so npm lint, unit
+   tests, and the `next build` type-check/export gate every change.
 3. Recommended flow: open a PR → CI must pass → merge to `main` → Render
    auto-deploys the merged commit. Roll back from the Render dashboard
    (**Deploys** → pick a previous successful deploy → **Redeploy**).
+
+---
+
+## Manual step: add the frontend CI job
+
+The existing [`.github/workflows/ci.yml`](.github/workflows/ci.yml) covers the
+Python backend (pytest + ruff) but **not** the `web/` frontend. A ready-to-paste
+`web` job (npm lint, unit tests, and `next build` type-check/export) is below.
+
+> It is documented here rather than committed because updating a workflow file
+> requires the `workflows` OAuth permission, which the automation token used to
+> open the pilot-ready PR does not hold. A repo maintainer can paste this in
+> directly (it needs the human/`workflows`-scoped push).
+
+Append this job under the `jobs:` map in `.github/workflows/ci.yml`:
+
+```yaml
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install deps
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm test
+      # `next build` runs the TypeScript type-check and produces the static
+      # export the production image serves, so it doubles as the type-check.
+      - name: Build (type-check + static export)
+        run: npm run build
+```
 
 ---
 
