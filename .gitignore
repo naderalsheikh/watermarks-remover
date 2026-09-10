@@ -35,8 +35,11 @@
 !/LICENSE
 !/Makefile
 !/pytest.ini
+!/QUICKSTART.md
 !/README.md
 !/requirements-dev.txt
+!/samples/
+!/samples/**
 !/ruff.toml
 !/SECURITY.md
 
