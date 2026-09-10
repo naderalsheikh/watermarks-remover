@@ -40,6 +40,7 @@ import { SelectionCheckbox } from "@/components/SelectionCheckbox";
 import { StatusBadge } from "@/components/StatusBadge";
 import { selectionSummary, toggleVisibleSelection } from "@/lib/documentSelection";
 import { documentResultLink } from "@/lib/documentResultLink";
+import { ACCEPT_ATTR, validateUploadFilename } from "@/lib/uploadValidation";
 
 const PAGE_SIZE = 50;
 
@@ -1116,6 +1117,11 @@ function MatterView({
     e.preventDefault();
     const file = fileInput.current?.files?.[0];
     if (!file) return;
+    const rejection = validateUploadFilename(file.name);
+    if (rejection) {
+      setUploadError(rejection);
+      return;
+    }
     setUploading(true);
     setUploadError(null);
     try {
@@ -1259,6 +1265,7 @@ function MatterView({
           ref={fileInput}
           type="file"
           required
+          accept={ACCEPT_ATTR}
           aria-label="Upload document to matter"
           disabled={!uploadGate.allowed}
           className="min-w-0 flex-1 text-sm file:mr-3 file:rounded-md file:border file:border-border file:bg-transparent file:px-3 file:py-1.5 file:text-sm disabled:opacity-50"
