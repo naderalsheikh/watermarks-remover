@@ -1,3 +1,18 @@
+# ============================================================
+# ClearCounsel — compose.yaml
+# ============================================================
+# DEFAULT PATH (no extra flags needed):
+#   docker compose up
+#   → starts: counselclear (port 8501), wr-api (internal)
+#
+# RESEARCH / EVALUATION PATH (upstream MarkLLM harness):
+#   docker compose --profile upstream up
+#   → additionally starts: markllm-eval, seed-eval containers
+#
+# TL;DR for evaluators: just run `docker compose up` and open
+# http://localhost:8501 — the CounselClear UI is ready.
+# ============================================================
+
 # Whole-infra bring-up for CounselClear.
 #
 #   docker compose up --build -d                      # CounselClear default stack

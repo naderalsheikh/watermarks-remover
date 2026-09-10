@@ -112,6 +112,7 @@ serve:
 	$(PYTHON) $(SCRIPTS)/server.py --host 127.0.0.1 --port 8765
 
 compose-up:
+	# Starts CounselClear (port 8501) + wr-api. Pass PROFILE=upstream to include the research harness.
 	docker compose up --build -d
 
 compose-up-heavy:

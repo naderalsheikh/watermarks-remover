@@ -56,3 +56,7 @@ web/.next/
 web/out/
 web/*.tsbuildinfo
 web/next-env.d.ts
+
+!QUICKSTART.md
+!samples/
+!samples/**
