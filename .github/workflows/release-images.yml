@@ -11,6 +11,17 @@ permissions:
   packages: write
   id-token: write
 
+# Commercial-surface publish matrix.
+#
+# This workflow publishes ONLY the CounselClear product image
+# (service/Dockerfile.counselclear). The `markllm` and `markdiffusion`
+# research-harness images are deliberately NOT built or published here:
+# per docs/COUNSELCLEAR_COMMERCIAL_SURFACE.md §3.2 / §7 they are classified
+# `build-exclude` + `legal-review-needed` and must not appear in any
+# commercial release path. The CtrlRegen and reverse-SynthID images are
+# `hard-block` and are local-build-only (never pushed) by construction.
+# Do not re-add harness images to this matrix without a separate legal
+# clearance recorded in the commercial surface manifest.
 jobs:
   build-counselclear:
     name: Build and publish CounselClear image

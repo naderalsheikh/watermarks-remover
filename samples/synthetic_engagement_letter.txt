@@ -1,0 +1,32 @@
+NOTE TO EVALUATORS — SYNTHETIC TEST DOCUMENT (not real client data).
+This file is entirely fictional and exists only to demonstrate CounselClear's
+findings report. It deliberately embeds two test artifacts for you to look for:
+  1. A zero-width space (U+200B) sits between the words "engagement​letter"
+     in the first paragraph below — invisible on screen, detectable by the
+     Unicode-hygiene check.
+  2. An inline author/firm metadata marker: [Author: Jane Smith, Firm: Smith & Jones LLP]
+Neither artifact represents real data. See samples/README.md for details.
+--------------------------------------------------------------------------------
+
+[Author: Jane Smith, Firm: Smith & Jones LLP]
+
+ENGAGEMENT LETTER
+
+Dear Mr. Fictional Client,
+
+Thank you for retaining our firm. This engagement​letter confirms the terms
+under which Smith & Jones LLP will provide legal services to you in connection
+with the proposed acquisition of Example Holdings, Inc.
+
+Scope of Engagement. We will advise on the negotiation, drafting, and closing
+of the transaction. Any matter outside this scope will be the subject of a
+separate written agreement.
+
+Fees. Our services will be billed at our standard hourly rates, itemized
+monthly. This is a synthetic example; no real fee arrangement is described.
+
+Please countersign below to confirm your agreement with these terms.
+
+Sincerely,
+Jane Smith
+Smith & Jones LLP (fictional)

@@ -114,9 +114,15 @@ docker-core-help:
 serve:
 	$(PYTHON) $(SCRIPTS)/server.py --host 127.0.0.1 --port 8765
 
+# Default product path: brings up the CounselClear stack (cc-api, cc-worker,
+# cc-freshclam) -- the same core reached by `docker compose --profile legal
+# up -d` in QUICKSTART.md. The upstream wr-core utility and the research
+# harnesses are NOT started here (see compose.yaml header / commercial
+# surface manifest).
 compose-up:
 	docker compose up --build -d
 
+# Research/legacy surfaces only -- outside the commercial product surface.
 compose-up-heavy:
 	docker compose --profile upstream --profile harness --profile heavy up --build -d
 

@@ -1,3 +1,25 @@
+# ===========================================================================
+# EVALUATORS START HERE — the default product path is CounselClear.
+# ===========================================================================
+#
+#   docker compose up -d                 # <-- CounselClear (the product)
+#   docker compose --profile legal up -d # <-- same core; explicit alias
+#                                        #     used by QUICKSTART.md
+#
+# The CounselClear services (cc-api, cc-worker, cc-freshclam) declare NO
+# `profiles:` key, so they are ALWAYS started — with a bare `docker compose
+# up`, and also under any named profile such as `--profile legal`. That is
+# deliberate: per docs/COUNSELCLEAR_COMMERCIAL_SURFACE.md §7 and the strategy
+# doctrine §3, the DEFAULT path must land on the product, not on the upstream
+# utility. `--profile legal` is kept as a supported, self-documenting alias
+# for the same CounselClear core so operator docs read unambiguously.
+#
+# Everything else is EXPLICIT opt-in and outside the commercial surface:
+#   docker compose --profile upstream up --build -d   # upstream wr-core utility
+#   docker compose --profile harness up --build -d    # + markllm / markdiffusion harnesses
+#   docker compose --profile heavy up --build -d      # + ctrlregen / synthid (local builds)
+# ===========================================================================
+#
 # Whole-infra bring-up for CounselClear.
 #
 #   docker compose up --build -d                      # CounselClear default stack
