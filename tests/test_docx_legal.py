@@ -288,6 +288,24 @@ def test_findings_project_docx_legal_signals():
     assert by_subtype["comments_and_notes"].action_recommended == "strip"
 
 
+def test_hidden_text_finding_reports_applied_highlight():
+    """The structured Finding projection carries the same
+    highlight_applied_runs/highlight_rules evidence the raw
+    docx-hidden-text: string reports -- a reviewer reading value_redacted
+    sees the applied/raw distinction without needing the original file."""
+    body = (
+        '<w:p><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr>'
+        "<w:t>marked</w:t></w:r></w:p>"
+    )
+    data = _docx({"word/document.xml": _document(body)})
+    has_c2pa, has_ai, findings, _details = container_meta.inspect_docx(data)
+    rep = {"format": "docx", "has_c2pa": has_c2pa, "has_ai_metadata": has_ai, "findings": findings}
+    found = findings_for_report("container", rep)
+    by_subtype = {f.subtype: f for f in found}
+    assert "highlight_applied_runs=1" in by_subtype["hidden_text_formatting"].value_redacted
+    assert "highlight_rules=1" in by_subtype["hidden_text_formatting"].value_redacted
+
+
 def test_accept_all_namespace_registration_does_not_leak_across_documents():
     """xml.etree.ElementTree.register_namespace mutates module-global state.
     Two documents that happen to use the same prefix name for different

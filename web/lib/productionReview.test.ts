@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { computeProductionReviewState, type InspectFetchState } from "./productionReview";
+import {
+  computeProductionReviewState,
+  hasHiddenTextFinding,
+  type InspectFetchState,
+} from "./productionReview";
 import type { Finding } from "./types";
 
 function finding(overrides: Partial<Finding> & { policy_subtype?: string | null }): Finding {
@@ -116,5 +120,28 @@ describe("computeProductionReviewState", () => {
     expect(computeProductionReviewState(false, true, failed("boom")).needsFallbackGate).toBe(
       false,
     );
+  });
+});
+
+describe("hasHiddenTextFinding", () => {
+  it("is true when a hidden_text finding is present, unconditional on approval/production", () => {
+    // policy_subtype is set unconditionally by the worker -- this must not
+    // require requires_approval or any production-specific field, since
+    // external_sharing's hidden_text is a flat strip, never approve-default.
+    const findings = [
+      finding({ policy_subtype: "hidden_text", requires_approval: false, action_recommended: "sanitize" }),
+    ];
+    expect(hasHiddenTextFinding(loaded(findings))).toBe(true);
+  });
+
+  it("is false when no finding carries policy_subtype hidden_text", () => {
+    const findings = [finding({ policy_subtype: "comments_and_notes" })];
+    expect(hasHiddenTextFinding(loaded(findings))).toBe(false);
+  });
+
+  it("is false with no data, still loading, or a failed fetch -- never a crash on null", () => {
+    expect(hasHiddenTextFinding(notLoaded)).toBe(false);
+    expect(hasHiddenTextFinding(loading)).toBe(false);
+    expect(hasHiddenTextFinding(failed("boom"))).toBe(false);
   });
 });

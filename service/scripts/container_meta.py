@@ -1197,6 +1197,27 @@ def _is_docx_body_part(name: str) -> bool:
 # highlight is a DrawingML name too (a:highlight, shape-text run property),
 # so it gets the scoped dialect — see the _WML_TAG note.
 _DOCX_HIGHLIGHT_RE = re.compile(_WML_TAG + rb"highlight\b")
+# A highlight colour actually applied to a run of text (inside <w:rPr> in a
+# body-bearing part), excluding an explicit "none" value -- val="none"
+# cancels an inherited highlight (the run renders with no highlight at
+# all), so counting it as applied would flag a run that isn't visually
+# highlighted, the same way _vanish_state excludes w:val="0". Mirrors
+# _DOCX_APPLIED_WHITE_RE's rPr/body-part scoping; the value itself is
+# captured (not hardcoded like white's FFFFFF) since highlight uses named
+# colours (yellow, cyan, ...), so the none-check happens in Python.
+_DOCX_APPLIED_HIGHLIGHT_RE = re.compile(
+    _WX_TAG + rb"rPr\b(?:(?!" + _WX_CLOSE + rb"rPr>).)*?"
+    + _WML_TAG + rb"highlight\b[^>]*" + _WX_ATTR + rb"val=([\"'])((?:(?!\1).)*)\1",
+    re.S,
+)
+
+
+def _count_applied_highlight(raw: bytes) -> int:
+    return sum(
+        1
+        for _q, val in _DOCX_APPLIED_HIGHLIGHT_RE.findall(raw)
+        if val.strip().lower() != b"none"
+    )
 # commentRangeStart/End/Reference are unique to WordprocessingML.
 _DOCX_COMMENT_MARKER_RE = re.compile(_WX_TAG + rb"(?:commentRangeStart|commentRangeEnd|commentReference)\b")
 # Anything that makes a part worth an XML-aware pass on clean.
@@ -1253,9 +1274,10 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         comment_count = len(re.findall(_WX_TAG + rb"comment\b", raw))
     ins = de = fmt_changes = vanish = white = highlight = markers = embeddings = 0
     row_dels = cell_revs = 0
-    white_applied = 0
+    white_applied = highlight_applied = 0
     vanish_parts: list[str] = []
     white_applied_parts: list[str] = []
+    highlight_applied_parts: list[str] = []
     white_rule_parts: dict[str, int] = {}
     for info in zf.infolist():
         name = info.filename
@@ -1275,13 +1297,19 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         white += part_white
         if part_white:
             white_rule_parts[name] = part_white
-        # Applied white counts ONLY inside a body-bearing part: a white run
-        # colour in styles.xml is a style definition, not text on the page.
+        # Applied white/highlight counts ONLY inside a body-bearing part: a
+        # white run colour or highlight in styles.xml is a style/numbering
+        # definition, not text on the page -- the same distinction, for the
+        # same reason, as the white_rules/white_applied_runs split above.
         if _is_docx_body_part(name):
             part_applied = len(_DOCX_APPLIED_WHITE_RE.findall(raw))
             white_applied += part_applied
             if part_applied:
                 white_applied_parts.append(name)
+            part_highlight_applied = _count_applied_highlight(raw)
+            highlight_applied += part_highlight_applied
+            if part_highlight_applied:
+                highlight_applied_parts.append(name)
         highlight += len(_DOCX_HIGHLIGHT_RE.findall(raw))
         markers += len(_DOCX_COMMENT_MARKER_RE.findall(raw))
         row_dels += len(_DOCX_ROW_DEL_RE.findall(raw))
@@ -1302,6 +1330,13 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
         "hidden_white_applied_runs": white_applied,
         "hidden_white_rule_parts": dict(sorted(white_rule_parts.items())),
         "hidden_white_applied_parts": sorted(white_applied_parts),
+        # Same evidence, same reason, for highlight: hidden_highlight is
+        # every <w:highlight> in word/*.xml (styles/numbering included);
+        # hidden_highlight_applied_runs is the subset actually rendered on
+        # body text -- the number that means "a reader would see this
+        # marked as highlighted."
+        "hidden_highlight_applied_runs": highlight_applied,
+        "hidden_highlight_applied_parts": sorted(highlight_applied_parts),
         "hidden_vanish_parts": sorted(vanish_parts),
         "comment_markers": markers,
         "embeddings": embeddings,
@@ -1325,26 +1360,38 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
             f"docx-cell-revisions: {cell_revs} cell insert/delete/merge marker(s) "
             "(not auto-resolved by Accept All; review before sharing)"
         )
-    if vanish or white or highlight:
-        # Say what was actually observed, with the detection basis, rather
-        # than a bare count that reads as "N pieces of concealed text".
-        # white_rules counts FFFFFF colour declarations anywhere in the
-        # package's word/*.xml parts -- overwhelmingly styles/numbering
-        # machinery in an ordinary document; white_applied_runs counts
-        # them inside run properties in a body-bearing part, which is the
-        # number that means "text a reader would not see".
-        basis = ""
+    if vanish or white_applied or highlight_applied:
+        # Gated on APPLIED white/highlight, not the raw package-wide counts
+        # (white, highlight): a style or numbering definition using either
+        # is machinery, not concealed or marked-up text, and must not make
+        # an ordinary document read as "N pieces of concealed text" when
+        # nothing in its body actually is (see the white_rules/
+        # white_applied_runs comment above -- highlight gets the identical
+        # treatment for the identical reason). The raw counts are still
+        # reported below for full transparency/audit, just not used to
+        # decide whether this finding fires.
+        basis_clauses = []
         if white:
             where = ", ".join(sorted(white_rule_parts)[:4])
-            basis = (
-                f" (white_rules counts w:color=FFFFFF declarations across word/*.xml, "
-                f"style and numbering definitions included, in: {where}; "
-                f"white_applied_runs counts them inside w:rPr in a body-bearing part)"
+            basis_clauses.append(
+                f"white_rules counts w:color=FFFFFF declarations across "
+                f"word/*.xml, style and numbering definitions included, in: "
+                f"{where}; white_applied_runs counts them inside w:rPr in a "
+                f"body-bearing part"
             )
+        if highlight:
+            basis_clauses.append(
+                "highlight_rules counts <w:highlight> declarations across "
+                "word/*.xml, style definitions included; "
+                "highlight_applied_runs counts them inside w:rPr in a "
+                'body-bearing part, excluding an explicit val="none"'
+            )
+        basis = f" ({'; '.join(basis_clauses)})" if basis_clauses else ""
         findings.append(
             f"docx-hidden-text: vanish={vanish} "
             f"white_applied_runs={white_applied} white_rules={white} "
-            f"highlight={highlight}{basis}"
+            f"highlight_applied_runs={highlight_applied} highlight_rules={highlight}"
+            f"{basis}"
         )
     if embeddings:
         findings.append(f"docx-embeddings: {embeddings} embedded object(s)")
@@ -2318,6 +2365,7 @@ def _scoped_namespace_registration(xml_bytes: bytes):
 #    finding, which the release gate turns into a required acknowledgement.
 _W_R = _W_NS + "r"
 _W_VANISH = _W_NS + "vanish"
+_W_HIGHLIGHT = _W_NS + "highlight"
 _W_RSTYLE = _W_NS + "rStyle"
 _W_PSTYLE = _W_NS + "pStyle"
 _W_STYLE = _W_NS + "style"
@@ -2556,6 +2604,64 @@ def _docx_strip_hidden_text(xml_bytes: bytes, model: DocxHiddenModel):
     return out, stats
 
 
+def _docx_strip_highlight(xml_bytes: bytes):
+    """Remove ``<w:highlight>`` from every run's DIRECT run formatting in
+    one DOCX content part. Never touches ``w:t``, never removes a run,
+    never touches ``w:pPr/w:rPr`` (the paragraph MARK's formatting, not any
+    run of visible text).
+
+    Deliberately independent of :class:`DocxHiddenModel` /
+    :func:`_walk_hidden_runs` / :func:`extract_docx_hidden_text`: a
+    highlighted run is visible, not concealed, so it must not enter the
+    "hidden" vocabulary those share (see PR history on
+    ``test_extractor_and_remover_share_one_definition_of_hidden``) -- a
+    highlight strip can never "surface" text that was already on the page.
+
+    Direct-formatting only, not style-cascade-resolved: real highlighting
+    is applied by Word's highlighter tool directly onto a run, essentially
+    never declared only in a paragraph/character style. This also keeps
+    this remover in exact agreement with ``_DOCX_APPLIED_HIGHLIGHT_RE``,
+    which likewise doesn't resolve ``w:rStyle`` -- the same scoping
+    decision already accepted for white-on-white detection. A highlight
+    reachable only through a style is left alone: it fails safe (stays
+    visibly highlighted, still visible in the raw ``hidden_highlight``
+    count, just not auto-stripped or gating a release) rather than either
+    silently missing it as a promise or over-reaching into style
+    resolution this pass was never asked to do.
+
+    Returns ``(xml_bytes, stats)``, or None when the part is not
+    well-formed XML -- the caller keeps the original bytes, same as every
+    other ill-formed-part path in this module. Byte-identical no-op when
+    no run had an applied (non-"none") highlight.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_bytes)  # noqa: S314 - budget-capped zip member
+    except ET.ParseError:
+        return None
+
+    stats = {"runs_affected": 0}
+    for r in root.iter(_W_R):
+        rpr = r.find(_W_RPR)
+        if rpr is None:
+            continue
+        hl = rpr.find(_W_HIGHLIGHT)
+        if hl is None:
+            continue
+        if (hl.get(_W_VAL) or "").strip().lower() == "none":
+            continue
+        rpr.remove(hl)
+        stats["runs_affected"] += 1
+
+    if not stats["runs_affected"]:
+        # Byte-identical no-op, same reasoning as _docx_strip_hidden_text.
+        return xml_bytes, stats
+    with _scoped_namespace_registration(xml_bytes):
+        out = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    return out, stats
+
+
 def extract_docx_hidden_text(data: bytes) -> list[str]:
     """Every concealed text fragment in a DOCX, for the verify postcondition.
 
@@ -2780,6 +2886,24 @@ def _docx_legal_clean(
                         actions.append(
                             f"hidden-text: removed {st['runs_removed']} concealed run(s) "
                             f"({st['chars_removed']} chars) from {name}"
+                        )
+                # A second, independent pass on the same (already vanish-
+                # processed) bytes: a run that is both vanish-hidden and
+                # highlighted was just deleted above, so this never wastes
+                # work re-processing it. Formatting-only -- removes the
+                # <w:highlight> mark, never the run or its text.
+                highlight_result = _docx_strip_highlight(raw)
+                if highlight_result is None:
+                    actions.append(
+                        f"warning: {name} not well-formed XML; "
+                        "highlight formatting not removed"
+                    )
+                else:
+                    raw, hst = highlight_result
+                    if hst["runs_affected"]:
+                        actions.append(
+                            f"hidden-text: removed highlight formatting from "
+                            f"{hst['runs_affected']} run(s) in {name}"
                         )
             kept.append((info, raw))
 
