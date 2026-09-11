@@ -248,6 +248,13 @@ class Release(Base):
     status: Mapped[str] = mapped_column(String(12), default="queued", index=True)
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Internal certificate snapshot shared by result hashes and downloads.
+    # Legacy releases have no snapshot until one is recorded. Python None
+    # must bind as SQL NULL so the first writer can claim it atomically.
+    certificate_snapshot: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
     # The most recent observed outcome of anchoring a packet for this
     # release (migration 0011). Deliberately "last_", not "anchor_": a
     # packet is rebuilt per download and legitimately differs each time --

@@ -42,7 +42,7 @@ file types, artifact names, result/manifest agreement, original identity, policy
 and actual derivative digest/size before recording a usable bundle. A timeout or
 unsuccessful process exit cannot become success through a result file.
 
-Existing terminal records and artifacts are not rewritten by this change.
+Existing terminal outcomes and already-issued artifacts are not rewritten by this change.
 New batch completion timestamps and their `batch.completed` audit events commit
 together. A failed completion append leaves the batch eligible for retry;
 historical rows with missing events are not reconstructed by this change.
@@ -72,6 +72,34 @@ Subprocess mode remains a development execution mode with the host user's
 privileges. Passing scoped paths does not create a filesystem or network sandbox.
 Docker execution has a separate real-image CI gate; native desktop isolation is
 a later per-OS implementation and qualification task.
+
+## Preserved release certificates
+
+Terminal releases now preserve one certificate snapshot in the database. The
+release-result hash, standalone certificate, and certificate inside each new
+packet use those same bytes, even when the clock, authorized downloader, or
+display descriptions change. Packet signatures, timestamp requests, and download
+audit events still describe each individual download. The certificate names the
+release requester and states its actual snapshot generation time; it does not
+attribute earlier processing to the later downloader.
+
+Before serving the snapshot, the API checks its checksum and compares the current
+terminal source facts and job-scoped audit evidence with the recorded snapshot.
+Missing, changed, or invalid evidence produces a conflict response rather than a
+replacement certificate. Failed cancellation/recovery releases without a job
+execution event explicitly report unavailable evidence. This remains a check of
+the job's own audit rows, not authentication of the whole matter audit chain.
+Legacy jobs without a Release wrapper retain their existing certificate behavior.
+
+Migration `0012` adds a nullable internal JSON column. Existing releases acquire
+their first snapshot on a subsequent eligible request; previously downloaded
+files are untouched, and the migration cannot retroactively make their differing
+certificate hashes agree. Application startup applies the migration. Preserve the
+database, including snapshot bytes, in the upgrade backup and restore procedure:
+downgrading to `0011` drops those bytes, and the old application regenerates
+certificates. Schema downgrade is therefore not a byte-preserving rollback after
+snapshots have been used. PostgreSQL migration SQL is checked, but PostgreSQL
+runtime concurrency is not qualified by the local SQLite tests.
 
 ## Browser verification
 

@@ -421,6 +421,8 @@ def _render_job_certificate_html(
     # recipient reading the certificate inside a packet and the JSON
     # artifacts next to it never sees two words for one fact.
     attestation_kind: str | None = None,
+    release_snapshot: bool = False,
+    audit_evidence_available: bool = True,
 ) -> str:
     """Self-contained per-job custody/transaction certificate (PR 33).
 
@@ -724,6 +726,32 @@ def _render_job_certificate_html(
         "stated here, and it is <strong>not</strong> a legal opinion. Any "
         "limitation listed below is part of the certificate, not a defect in it."
     )
+    generation_html = (
+        f"Snapshot generated: {esc(generated_at)} UTC · Release requested by "
+        f"<code>{esc(generated_by)}</code>"
+        if release_snapshot
+        else f"Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code>"
+    )
+    snapshot_note = (
+        '<p class="disclaimer">This is the preserved certificate snapshot for this release. '
+        "Its statements, including the job audit assessment, describe the recorded facts "
+        "at the snapshot generation time. A later download does not update that assessment. "
+        "Each download is recorded separately in the audit log.</p>"
+        if release_snapshot
+        else ""
+    )
+    custody_html = (
+        f"<p>{esc(audit_event_count)} audit event(s) recorded for this job in the matter's "
+        "hash-chained audit log; each recomputed and confirmed to match its stored hash: "
+        f'<span class="{"chain-ok" if audit_integrity_ok else "chain-broken"}">'
+        f"{'OK' if audit_integrity_ok else 'MISMATCH'}</span>. This is a check of this "
+        "job's own recorded events only, not a walk of the matter's complete audit "
+        "chain — see the matter's audit log (admin access) for that.</p>"
+        if audit_evidence_available
+        else "<p>UNAVAILABLE: no job execution audit event was recorded for this failed "
+        "release. No job audit integrity assessment is available. See the matter's audit "
+        "log (admin access) for its release and cancellation or recovery records.</p>"
+    )
 
     return f"""<!doctype html>
 <html>
@@ -757,7 +785,8 @@ Document ID: <code>{esc(document_id)}</code><br>
 Job ID: <code>{esc(job_id)}</code> · kind: {esc(kind)} · status:
 <span class="status">{esc(status)}</span><br>
 Created: {esc(created_utc)} UTC{f" · Finished: {esc(finished_utc)} UTC" if finished_utc else ""}<br>
-Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
+{generation_html}</p>
+{snapshot_note}
 <div class="disclaimer">{disclaimer}</div>
 
 <div class="limitations">
@@ -791,12 +820,7 @@ Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
 {verification_html}
 
 <h2>Custody record</h2>
-<p>{esc(audit_event_count)} audit event(s) recorded for this job in the matter's
-hash-chained audit log; each recomputed and confirmed to match its stored hash:
-<span class="{"chain-ok" if audit_integrity_ok else "chain-broken"}">
-{"OK" if audit_integrity_ok else "MISMATCH"}</span>. This is a check of this
-job's own recorded events only, not a walk of the matter's complete audit
-chain — see the matter's audit log (admin access) for that.</p>
+{custody_html}
 
 <div class="limitations">
 <h2>Limitations — read before relying on this certificate</h2>
@@ -806,6 +830,155 @@ chain — see the matter's audit log (admin access) for that.</p>
 </body>
 </html>
 """
+
+
+def _certificate_audit_state(s: Session, matter_id: str, job_id: str):
+    """Current job-scoped evidence, excluding later download/issuance events."""
+    events = [
+        ev
+        for ev in s.query(AuditEvent)
+        .populate_existing()
+        .filter(
+            AuditEvent.matter_id == matter_id,
+            AuditEvent.action.in_(("job.inspect", "job.sanitize")),
+        )
+        .order_by(AuditEvent.seq, AuditEvent.id)
+        .all()
+        if (ev.payload or {}).get("job_id") == job_id
+    ]
+    intact = all(
+        event_hash(ev.prev_hash, ev.seq, ev.actor_id, ev.action, ev.payload) == ev.row_hash
+        for ev in events
+    )
+    evidence = [
+        {
+            "id": ev.id,
+            "seq": ev.seq,
+            "actor_id": ev.actor_id,
+            "action": ev.action,
+            "payload": ev.payload,
+            "prev_hash": ev.prev_hash,
+            "row_hash": ev.row_hash,
+            "at": ev.at,
+        }
+        for ev in events
+    ]
+    digest = hashlib.sha256(
+        json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return events, intact, digest
+
+
+def _store_release_certificate_snapshot(s: Session, release: Release, candidate: dict) -> dict:
+    """Persist only the first candidate and return that winner, including after a race."""
+    s.execute(
+        update(Release)
+        .where(Release.id == release.id, Release.certificate_snapshot.is_(None))
+        .values(certificate_snapshot=candidate)
+        .execution_options(synchronize_session=False)
+    )
+    s.commit()
+    # Sessions retain their identity map after commit. A losing caller must
+    # never return its own candidate or its stale pre-claim Release value.
+    s.refresh(release, attribute_names=["certificate_snapshot"])
+    return release.certificate_snapshot
+
+
+def _certificate_snapshot_checksum(value: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _certificate_source_digest(matter: Matter, job: Job, doc: Document, release: Release) -> str:
+    # Display labels may change; the terminal execution and release intent may
+    # not silently disagree with the preserved certificate used by the packet.
+    return _certificate_snapshot_checksum(
+        {
+            "matter_id": matter.id,
+            "document": {
+                key: getattr(doc, key) for key in ("id", "matter_id", "filename", "sha256")
+            },
+            "job": {
+                key: getattr(job, key)
+                for key in (
+                    "id",
+                    "matter_id",
+                    "document_id",
+                    "kind",
+                    "status",
+                    "error",
+                    "created_utc",
+                    "finished_utc",
+                    "policy_id",
+                    "attestation",
+                    "result_json",
+                )
+            },
+            "release": {
+                key: getattr(release, key)
+                for key in (
+                    "id",
+                    "matter_id",
+                    "document_id",
+                    "job_id",
+                    "batch_id",
+                    "policy_id",
+                    "profile_id",
+                    "recipient_type",
+                    "recipient_name",
+                    "purpose",
+                    "intended_external",
+                    "requested_by",
+                    "predecessor_release_id",
+                    "status",
+                    "created_utc",
+                    "finished_utc",
+                )
+            },
+        }
+    )
+
+
+def _certificate_snapshot_parts(
+    snapshot: dict, evidence_digest: str, source_digest: str
+) -> tuple[str, str | None, list[str]]:
+    """Reject stale evidence or damaged internal state without replacing historical bytes."""
+    if not isinstance(snapshot, dict):
+        raise HTTPException(
+            409, "Stored release certificate snapshot is invalid; review its custody record."
+        )
+    body = snapshot.get("html")
+    policy_id = snapshot.get("policy_id")
+    limitations = snapshot.get("limitations")
+    if (
+        type(snapshot.get("version")) is not int
+        or snapshot.get("version") != 1
+        or not isinstance(body, str)
+        or (policy_id is not None and not isinstance(policy_id, str))
+        or not isinstance(limitations, list)
+        or not all(isinstance(item, str) for item in limitations)
+        or snapshot.get("snapshot_sha256")
+        != _certificate_snapshot_checksum(
+            {key: value for key, value in snapshot.items() if key != "snapshot_sha256"}
+        )
+    ):
+        raise HTTPException(
+            409, "Stored release certificate snapshot is invalid; review its custody record."
+        )
+    if snapshot.get("audit_evidence_sha256") != evidence_digest:
+        raise HTTPException(
+            409,
+            "Job audit evidence changed after this release certificate snapshot. "
+            "Review the custody record; the preserved certificate has not been replaced.",
+        )
+    if snapshot.get("source_facts_sha256") != source_digest:
+        raise HTTPException(
+            409,
+            "Recorded job or release facts changed after this certificate snapshot. "
+            "Review the custody record; the preserved certificate has not been replaced.",
+        )
+    return body, policy_id, list(limitations)
 
 
 # Four frozen v1 default policies (docs/COUNSELCLEAR_DESIGN.md, "Key
@@ -2375,9 +2548,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         machine-checkable". For a done release it's a lightweight,
         always-available companion to the full release_packet.json
         (job_bundle, below), which additionally carries the derivative
-        itself. Computing the certificate here (via _build_certificate_html,
-        which is side-effect-free -- it does not itself append
-        certificate.issued) lets this cite a real, hash-bindable
+        itself. Selecting the preserved certificate here (via
+        _build_certificate_html, which persists its first snapshot but
+        does not append certificate.issued) lets this cite a real, hash-bindable
         certificate without forcing an extra issuance event on every
         release creation; a caller who wants the actual HTML bytes still
         fetches GET .../jobs/{job_id}/certificate, which logs its own
@@ -2752,12 +2925,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     ):
         """Raw release_result.json bytes -- the artifact a caller (the
         Airlock CLI, a future verifier) would save to disk as
-        `release_result.json` and hash-check. Deliberately read-only and
-        side-effect-free: a re-fetch of already-committed facts (Release +
-        Job + Document rows), not a new issuance -- unlike
-        job_certificate's own per-pull audit logging (a distinct, explicit
-        product decision for that route), this is a deterministic
-        projection with nothing new to attest to on repeat reads. Audit
+        `release_result.json` and hash-check. This is not a new issuance:
+        unlike job_certificate's own per-pull audit logging, it appends
+        no audit event. A terminal release predating certificate snapshots
+        lazily persists its first snapshot here, at the actual generation
+        time; later reads reuse its bytes after checking its evidence. Audit
         refs cite the release.created/release.terminal events recorded at
         creation time, which don't change on re-fetch either.
         """
@@ -3304,16 +3476,46 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     def _build_certificate_html(
         s: Session, *, matter: Matter, job: Job, doc: Document, generated_by: str
     ) -> tuple[str, str | None, list[str]]:
-        """Shared by job_certificate (PR 33) and job_bundle (PR 36/37, the
-        release packet): the exact same certificate content either way,
-        so a certificate pulled standalone and one embedded in a release
-        packet can never read differently for the same job. Returns
-        (html_body, policy_id, limitations) -- callers append their own
-        certificate.issued audit event (payload needs policy_id, job/doc
-        ids callers already have) rather than this helper doing it, since
-        job_bundle commits it alongside its own bundle.download event in
-        one place.
+        """One preserved terminal Release certificate for results and downloads.
+
+        First use commits a snapshot; later uses check its source/evidence
+        bindings and return the same HTML, policy, and limitations. Legacy
+        jobs without a Release and nonterminal jobs retain live rendering.
+        Callers still append their own per-pull certificate.issued events.
         """
+        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
+        job_events, audit_integrity_ok, evidence_digest = _certificate_audit_state(
+            s, matter.id, job.id
+        )
+        terminal = ("done", "refused", "failed")
+        release_snapshot = release is not None and (
+            release.certificate_snapshot is not None
+            or job.status in terminal
+            or release.status in terminal
+        )
+        source_digest = ""
+        if release_snapshot:
+            if job.status not in terminal or release.status != job.status:
+                raise HTTPException(409, "Release and job terminal facts are not yet consistent.")
+            if not audit_integrity_ok:
+                raise HTTPException(
+                    409, "Job audit evidence is invalid; review the custody record."
+                )
+            matching_terminal_event = any(
+                ev.action == f"job.{job.kind}" and ev.payload.get("status") == job.status
+                for ev in job_events
+            )
+            # Cancellation and boot recovery can legitimately fail a release
+            # without executing a job. They must disclose missing evidence.
+            if not matching_terminal_event and (job.status != "failed" or job_events):
+                raise HTTPException(
+                    409, "Job terminal audit evidence is missing; review the custody record."
+                )
+            source_digest = _certificate_source_digest(matter, job, doc, release)
+            if release.certificate_snapshot is not None:
+                return _certificate_snapshot_parts(
+                    release.certificate_snapshot, evidence_digest, source_digest
+                )
         result = job.result_json or {}
         manifest = result.get("manifest") or {} if job.kind == "sanitize" else {}
         derivative_sha256 = manifest.get("derivative", {}).get("sha256")
@@ -3330,6 +3532,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             policy_description = policy_meta["description"] if policy_meta else None
 
         limitations: list[str] = _retention_limitations(manifest, actions)
+        if release_snapshot and not job_events:
+            limitations.append(
+                "Job audit evidence is unavailable: no job execution audit event was recorded "
+                "for this failed release. No job audit integrity assessment is available."
+            )
         dispositions: list[dict] = (
             [d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)]
             if job.kind == "sanitize"
@@ -3375,29 +3582,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "for this certificate's custody claim."
             )
 
-        # Narrow, job-scoped custody assertion: this job's own audit rows,
-        # individually hash-recomputed — never the matter's full chain and
-        # never another job's rows (see the route docstring above).
-        job_events = [
-            ev
-            for ev in s.query(AuditEvent)
-            .filter(
-                AuditEvent.matter_id == matter.id,
-                AuditEvent.action.in_(("job.inspect", "job.sanitize")),
-            )
-            .all()
-            if (ev.payload or {}).get("job_id") == job.id
-        ]
-        audit_integrity_ok = all(
-            event_hash(ev.prev_hash, ev.seq, ev.actor_id, ev.action, ev.payload) == ev.row_hash
-            for ev in job_events
-        )
-
         # release_context (PR 44): None for a legacy job with no Release
         # wrapper -- _render_job_certificate_html renders nothing for
         # this section then, same as it already does for policy_html on
         # an inspect job.
-        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
         release_context = None
         if release is not None:
             profile = next((p for p in RELEASE_PROFILES if p["id"] == release.profile_id), None)
@@ -3462,7 +3650,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             audit_event_count=len(job_events),
             audit_integrity_ok=audit_integrity_ok,
             generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
-            generated_by=generated_by,
+            generated_by=release.requested_by if release_snapshot else generated_by,
             release_context=release_context,
             legal_justifications=legal_justifications,
             dispositions=dispositions,
@@ -3470,7 +3658,33 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 manifest.get("residual_metadata") if job.kind == "sanitize" else None
             ),
             attestation_kind=attestation_kind,
+            release_snapshot=release_snapshot,
+            audit_evidence_available=bool(job_events) if release_snapshot else True,
         )
+        if release_snapshot:
+            candidate = {
+                "version": 1,
+                "html": body,
+                "policy_id": policy_id,
+                "limitations": limitations,
+                "audit_evidence_sha256": evidence_digest,
+                "source_facts_sha256": source_digest,
+            }
+            candidate["snapshot_sha256"] = _certificate_snapshot_checksum(candidate)
+            snapshot = _store_release_certificate_snapshot(s, release, candidate)
+            # A competing request may have selected a different first snapshot.
+            # The commit also releases locks. Refresh source objects so both
+            # this check and the caller's result/packet use the validated facts.
+            s.refresh(job)
+            s.refresh(doc)
+            s.refresh(release)
+            current_source = _certificate_source_digest(matter, job, doc, release)
+            _events, intact, current_evidence = _certificate_audit_state(s, matter.id, job.id)
+            if not intact:
+                raise HTTPException(
+                    409, "Job audit evidence is invalid; review the custody record."
+                )
+            return _certificate_snapshot_parts(snapshot, current_evidence, current_source)
         return body, policy_id, limitations
 
     def _append_certificate_issued(
