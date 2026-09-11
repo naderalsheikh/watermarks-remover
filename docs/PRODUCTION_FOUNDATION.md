@@ -95,7 +95,9 @@ static export, and the actual worker image workflow. The web job uses Node 24 an
 the lockfile. The complete timestamp-mutation corpus runs in a separate required
 job on each OS so it cannot consume the main suite's timeout budget; no cases or
 OS coverage are removed. Windows main tests run in three deterministic, disjoint
-groups; their combined collected nodes cover the full main suite. An aggregate
+groups; their combined collected nodes cover the full main suite.
+Parametrized cases stay with their test function, so generated parameter labels
+cannot move cases between independently collected groups. An aggregate
 check retains the existing `test (windows-latest)` name and requires the main
 matrix to succeed. Main jobs stop on their first failure so its traceback is
 available before a slow runner can exhaust the job budget.
