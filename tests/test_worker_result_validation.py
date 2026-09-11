@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -73,6 +74,24 @@ def completed_worker(tmp_path):
 
 def _save(output, payload):
     (output / "result.json").write_text(json.dumps(payload))
+
+
+def _make_test_file_writable(path):
+    """Unlock only this fixture's regular, unshared file; never a link target."""
+    path = Path(path)
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    path.chmod(info.st_mode | stat.S_IWUSR, follow_symlinks=False)
+
+
+def _remove_test_output(output):
+    def remove_readonly(func, path, exc):
+        if not isinstance(exc, PermissionError):
+            raise exc
+        _make_test_file_writable(path)
+        func(path)
+
+    shutil.rmtree(output, onexc=remove_readonly)
 
 
 def _reconcile(completed, *, rc=0, timed_out=False):
@@ -145,6 +164,7 @@ def test_hardlinked_derivative_is_rejected(completed_worker, tmp_path):
 def test_special_file_is_rejected_without_blocking(completed_worker):
     _, _, output, _ = completed_worker
     report = output / "bundle" / "report.html"
+    _make_test_file_writable(report)
     report.unlink()
     os.mkfifo(report)
     assert _reconcile(completed_worker).status == "failed"
@@ -170,6 +190,7 @@ def test_incomplete_or_conflicting_bundles_are_rejected(completed_worker, mutati
     if mutation == "extra_derivative":
         (derivative.parent / "unaccounted.txt").write_text("not in manifest")
     elif mutation == "missing_manifest":
+        _make_test_file_writable(bundle / "manifest.json")
         (bundle / "manifest.json").unlink()
     elif mutation == "derivative_bytes":
         derivative.chmod(0o600)
@@ -229,7 +250,7 @@ def test_historical_terminal_record_is_untouched(completed_worker):
     job.bundle_dir = "/historical/bundle"
     job.result_json = {"historical": True}
     session.commit()
-    shutil.rmtree(output)
+    _remove_test_output(output)
     _reconcile(completed_worker)
     assert job.status == "done" and job.bundle_dir == "/historical/bundle"
     assert job.result_json == {"historical": True}
@@ -252,7 +273,7 @@ def test_disabled_layer_b_cannot_publish_stale_worker_output(completed_worker):
 @pytest.mark.parametrize("tamper", ["same_length", "length", "staged_input"])
 def test_altered_custody_input_never_reaches_worker(completed_worker, monkeypatch, tamper):
     session, job, output, _ = completed_worker
-    shutil.rmtree(output)
+    _remove_test_output(output)
     cfg = Config(output.parents[4])
     doc = session.get(Document, job.document_id)
     source = cfg.data_root / "input.txt"
