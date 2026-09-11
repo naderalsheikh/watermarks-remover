@@ -80,17 +80,16 @@ DB_NAME = "counselclear.sqlite3"
 DB_SIDECARS = (f"{DB_NAME}-wal", f"{DB_NAME}-shm", f"{DB_NAME}-journal")
 ENVELOPE_MAGIC = b"CCENC"
 ACTIVE_JOB_STATES = ("queued", "running")
-# Tables whose rows the drill must leave exactly as copied.
-PRESERVED_TABLES = (
-    "matters",
-    "matter_acl",
-    "audit_events",
-    "attestation_uses",
-    "batches",
-    "releases",
-    "job_queue",
-    "alembic_version",
-)
+# The only tables that carry filesystem references, and the only columns
+# in them the drill may touch. Every other table -- including ones added by
+# later migrations, such as ``admissions`` -- is preserved as copied and
+# proven unchanged by digest; the two reference tables are digested with
+# their rebased columns excluded, so the rebase is proven to touch nothing
+# else either.
+REBASED_COLUMNS = {
+    "documents": ("storage_path",),
+    "jobs": ("bundle_dir", "execution_receipt"),
+}
 
 
 class Refused(Exception):
@@ -229,18 +228,31 @@ class RootMapper:
         return new
 
 
-def _digest_tables(con: sqlite3.Connection, tables: tuple[str, ...]) -> dict[str, str]:
-    """A digest of every row in every preserved table, in rowid order, so
-    the drill can prove its own updates touched nothing else."""
+def _table_names(con: sqlite3.Connection) -> list[str]:
+    return [
+        row[0]
+        for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+            "ORDER BY name"
+        )
+    ]
+
+
+def _digest_tables(con: sqlite3.Connection) -> dict[str, str]:
+    """A digest of every row of every table, in rowid order, with the
+    rebased reference columns excluded from the two tables that have them.
+    Comparing the result before and after the rebase proves the drill's
+    updates touched nothing but those columns -- in every table the
+    snapshot has, including ones this tool has never heard of."""
     out: dict[str, str] = {}
-    for table in tables:
-        exists = con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-        ).fetchone()
-        if not exists:
+    for table in _table_names(con):
+        columns = [row[1] for row in con.execute(f'PRAGMA table_info("{table}")')]
+        keep = [c for c in columns if c not in REBASED_COLUMNS.get(table, ())]
+        if not keep:
             continue
+        select = ", ".join(f'"{c}"' for c in keep)
         digest = hashlib.sha256()
-        for row in con.execute(f'SELECT * FROM "{table}" ORDER BY rowid'):  # noqa: S608 - name from constant
+        for row in con.execute(f'SELECT {select} FROM "{table}" ORDER BY rowid'):  # noqa: S608 - names from PRAGMA
             digest.update(repr(tuple(row)).encode("utf-8"))
             digest.update(b"\n")
         out[table] = digest.hexdigest()
@@ -385,7 +397,7 @@ def _check_drained(con: sqlite3.Connection, report: DrillReport) -> None:
 def _rebase_references(
     con: sqlite3.Connection, mapper: RootMapper, destination: Path, report: DrillReport
 ) -> dict[str, Any]:
-    before = _digest_tables(con, PRESERVED_TABLES)
+    before = _digest_tables(con)
     documents: dict[str, dict[str, Any]] = {}
     jobs: dict[str, dict[str, Any]] = {}
     updates: list[tuple[str, str, str]] = []
@@ -394,10 +406,15 @@ def _rebase_references(
         ref = row["storage_path"]
         if not isinstance(ref, str) or not ref:
             raise Refused(f"documents.storage_path: document {row['id']} has no reference")
-        if ref.startswith("s3v1:") or not mapper.is_absolute_reference(ref):
+        if ref.startswith("s3v1:"):
             raise Refused(
                 "documents.storage_path: object-storage (S3) references present; this drill "
                 "restores LOCAL storage only"
+            )
+        if not mapper.is_absolute_reference(ref):
+            raise Refused(
+                "documents.storage_path: reference is not an absolute local path (a relative "
+                "path or an object-storage key); this drill restores LOCAL storage only"
             )
         new = mapper.rebase(ref, column="documents.storage_path")
         documents[row["id"]] = {
@@ -450,9 +467,12 @@ def _rebase_references(
     except Exception:
         con.execute("ROLLBACK")
         raise
-    after = _digest_tables(con, PRESERVED_TABLES)
+    after = _digest_tables(con)
     if before != after:
-        raise VerificationFailed("rebase changed rows outside the known reference columns")
+        changed = sorted(t for t in set(before) | set(after) if before.get(t) != after.get(t))
+        raise VerificationFailed(
+            "rebase changed rows outside the known reference columns: " + ", ".join(changed)
+        )
 
     stale = 0
     old_text = str(mapper.old)
@@ -472,6 +492,7 @@ def _rebase_references(
         "old_root_mentions_remaining_in_reference_columns": stale,
         "preserved_tables_digest_unchanged": True,
         "preserved_tables": sorted(after),
+        "rebased_columns": {k: list(v) for k, v in REBASED_COLUMNS.items()},
     }
     if stale:
         raise VerificationFailed("old data root still present in a reference column after rebase")
@@ -920,26 +941,38 @@ def validate_report_path(
     report_path: Path | None, source: Path, destination: Path, volume_key_file: Path | None
 ) -> Path | None:
     """The report is written to a new file only, never over an existing one,
-    never inside the snapshot, the restored root, or beside the key file."""
+    never inside the snapshot, the restored root, or beside the key file.
+
+    Every comparison is made on *resolved* paths: the report's existing
+    parent directory and each forbidden root are resolved through symlinks
+    first, so an alias that points into the snapshot is refused the same
+    way the snapshot's own path would be. The returned path is the resolved
+    one, and ``_write_report`` creates it with ``O_EXCL``.
+    """
     if report_path is None:
         return None
     target = Path(report_path)
     if target.exists() or target.is_symlink():
         raise Refused(f"--report must be a new path; {target} already exists")
-    resolved = Path(os.path.abspath(target))
-    for label, forbidden in (
-        ("the source snapshot", Path(os.path.abspath(source))),
-        ("the destination root", Path(os.path.abspath(destination))),
-        (
-            "the volume key file's directory",
-            volume_key_file.parent.resolve() if volume_key_file is not None else None,
-        ),
-    ):
-        if forbidden is not None and (resolved == forbidden or resolved.is_relative_to(forbidden)):
+    if not target.name or target.name in (".", ".."):
+        raise Refused("--report must name a file")
+    # Symlinks in the existing part of the path are followed; a dangling
+    # alias to a not-yet-created destination still resolves onto it.
+    resolved = target.resolve(strict=False)
+    forbidden: list[tuple[str, Path]] = [
+        ("the source snapshot", Path(source).resolve()),
+        ("the destination root", Path(destination).resolve()),
+    ]
+    if volume_key_file is not None:
+        forbidden.append(
+            ("the volume key file's directory", Path(volume_key_file).resolve().parent)
+        )
+    for label, root in forbidden:
+        if resolved == root or resolved.is_relative_to(root):
             raise Refused(f"--report must not be written inside {label}")
-    if not target.parent.is_dir():
+    if not resolved.parent.is_dir():
         raise Refused(f"--report parent directory does not exist: {target.parent}")
-    return target
+    return resolved
 
 
 def _write_report(path: Path, text: str) -> None:

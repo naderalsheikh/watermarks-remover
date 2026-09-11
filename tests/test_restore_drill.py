@@ -301,9 +301,9 @@ def test_queued_or_running_work_is_refused(release_snapshot, tmp_path):
     ("column", "value", "fragment"),
     [
         ("storage_path", "{old}/../escape/spa.docx", "unsafe path segment"),
-        ("storage_path", "/somewhere/else/spa.docx", "outside the declared old data root"),
-        ("storage_path", "relative/spa.docx", "S3"),
-        ("storage_path", "s3v1:abc:prod/firm/x.docx", "LOCAL storage only"),
+        ("storage_path", "{anchor}somewhere/else/spa.docx", "outside the declared old data root"),
+        ("storage_path", "relative/spa.docx", "not an absolute local path"),
+        ("storage_path", "s3v1:abc:prod/firm/x.docx", "object-storage (S3) references"),
         ("bundle_dir", "{old}/matters/../../x", "unsafe path segment"),
     ],
 )
@@ -313,7 +313,8 @@ def test_unsafe_or_foreign_references_are_refused(
     built = release_snapshot
     con = sqlite3.connect(built["snapshot"] / DB)
     table = "documents" if column == "storage_path" else "jobs"
-    con.execute(f"UPDATE {table} SET {column} = ?", (value.format(old=built["old_root"]),))  # noqa: S608
+    rendered = value.format(old=built["old_root"], anchor=Path(built["old_root"]).anchor)
+    con.execute(f"UPDATE {table} SET {column} = ?", (rendered,))  # noqa: S608
     con.commit()
     con.close()
     destination = tmp_path / "unsafe"
@@ -401,7 +402,9 @@ def test_missing_bundle_fails_verification(release_snapshot, tmp_path):
     con = sqlite3.connect(built["snapshot"] / DB)
     bundle = con.execute("SELECT bundle_dir FROM jobs").fetchone()[0]
     con.close()
-    shutil.rmtree(built["snapshot"] / Path(bundle).relative_to(built["old_root"]))
+    # Write-once derivatives are read-only; use the drill's own remover so the
+    # case runs on Windows too.
+    assert drill._remove_tree(built["snapshot"] / Path(bundle).relative_to(built["old_root"]))
     destination = tmp_path / "no-bundle"
     report = _run(
         built["snapshot"], destination, built["old_root"], volume_key_file=built["keyfile"]
@@ -725,6 +728,167 @@ def test_report_path_must_be_new_and_outside_snapshot_and_root(release_snapshot,
         drill.validate_report_path(fine, built["snapshot"], destination, built["keyfile"]) == fine
     )
     assert drill.validate_report_path(None, built["snapshot"], destination, None) is None
+
+
+def _tree_digest(root: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(root)): _sha(path.read_bytes())
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_report_path_aliases_into_protected_trees_are_refused(release_snapshot, tmp_path):
+    """A symlinked parent that resolves into the snapshot, the restored root
+    or the key directory is refused exactly like the real path, and the
+    snapshot is provably untouched afterwards."""
+    built = release_snapshot
+    destination = tmp_path / "alias-target"
+    before = _tree_digest(built["snapshot"])
+    try:
+        (tmp_path / "alias-source").symlink_to(built["snapshot"], target_is_directory=True)
+        (tmp_path / "alias-keys").symlink_to(built["keyfile"].parent, target_is_directory=True)
+        destination.parent.joinpath("alias-dest").symlink_to(destination, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this host")
+    for path, fragment in (
+        (tmp_path / "alias-source" / "report.json", "inside the source snapshot"),
+        (tmp_path / "alias-keys" / "report.json", "volume key file's directory"),
+        (tmp_path / "alias-dest" / "report.json", "inside the destination root"),
+    ):
+        with pytest.raises(drill.Refused, match=fragment):
+            drill.validate_report_path(path, built["snapshot"], destination, built["keyfile"])
+        assert not path.exists()
+    assert not (built["snapshot"] / "report.json").exists()
+    assert _tree_digest(built["snapshot"]) == before
+
+    # A legitimate alias elsewhere is accepted and the report lands on the
+    # resolved path, created exclusively.
+    real_dir = tmp_path / "reports"
+    real_dir.mkdir()
+    (tmp_path / "alias-reports").symlink_to(real_dir, target_is_directory=True)
+    accepted = drill.validate_report_path(
+        tmp_path / "alias-reports" / "drill.json", built["snapshot"], destination, built["keyfile"]
+    )
+    assert accepted == real_dir.resolve() / "drill.json"
+    drill._write_report(accepted, "{}")
+    assert (real_dir / "drill.json").read_text() == "{}\n"
+    with pytest.raises(FileExistsError):
+        drill._write_report(accepted, "{}")
+
+
+def test_cli_alias_into_snapshot_leaves_snapshot_unchanged(release_snapshot, tmp_path):
+    built = release_snapshot
+    try:
+        (tmp_path / "alias").symlink_to(built["snapshot"], target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this host")
+    before = _tree_digest(built["snapshot"])
+    destination = tmp_path / "cli-alias"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools" / "counselclear_restore_drill.py"),
+            "--source",
+            str(built["snapshot"]),
+            "--destination",
+            str(destination),
+            "--old-data-root",
+            built["old_root"],
+            "--volume-key-file",
+            str(built["keyfile"]),
+            "--report",
+            str(tmp_path / "alias" / "report.json"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert "inside the source snapshot" in completed.stdout
+    assert not destination.exists()
+    assert _tree_digest(built["snapshot"]) == before
+
+
+def test_every_non_reference_table_is_preserved_including_unknown_ones(release_snapshot, tmp_path):
+    """Tables this tool does not know about must survive restore
+    byte-for-byte and be covered by the preservation digest. The fixture
+    adds a deliberately unknown table; the real ``admissions`` table
+    (migration 0014 on the integration branch) is asserted whenever the
+    schema under test has it."""
+    built = release_snapshot
+    con = sqlite3.connect(built["snapshot"] / DB)
+    snapshot_tables = {
+        row[0]
+        for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    assert "future_restore_receipts" not in snapshot_tables
+    con.execute(
+        "CREATE TABLE future_restore_receipts (id TEXT PRIMARY KEY, request_digest TEXT, payload TEXT)"
+    )
+    rows = [("frr-1", "ab" * 32, '{"kind": "sanitize"}'), ("frr-2", "cd" * 32, "null")]
+    con.executemany("INSERT INTO future_restore_receipts VALUES (?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    destination = tmp_path / "with-unknown-table"
+    report = _run(
+        built["snapshot"], destination, built["old_root"], volume_key_file=built["keyfile"]
+    )
+    assert report.outcome == "verified", (report.refusal, report.failures)
+    preserved = set(report.references["preserved_tables"])
+    assert preserved == snapshot_tables | {"future_restore_receipts"}
+    if "admissions" in snapshot_tables:
+        assert "admissions" in preserved
+    assert report.references["rebased_columns"] == {
+        "documents": ["storage_path"],
+        "jobs": ["bundle_dir", "execution_receipt"],
+    }
+    con = sqlite3.connect(destination / DB)
+    restored_rows = con.execute(
+        "SELECT id, request_digest, payload FROM future_restore_receipts ORDER BY id"
+    ).fetchall()
+    restored_tables = {
+        row[0]
+        for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    con.close()
+    assert restored_rows == rows
+    assert restored_tables == snapshot_tables | {"future_restore_receipts"}
+
+
+def test_preservation_digest_detects_changes_outside_rebased_columns(tmp_path):
+    con = sqlite3.connect(tmp_path / "scratch.sqlite3")
+    con.execute("CREATE TABLE documents (id TEXT, storage_path TEXT, sha256 TEXT)")
+    con.execute("CREATE TABLE jobs (id TEXT, bundle_dir TEXT, execution_receipt TEXT, status TEXT)")
+    con.execute("CREATE TABLE admissions (id TEXT, payload TEXT)")
+    con.execute("INSERT INTO documents VALUES ('d', '/old/x', 'h')")
+    con.execute("INSERT INTO jobs VALUES ('j', '/old/b', '{}', 'done')")
+    con.execute("INSERT INTO admissions VALUES ('a', 'p')")
+    con.commit()
+    base = drill._digest_tables(con)
+    assert set(base) == {"documents", "jobs", "admissions"}
+    # Rebasing the reference columns leaves the digest unchanged...
+    con.execute("UPDATE documents SET storage_path = '/new/x'")
+    con.execute(
+        "UPDATE jobs SET bundle_dir = '/new/b', execution_receipt = '{\"output_dir\": \"/new\"}'"
+    )
+    con.commit()
+    assert drill._digest_tables(con) == base
+    # ...and any other change is detected, in known and unknown tables alike.
+    con.execute("UPDATE jobs SET status = 'failed'")
+    con.commit()
+    assert drill._digest_tables(con)["jobs"] != base["jobs"]
+    con.execute("UPDATE jobs SET status = 'done'")
+    con.execute("UPDATE admissions SET payload = 'changed'")
+    con.commit()
+    changed = drill._digest_tables(con)
+    assert changed["jobs"] == base["jobs"] and changed["admissions"] != base["admissions"]
+    con.close()
 
 
 def test_cli_refuses_bad_report_path_before_copying(release_snapshot, tmp_path):
