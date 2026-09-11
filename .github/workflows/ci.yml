@@ -34,7 +34,15 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libimage-exiftool-perl qpdf
+          sudo apt-get install -y --no-install-recommends libimage-exiftool-perl unzip
+          # Ubuntu's qpdf 11.9 lacks --remove-info (introduced in 11.10).
+          # Keep the upstream archive's bin/ and lib/ together for its RPATH.
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/qpdf.zip" \
+            https://github.com/qpdf/qpdf/releases/download/v12.4.1/qpdf-12.4.1-bin-linux-x86_64.zip
+          echo "db9122e88ec00c76ac6a14e09ffb92406db1773d47b968911ff6e69f28c09bf9  $RUNNER_TEMP/qpdf.zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/qpdf.zip" -d "$RUNNER_TEMP/qpdf-12.4.1"
+          echo "$RUNNER_TEMP/qpdf-12.4.1/bin" >> "$GITHUB_PATH"
 
       - name: Install document tools (macOS)
         if: runner.os == 'macOS'
@@ -49,6 +57,7 @@ jobs:
         run: |
           exiftool -ver
           qpdf --version
+          qpdf --help=--remove-info
 
       - name: Test
         # Keep the full mutation corpus in its own required matrix below. It

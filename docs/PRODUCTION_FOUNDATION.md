@@ -90,8 +90,11 @@ static export, and the actual worker image workflow. The web job uses Node 24 an
 the lockfile. The complete timestamp-mutation corpus runs in a separate required
 job on each OS so it cannot consume the main suite's timeout budget; no cases or
 OS coverage are removed. Host test jobs install ExifTool and qpdf so required
-PDF/JPEG paths exercise their real tools instead of an unsupported fallback. The frontend
-dependency patches address the advisories reported by the September 11 clean
+PDF/JPEG paths exercise their real tools instead of an unsupported fallback.
+PDF cleanup requires qpdf's `--remove-info` capability (introduced in 11.10).
+The Ubuntu job uses a checksum-pinned upstream 12.4.1 binary because its distro
+package is too old; host CI and the worker image build probe the required option.
+The frontend dependency patches address the advisories reported by the September 11 clean
 install; the deployed static export does not run a Next.js server, but
 development/build dependencies must still be maintained.
 
