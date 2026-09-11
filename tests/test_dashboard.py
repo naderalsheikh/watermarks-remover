@@ -385,6 +385,10 @@ def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
     only, matter.create neither.
     """
     c, sf, _ = env
+    # Capture each event's timestamp once. _ts() reads the wall clock, so
+    # recomputing it at lookup time races a second boundary between seeding
+    # and assertion and turns the (action, at) key into a KeyError.
+    at = [_ts(days_ago) for days_ago in range(6)]
     with sf() as s:
         _seed_matter(s, "m1", "Merger")
         # newest first
@@ -394,7 +398,7 @@ def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
             "m1",
             5,
             "bundle.download",
-            _ts(0),
+            at[0],
             payload={"job_id": "j9", "include_original": True},
         )
         _seed_audit(
@@ -403,7 +407,7 @@ def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
             "m1",
             4,
             "release.terminal",
-            _ts(1),
+            at[1],
             payload={"release_id": "r1", "job_id": "j8", "status": "done"},
         )
         _seed_audit(
@@ -412,7 +416,7 @@ def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
             "m1",
             3,
             "job.sanitize",
-            _ts(2),
+            at[2],
             payload={"job_id": "j7", "document_id": "d3", "policy_id": "production"},
         )
         _seed_audit(
@@ -421,14 +425,14 @@ def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
             "m1",
             2,
             "document.upload",
-            _ts(3),
+            at[3],
             payload={"document_id": "d3", "sha256": "ab" * 32, "bytes": 12},
         )
-        _seed_audit(s, "e5", "m1", 1, "matter.create", _ts(4), payload={"name": "Merger"})
+        _seed_audit(s, "e5", "m1", 1, "matter.create", at[4], payload={"name": "Merger"})
         # malformed/foreign-typed values must degrade to a matter link,
         # never surface as e.g. a job_id: null href
         _seed_audit(
-            s, "e6", "m1", 0, "job.sanitize", _ts(5), payload={"job_id": 7, "document_id": ""}
+            s, "e6", "m1", 0, "job.sanitize", at[5], payload={"job_id": 7, "document_id": ""}
         )
         s.commit()
 
@@ -436,24 +440,24 @@ def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
     # Two job.sanitize rows exist (one well-formed, one malformed), so
     # keying by action alone would collapse them; (action, at) is unique.
     by_key = {(r["action"], r["at"]): r for r in recent}
-    bd = by_key[("bundle.download", _ts(0))]
+    bd = by_key[("bundle.download", at[0])]
     assert bd["job_id"] == "j9"
     assert "document_id" not in bd
-    rt = by_key[("release.terminal", _ts(1))]
+    rt = by_key[("release.terminal", at[1])]
     assert rt["job_id"] == "j8"
     assert "document_id" not in rt
-    js = by_key[("job.sanitize", _ts(2))]
+    js = by_key[("job.sanitize", at[2])]
     assert js["job_id"] == "j7"
     assert js["document_id"] == "d3"
-    du = by_key[("document.upload", _ts(3))]
+    du = by_key[("document.upload", at[3])]
     assert du["document_id"] == "d3"
     assert "job_id" not in du
     # matter-level: neither id — the frontend falls back to a matter link
-    mc = by_key[("matter.create", _ts(4))]
+    mc = by_key[("matter.create", at[4])]
     assert "job_id" not in mc
     assert "document_id" not in mc
     # non-string / empty values are dropped, not echoed
-    malformed = by_key[("job.sanitize", _ts(5))]
+    malformed = by_key[("job.sanitize", at[5])]
     assert "job_id" not in malformed
     assert "document_id" not in malformed
 
