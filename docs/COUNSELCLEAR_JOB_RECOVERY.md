@@ -3,8 +3,9 @@
 Single inspect, sanitize and release requests and batch children are admitted
 as database jobs. The dispatcher runs them independently of the HTTP request.
 Existing single-job routes still wait for their terminal response for API
-compatibility; a client timeout does not mean its job stopped. Request-level
-idempotency and an explicit asynchronous submission contract are separate work.
+compatibility; a client timeout does not mean its job stopped. The browser uses
+durable retry keys and asynchronous admission; see
+[request retries](COUNSELCLEAR_REQUEST_RETRIES.md) for the HTTP contract.
 
 ## Ownership and publication
 
@@ -35,10 +36,29 @@ the engine again. A late worker's private files cannot replace the newer attempt
 published references. This is fenced, retryable processing; it is not a claim
 that the engine executes exactly once.
 
+## Admitted executor and attribution
+
+New jobs retain the configured worker mode and, for Docker, its image reference
+at admission. Dispatch uses that stored image even if the deployment has moved
+to a newer image. Docker still requires an immutable digest; an unavailable
+image fails rather than substituting the current one. Changing worker mode
+before dispatch fails the job rather than silently switching its isolation
+boundary. Legacy jobs have a NULL mode because their historical admission
+configuration cannot be reconstructed; they retain the previous dispatch
+behavior. Keep the pinned API/worker protocol compatible during upgrades.
+
+The trusted parent passes the admitted principal and matter into the worker,
+and validates both against a sanitize manifest before publication. A Docker
+manifest must also carry the admitted image. These are consistency checks on
+the worker output, not independent attestation of its execution. The image
+pins its bundled policy implementation; subprocess development jobs still
+use the installed source and tools. Rewrite endpoint configuration and other
+external service behavior are not frozen by this image field.
+
 ## Deployment and upgrades
 
 Back up the database, data root and key material together before upgrading.
-Stop API/dispatcher processes, apply migration 0013 once, then start the new
+Stop API/dispatcher processes, apply migrations through 0016 once, then start the new
 build. Do not mix old and new dispatchers: old workers do not honor leases.
 Historical terminal rows are preserved. Legacy unowned pending jobs retain the
 old startup interruption behavior; newly admitted jobs carry a durable actor

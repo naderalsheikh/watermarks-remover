@@ -201,6 +201,8 @@ class Job(Base):
     # Parent-observed worker exit, persisted before terminal publication. A
     # recovery attempt can revalidate these private files without rerunning.
     execution_receipt: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
+    # Set at admission. NULL preserves pre-pinning jobs on upgrade.
+    worker_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class Release(Base):

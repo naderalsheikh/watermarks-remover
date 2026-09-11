@@ -30,6 +30,7 @@ or corrupt every matter's files and the audit chain directly.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -44,7 +45,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from sqlalchemy.orm import Session
 
 from .config import Config
-from .models import Document, Job, _now
+from .models import Batch, Document, Job, _now
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 
@@ -92,6 +93,7 @@ def build_subprocess_cmd(
     policy_id: str,
     attest: bool,
     matter_id: str,
+    operator_id: str = "operator",
     decisions: dict[str, str] | None = None,
     legal_justifications: dict | None = None,
     layer_b: dict | None = None,
@@ -111,6 +113,8 @@ def build_subprocess_cmd(
         policy_id,
         "--matter-id",
         matter_id,
+        "--operator-id",
+        operator_id,
     ]
     if attest:
         cmd.append("--attest")
@@ -136,6 +140,7 @@ def build_docker_cmd(
     policy_id: str,
     attest: bool,
     matter_id: str,
+    operator_id: str = "operator",
     decisions: dict[str, str] | None = None,
     legal_justifications: dict | None = None,
     layer_b: dict | None = None,
@@ -199,6 +204,8 @@ def build_docker_cmd(
         f"{mount_root}:/data",
         "-e",
         f"COUNSELCLEAR_WORKER_IMAGE={image}",
+        "-e",
+        f"COUNSELCLEAR_IMAGE_DIGEST={image}",
     ]
     if layer_b:
         # Layer B jobs need the rewrite endpoint env inside the container:
@@ -222,6 +229,8 @@ def build_docker_cmd(
         policy_id,
         "--matter-id",
         matter_id,
+        "--operator-id",
+        operator_id,
     ]
     if attest:
         cmd.append("--attest")
@@ -298,9 +307,12 @@ def run_job(
     staged_input = input_dir / doc.filename
 
     job.status = "running"
-    job.worker_image = cfg.worker_image if cfg.worker_mode == "docker" else ""
+    if job.worker_mode is None:  # Jobs admitted before execution pinning.
+        job.worker_image = cfg.worker_image if cfg.worker_mode == "docker" else ""
     s.commit()
 
+    batch = s.get(Batch, job.batch_id) if job.batch_id else None
+    actor = job.requested_by or (batch.requested_by if batch else "operator")
     common = dict(
         input_path=staged_input,
         output_dir=output_dir,
@@ -308,12 +320,18 @@ def run_job(
         policy_id=job.policy_id,
         attest=bool(job.attestation),
         matter_id=job.matter_id,
+        operator_id=actor,
         decisions=job.finding_decisions or None,
         legal_justifications=job.legal_justifications or None,
         layer_b=job.layer_b or None,
     )  # type: ignore[arg-type]  # layer_b: dict | None (Pyright: attribute of None)
 
     try:
+        if job.worker_mode is not None:
+            if job.worker_mode != cfg.worker_mode:
+                raise ValueError("worker mode changed since admission; refusing execution")
+            cfg = copy.copy(cfg)
+            cfg.worker_image = job.worker_image
         input_dir.mkdir(parents=True, exist_ok=True)
         output_dir.mkdir(parents=True, exist_ok=True)
         _output_directory(input_dir)
@@ -476,6 +494,15 @@ def _validated_bundle(output_dir: Path, payload: dict, job: Job, doc: Document) 
         or policy.get("id") != job.policy_id
     ):
         raise ValueError("worker manifest does not match the job's original or policy")
+    if job.requested_by is not None and (
+        manifest.get("operator") != {"id": job.requested_by}
+        or manifest.get("matter") != {"id": job.matter_id}
+    ):
+        raise ValueError("worker manifest does not match the admitted operator or matter")
+    if job.worker_mode == "docker":
+        processor = manifest.get("processor")
+        if not isinstance(processor, dict) or processor.get("image_digest") != job.worker_image:
+            raise ValueError("worker manifest does not match the admitted image")
     name = result.get("derivative")
     if not _confined_basename(name):
         raise ValueError("worker reported an invalid derivative name")

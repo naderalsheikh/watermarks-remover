@@ -434,3 +434,36 @@ def test_build_subprocess_cmd_shape(tmp_path):
     assert cmd[:4] == [sys.executable, "-m", "app.worker", "run-job"]
     assert "--input" in cmd and str(tmp_path / "in" / "x.docx") in cmd
     assert "--output-dir" in cmd and str(tmp_path / "out") in cmd
+
+
+def test_authenticated_submitter_reaches_real_worker_manifest(client):
+    route = next(
+        route
+        for route in client.app.routes
+        if getattr(route, "path", "").endswith("/sanitize-jobs")
+    )
+    principal = next(dep.call for dep in route.dependant.dependencies if dep.name == "user")
+    actor = "oidc:" + "a" * 40
+    client.app.dependency_overrides[principal] = lambda: actor
+    matter, doc_id = _upload(client, "spa.txt")
+    response = client.post(f"/v1/matters/{matter}/documents/{doc_id}/sanitize-jobs")
+    assert response.status_code == 200, response.text
+    job = response.json()
+    assert job["status"] == "done", job.get("error")
+    manifest = job["result"]["manifest"]
+    assert manifest["operator"] == {"id": actor}
+    assert manifest["matter"] == {"id": matter}
+    from app.models import AuditEvent, Job
+
+    with client.app.state.batch_dispatcher._session_factory() as session:
+        assert session.get(Job, job["id"]).requested_by == actor
+        event = session.query(AuditEvent).filter_by(matter_id=matter, action="job.sanitize").one()
+        assert event.actor_id == actor
+
+
+def test_docker_command_carries_admitted_actor_as_one_argument(tmp_path):
+    cfg = Config(tmp_path)
+    cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
+    actor = "oidc:" + "b" * 40
+    cmd = build_docker_cmd(cfg, **_docker_kwargs(tmp_path), operator_id=actor)
+    assert cmd[cmd.index("--operator-id") + 1] == actor

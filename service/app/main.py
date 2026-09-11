@@ -2310,6 +2310,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     # --- jobs ---------------------------------------------------------------
 
+    def _new_job(**values):
+        return Job(
+            worker_mode=cfg.worker_mode,
+            worker_image=cfg.worker_image if cfg.worker_mode == "docker" else "",
+            **values,
+        )
+
     def _admission(s, matter_id, user, operation, key, docs, body=None, policy_id=None):
         return lookup_admission(
             s,
@@ -2396,7 +2403,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         existing, ticket = _admission(s, matter_id, user, "inspect", idempotency_key, [doc])
         if existing is not None:
             return _respond_job(s, matter_id, _job(matter_id, existing.resource_id, s), prefer)
-        job = Job(matter_id=matter_id, document_id=doc.id, kind="inspect", requested_by=user)
+        job = _new_job(matter_id=matter_id, document_id=doc.id, kind="inspect", requested_by=user)
         s.add(job)
         s.flush()
         remember_admission(s, ticket, resource_kind="job", resource_id=job.id)
@@ -2447,7 +2454,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "jti": jti,
             }
             attest_claims = claims
-        job = Job(
+        job = _new_job(
             requested_by=user,
             matter_id=matter_id,
             document_id=doc.id,
@@ -2799,7 +2806,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             }
             attest_claims = claims
 
-        job = Job(
+        job = _new_job(
             requested_by=user,
             matter_id=matter_id,
             document_id=doc.id,
@@ -3148,7 +3155,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         for doc_id in body.document_ids:
             s.add(
-                Job(
+                _new_job(
                     requested_by=user,
                     matter_id=matter_id,
                     document_id=doc_id,
@@ -3252,7 +3259,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         releases: list[Release] = []
         for doc_id in body.document_ids:
-            job = Job(
+            job = _new_job(
                 requested_by=user,
                 matter_id=matter_id,
                 document_id=doc_id,
@@ -5055,6 +5062,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "attestation": j.attestation,
             "layer_b": j.layer_b,
             "worker_image": j.worker_image,
+            "worker_mode": j.worker_mode,
             "created_utc": j.created_utc,
             "finished_utc": j.finished_utc,
             "release_id": release_id,

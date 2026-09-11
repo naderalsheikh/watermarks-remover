@@ -54,6 +54,7 @@ def _run_job(
     policy_id: str,
     attest: bool,
     matter_id: str | None = None,
+    operator_id: str = "operator",
     decisions: dict[str, str] | None = None,
     legal_justifications: dict | None = None,
     layer_b: str | None = None,
@@ -126,7 +127,7 @@ def _run_job(
                 input_path,
                 bundle_dir,
                 policy_id=policy_id,
-                operator_id="operator",
+                operator_id=operator_id,
                 matter_id=matter_id,
                 signature_break_attestation=attest,
                 decisions=decisions,
@@ -174,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     jp.add_argument("--policy", default="external_sharing")
     jp.add_argument("--attest", action="store_true")
     jp.add_argument("--matter-id", default=None)
+    jp.add_argument("--operator-id", default="operator")
     jp.add_argument(
         "--decisions",
         default=None,
@@ -214,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
             policy_id=args.policy,
             attest=args.attest,
             matter_id=args.matter_id,
+            operator_id=args.operator_id,
             decisions=decisions,
             legal_justifications=legal_justifications,
             layer_b=args.layer_b,

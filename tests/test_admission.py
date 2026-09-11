@@ -73,6 +73,8 @@ def test_concurrent_identical_retries_create_one_admission(env, operation):
     with ThreadPoolExecutor(max_workers=4) as pool:
         responses = list(pool.map(lambda _: c.post(url, json=body, headers=headers), range(4)))
     assert all(r.status_code in (200, 202) for r in responses), [r.text for r in responses]
+    with sessions() as s:
+        assert all(job.worker_mode == "subprocess" for job in s.query(Job).all())
     ids = {identity(r.json(), operation) for r in responses}
     assert len(ids) == 1
     if operation in ("inspect", "sanitize", "release"):

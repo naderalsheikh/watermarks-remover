@@ -2,7 +2,7 @@
 
 The five job/release submission routes accept `Idempotency-Key`: document inspect jobs, document sanitize jobs, document releases, matter batches, and matter batch releases. Clients generate a random key for one intended submission and reuse it only when retrying that same request.
 
-Keys are scoped to the authenticated principal, matter, and operation. Authorization runs before receipt lookup. The receipt binds the normalized request, resolved policy ID, and each selected document's recorded ID, SHA-256, and length. It does not pin a future worker image or policy implementation version. Only key and request hashes are stored. A key must contain 1–200 visible ASCII characters.
+Keys are scoped to the authenticated principal, matter, and operation. Authorization runs before receipt lookup. The receipt binds the normalized request, resolved policy ID, and each selected document's recorded ID, SHA-256, and length. New jobs separately retain the admitted worker mode and Docker image; the retry hash itself does not identify an engine implementation. See [job recovery](COUNSELCLEAR_JOB_RECOVERY.md). Only key and request hashes are stored. A key must contain 1–200 visible ASCII characters.
 
 Identical retries return the existing resource, including after an API restart. Reusing the key for different content returns HTTP 409. A receipt, resource creation, required attestation consumption, and admission audit entries commit together. A retry does not consume its authorization twice. Omitting the key retains the existing non-idempotent API contract. Receipts currently have no expiry; operators must preserve them with the database.
 

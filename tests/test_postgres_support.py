@@ -6,8 +6,8 @@ These tests never require a running Postgres server:
 - migration DDL is validated through Alembic's offline (--sql) mode,
   which renders SQL from the migration chain without touching a server.
 
-A live end-to-end run happens in deployment (compose pg profile), not in
-unit tests — CI has no Postgres service.
+The ownership, transaction, admission, and migration suites separately exercise
+a live PostgreSQL service in CI. This module covers dialect and DDL contracts.
 """
 
 from __future__ import annotations

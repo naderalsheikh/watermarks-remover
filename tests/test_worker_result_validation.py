@@ -343,3 +343,35 @@ def test_altered_custody_input_never_reaches_worker(completed_worker, monkeypatc
     assert job.status == "failed"
     assert "differs" in job.error
     assert not (output.parent / "input").exists()
+
+
+@pytest.mark.parametrize("field", ["operator", "matter"])
+@pytest.mark.parametrize("replacement", [None, {"id": "someone-else"}])
+def test_worker_cannot_change_admitted_attribution(completed_worker, field, replacement):
+    session, job, output, payload = completed_worker
+    job.requested_by = "operator"
+    session.commit()
+    manifest = payload["result"]["manifest"]
+    if replacement is None:
+        manifest.pop(field)
+    else:
+        manifest[field] = replacement
+    manifest_path = output / "bundle" / "manifest.json"
+    _make_test_file_writable(manifest_path)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _save(output, payload)
+    final = _reconcile(completed_worker)
+    assert final.status == "failed"
+    assert "admitted operator or matter" in final.error
+    assert not final.bundle_dir
+
+
+def test_worker_cannot_report_a_different_admitted_image(completed_worker):
+    session, job, _, _ = completed_worker
+    job.worker_mode = "docker"
+    job.worker_image = "example.invalid/counselclear@sha256:" + "a" * 64
+    session.commit()
+    final = _reconcile(completed_worker)
+    assert final.status == "failed"
+    assert "admitted image" in final.error
+    assert not final.bundle_dir
