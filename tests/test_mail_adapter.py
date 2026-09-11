@@ -192,7 +192,7 @@ def test_pdf_and_docx_selected_inline_png_is_not():
     assert {o.detected_format for o in result.attachments} == {"docx", "pdf"}
     assert [c.engine_name for c in proc.calls] == ["Agreement.docx", "scan.pdf"]
     roles = {leaf["part_id"]: leaf["role"] for leaf in result.evidence["leaves"]}
-    assert roles["1.2.2"] == "inline"
+    assert roles["1.2.2"] == "inline_image"
     assert roles["1.1"] == "body" and roles["1.2.1"] == "body"
 
 
@@ -613,6 +613,281 @@ def test_output_growth_beyond_limit_is_held():
     assert result.outbound is None
     assert result.evidence["output_bytes"] > len(raw) + 1024
     assert result.attachments[0].disposition == "replaced"
+
+
+# --- acceptance-review regressions (Codex, 2026-09-11) -------------------------
+
+
+def raw_part_message(part_headers: list[tuple[str, str]], content: bytes) -> bytes:
+    """A multipart/mixed message whose second part has exactly the headers
+    given, so tests can omit Content-Disposition or filename entirely."""
+    import base64
+
+    head = (
+        b"From: sender@example.test\r\nTo: recipient@example.test\r\n"
+        b"Subject: raw part\r\nMessage-ID: <raw-0001@example.test>\r\nMIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/mixed; boundary="rawb"\r\n\r\n'
+        b"--rawb\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSee attached.\r\n--rawb\r\n"
+    )
+    headers = b"".join(f"{k}: {v}\r\n".encode() for k, v in part_headers)
+    body = base64.encodebytes(content).replace(b"\n", b"\r\n")
+    return head + headers + b"Content-Transfer-Encoding: base64\r\n\r\n" + body + b"--rawb--\r\n"
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        AttachmentSpec("Agreement.docx", synthetic_docx("inline"), DOCX_CT, "inline", "doc@x"),
+        AttachmentSpec(None, synthetic_docx("inline"), DOCX_CT, "inline"),
+        AttachmentSpec(None, synthetic_docx("inline"), DOCX_CT, "inline", "doc@x"),
+        AttachmentSpec(None, synthetic_docx("inline"), "application/octet-stream", "inline", "b@x"),
+    ],
+    ids=["inline+filename+cid", "inline-no-filename", "inline+cid-no-filename", "octet-stream+cid"],
+)
+def test_inline_document_parts_are_processed_regardless_of_disposition_or_cid(spec):
+    raw = standard_message(attachments=(spec,))
+    adp, proc = adapter()
+    result = adp.process(request(raw))
+    assert result.decision == "release", result.reasons
+    assert len(proc.calls) == 1
+    assert [o.disposition for o in result.attachments] == ["replaced"]
+    docx_part = leaves(result.outbound.raw)[3]
+    assert docx_part.get_payload(decode=True) == synthetic_derivative(spec.content)
+    assert docx_part.get_payload(decode=True) != spec.content
+
+
+def test_document_without_disposition_or_filename_is_processed():
+    content = synthetic_docx("bare")
+    raw = raw_part_message([("Content-Type", DOCX_CT), ("Content-ID", "<bare@x>")], content)
+    adp, proc = adapter()
+    result = adp.process(request(raw))
+    assert result.decision == "release", result.reasons
+    assert len(proc.calls) == 1
+    assert proc.calls[0].engine_name == "attachment-2.docx"
+    assert leaves(result.outbound.raw)[1].get_payload(decode=True) == synthetic_derivative(content)
+    role = next(leaf for leaf in result.evidence["leaves"] if leaf["part_id"] == "2")
+    assert role["role"] == "attachment" and role["why"] == "binary_without_filename"
+
+
+@pytest.mark.parametrize(
+    ("headers", "content", "expected", "reason_fragment"),
+    [
+        (
+            [
+                ("Content-Type", "image/png"),
+                ("Content-Disposition", "inline"),
+                ("Content-ID", "<a@x>"),
+            ],
+            synthetic_docx("as image"),
+            "ambiguous",
+            "declared_image",
+        ),
+        (
+            [("Content-Type", "text/plain; charset=utf-8"), ("Content-Disposition", "inline")],
+            synthetic_docx("as text"),
+            "ambiguous",
+            "declared_text",
+        ),
+        (
+            [
+                ("Content-Type", "application/pdf"),
+                ("Content-Disposition", "inline"),
+                ("Content-ID", "<b@x>"),
+            ],
+            FAKE_PNG,
+            "ambiguous",
+            "declared_pdf",
+        ),
+        (
+            [
+                ("Content-Type", "image/png"),
+                ("Content-Disposition", "inline"),
+                ("Content-ID", "<c@x>"),
+            ],
+            b"\x00" * 64,
+            "unsupported",
+            "format_image",
+        ),
+        (
+            [
+                ("Content-Type", "image/png"),
+                ("Content-Disposition", 'inline; filename="x.docx"'),
+                ("Content-ID", "<d@x>"),
+            ],
+            FAKE_PNG,
+            "ambiguous",
+            "declared_docx_extension",
+        ),
+    ],
+    ids=["docx-as-image", "docx-as-text", "png-as-pdf", "unknown-as-image", "png-named-docx"],
+)
+def test_misleading_inline_declarations_never_pass_untouched(
+    headers, content, expected, reason_fragment
+):
+    raw = raw_part_message(headers, content)
+    adp, proc = adapter()
+    result = adp.process(request(raw))
+    assert result.decision == "hold", result.reasons
+    assert result.outbound is None
+    assert proc.calls == []
+    outcome = result.attachments[0]
+    assert outcome.disposition == expected
+    assert reason_fragment in outcome.reason
+
+
+def test_unknown_inline_binary_passes_through_only_when_permitted():
+    raw = raw_part_message(
+        [("Content-Type", "image/png"), ("Content-Disposition", "inline"), ("Content-ID", "<c@x>")],
+        b"\x00" * 64,
+    )
+    adp, proc = adapter()
+    assert adp.process(request(raw)).decision == "hold"
+    passed = adp.process(request(raw, unsupported_parts="pass_through"))
+    assert passed.decision == "release"
+    assert passed.attachments[0].disposition == "unsupported"
+    assert leaves(passed.outbound.raw)[1].get_payload(decode=True) == b"\x00" * 64
+    assert proc.calls == []
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [
+            ("Content-Type", "image/png"),
+            ("Content-Disposition", "inline"),
+            ("Content-ID", "<img@x>"),
+        ],
+        [
+            ("Content-Type", "image/png"),
+            ("Content-Disposition", 'inline; filename="image001.png"'),
+            ("Content-ID", "<img@x>"),
+        ],
+        [("Content-Type", "image/jpeg"), ("Content-ID", "<img@x>")],
+        [("Content-Type", "image/png"), ("Content-Disposition", "inline")],
+    ],
+    ids=["png+cid", "outlook-style-filename", "jpeg-no-disposition", "png-no-cid"],
+)
+def test_ordinary_inline_raster_images_stay_untouched(headers):
+    image = FAKE_PNG if "png" in headers[0][1] else b"\xff\xd8\xff\xe0" + b"\x00" * 32
+    raw = raw_part_message(headers, image)
+    adp, proc = adapter()
+    result = adp.process(request(raw))
+    assert result.decision == "release", result.reasons
+    assert result.attachments == ()
+    assert proc.calls == []
+    assert leaves(result.outbound.raw)[1].get_payload(decode=True) == image
+    role = next(leaf for leaf in result.evidence["leaves"] if leaf["part_id"] == "2")
+    assert role["role"] == "inline_image"
+
+
+def test_raster_image_sent_as_attachment_is_not_exempt():
+    raw = standard_message(
+        attachments=(docx_attachment(), AttachmentSpec("photo.png", FAKE_PNG, "image/png"))
+    )
+    adp, proc = adapter()
+    result = adp.process(request(raw))
+    assert result.decision == "hold"
+    assert [o.disposition for o in result.attachments] == ["replaced", "unsupported"]
+    assert proc.calls[0].part_id == "2"
+
+
+@pytest.mark.parametrize(
+    ("name", "content_type", "content", "expected", "reason_fragment"),
+    [
+        (
+            "Agreement.docx",
+            "application/pdf",
+            synthetic_docx("c"),
+            "ambiguous",
+            "declared_pdf_content_type_bytes_docx",
+        ),
+        ("scan.pdf", DOCX_CT, synthetic_pdf(), "ambiguous", "declared_docx_content_type_bytes_pdf"),
+        (
+            "file.pdf",
+            DOCX_CT,
+            synthetic_docx("c"),
+            "ambiguous",
+            "declared_pdf_extension_bytes_docx",
+        ),
+        (
+            "file.docx",
+            "application/pdf",
+            synthetic_pdf(),
+            "ambiguous",
+            "declared_docx_extension_bytes_pdf",
+        ),
+        ("Agreement.docx", "application/octet-stream", synthetic_docx("c"), "replaced", "replaced"),
+        (None, "application/octet-stream", synthetic_docx("c"), "replaced", "replaced"),
+        (None, "application/pdf", synthetic_pdf(), "replaced", "replaced"),
+        ("scan.pdf", "application/x-pdf", synthetic_pdf(), "replaced", "replaced"),
+    ],
+    ids=[
+        "docx-ext-pdf-type",
+        "pdf-ext-docx-type",
+        "pdf-ext-docx-bytes",
+        "docx-ext-pdf-bytes",
+        "docx-octet-stream",
+        "docx-no-name",
+        "pdf-no-name",
+        "pdf-alt-type",
+    ],
+)
+def test_extension_and_media_type_are_checked_independently(
+    name, content_type, content, expected, reason_fragment
+):
+    raw = standard_message(attachments=(AttachmentSpec(name, content, content_type),))
+    adp, proc = adapter()
+    result = adp.process(request(raw))
+    outcome = result.attachments[0]
+    assert outcome.disposition == expected, outcome
+    assert reason_fragment in outcome.reason
+    if expected == "replaced":
+        assert result.decision == "release"
+        assert len(proc.calls) == 1
+    else:
+        assert result.decision == "hold"
+        assert result.outbound is None
+        assert proc.calls == []
+
+
+def _zip_attachment() -> AttachmentSpec:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("inner.txt", "nested")
+    return AttachmentSpec("bundle.zip", buf.getvalue(), "application/zip")
+
+
+@pytest.mark.parametrize(
+    ("attachments", "marker", "pass_through"),
+    [
+        ((), None, False),
+        ((), MARKER, False),
+        ((_zip_attachment(),), None, True),
+        ((_zip_attachment(),), MARKER, True),
+    ],
+    ids=["plain-verbatim", "plain-rewritten", "passthrough-verbatim", "passthrough-rewritten"],
+)
+def test_output_limit_applies_on_every_release_path(attachments, marker, pass_through):
+    raw = build_message(text="Short body.", attachments=attachments)
+    adp, proc = adapter()
+    mode = "pass_through" if pass_through else "hold"
+    tight = AdapterLimits(max_message_bytes=len(raw) + 4096, max_output_bytes=100)
+    held = adp.process(request(raw, outbound_marker=marker, unsupported_parts=mode, limits=tight))
+    assert held.decision == "hold", held.reasons
+    assert held.reasons == ("output_exceeds_limit",)
+    assert held.retryable is False
+    assert held.outbound is None
+    assert held.evidence["output_bytes"] > 100
+    assert held.evidence["rewritten"] is bool(marker)
+
+    roomy = AdapterLimits(max_message_bytes=len(raw) + 4096, max_output_bytes=len(raw) + 4096)
+    released = adp.process(
+        request(raw, outbound_marker=marker, unsupported_parts=mode, limits=roomy)
+    )
+    assert released.decision == "release", released.reasons
+    assert released.outbound.rewritten is bool(marker)
+    assert len(released.outbound.raw) == released.evidence["output_bytes"]
+    assert proc.calls == []
 
 
 # --- determinism and harness -------------------------------------------------

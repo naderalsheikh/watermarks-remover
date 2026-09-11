@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -97,8 +97,18 @@ CONTENT_TYPE_FORMATS = {
     "application/vnd.oasis.opendocument.text": "odt",
 }
 
-_BODY_TYPES = frozenset({"text/plain", "text/html"})
+# Byte-level formats that mean "this is a document container", whatever the
+# sender declared. A text or image declaration over these bytes is a conflict.
+DOCUMENT_LIKE_FORMATS = SUPPORTED_FORMATS | frozenset(
+    {"encrypted_office", "cfbf", "odt", "epub", "docm", "xlsm", "pptm"}
+)
+
+# Raster formats the engine's image detector recognises. Only bytes that
+# sniff as one of these qualify for the inline-image exemption.
+RASTER_IMAGE_FORMATS = frozenset({"png", "jpeg", "webp", "avif", "heic", "bmp", "gif", "tiff"})
+
 _TEXT_MAINTYPE = "text"
+_IMAGE_MAINTYPE = "image"
 
 _REFUSING_DISPOSITIONS = frozenset({"refused", "inconsistent", "undecodable"})
 _RETRYABLE_DISPOSITIONS = frozenset({"failed", "unavailable"})
@@ -115,34 +125,68 @@ def engine_sniff(data: bytes) -> str:
     return detect_container_format(Path("input"), data)
 
 
-def _classify_leaf(leaf: Leaf) -> str:
-    """``body`` | ``inline`` | ``attachment`` | ``attached_message``."""
-    if leaf.content_type.startswith("message/"):
-        return "attached_message"
-    if leaf.disposition == "attachment":
-        return "attachment"
-    if leaf.disposition == "inline":
-        # Inline with a Content-ID is referenced content (an image in an
-        # HTML body). Inline with only a filename is how some clients send
-        # ordinary attachments.
-        if leaf.content_id is not None or not leaf.filename_declared:
-            return "inline"
-        return "attachment"
-    if leaf.content_type in _BODY_TYPES and not leaf.filename_declared:
-        return "body"
-    if leaf.part.get_content_maintype() == _TEXT_MAINTYPE and not leaf.filename_declared:
-        return "body"
-    if leaf.content_id is not None and not leaf.filename_declared:
-        return "inline"
-    return "attachment"
+def engine_image_sniff(data: bytes) -> str:
+    """Raster image format by magic bytes, using the engine's detector."""
+    from image_meta import detect_format
+
+    return detect_format(data)
 
 
-def _declared_format(leaf: Leaf) -> str | None:
+@dataclass(frozen=True)
+class _Classified:
+    """One leaf after byte-level classification.
+
+    ``role`` is ``body`` (text the recipient reads), ``inline_image`` (raster
+    bytes referenced from a body), ``attachment`` (everything that must go
+    through format checks and the processor), or ``attached_message``.
+    ``data`` is the decoded payload when it was needed for the decision;
+    ``None`` means it could not be decoded.
+    """
+
+    leaf: Leaf
+    role: str
+    reason: str
+    data: bytes | None = None
+    detected: str = ""
+
+
+def _declared_formats(leaf: Leaf) -> dict[str, str]:
+    """Every format assertion the sender made, keyed by where it was made.
+
+    The extension and the media type are checked *independently* against the
+    bytes: a recognised filename must not hide a conflicting Content-Type,
+    and vice versa. ``text``/``image`` media types are recorded as category
+    assertions so a document declared as text or image is a conflict too.
+    """
+    declared: dict[str, str] = {}
     if leaf.filename:
         ext = Path(leaf.filename).suffix.lower()
         if ext in EXTENSION_FORMATS:
-            return EXTENSION_FORMATS[ext]
-    return CONTENT_TYPE_FORMATS.get(leaf.content_type)
+            declared["extension"] = EXTENSION_FORMATS[ext]
+    if leaf.content_type in CONTENT_TYPE_FORMATS:
+        declared["content_type"] = CONTENT_TYPE_FORMATS[leaf.content_type]
+    else:
+        maintype = leaf.part.get_content_maintype()
+        if maintype in (_TEXT_MAINTYPE, _IMAGE_MAINTYPE):
+            declared["content_type"] = maintype
+    return declared
+
+
+# Declared formats the byte sniffer cannot name more precisely: legacy binary
+# Office files are all OLE compound files ("cfbf") to the detector.
+_COMPATIBLE_DETECTIONS = {"doc": {"cfbf"}, "xls": {"cfbf"}, "ppt": {"cfbf"}}
+
+
+def _declaration_conflict(declared: dict[str, str], detected: str) -> str | None:
+    """Reason text when any sender assertion contradicts the sniffed bytes."""
+    for source, claimed in sorted(declared.items()):
+        if claimed in (_TEXT_MAINTYPE, _IMAGE_MAINTYPE):
+            if detected in DOCUMENT_LIKE_FORMATS:
+                return f"declared_{claimed}_{source}_bytes_{detected}"
+            continue
+        if claimed != detected and detected not in _COMPATIBLE_DETECTIONS.get(claimed, ()):
+            return f"declared_{claimed}_{source}_bytes_{detected}"
+    return None
 
 
 def _engine_name(leaf: Leaf, detected: str) -> str:
@@ -168,11 +212,56 @@ class MailAdapter:
         processor: AttachmentProcessor,
         *,
         sniff: Sniffer | None = None,
+        image_sniff: Sniffer | None = None,
         allow_synthetic: bool = False,
     ) -> None:
         self._processor = processor
         self._sniff = sniff or engine_sniff
+        self._image_sniff = image_sniff or engine_image_sniff
         self._allow_synthetic = allow_synthetic
+
+    # -- classification ---------------------------------------------------
+
+    def _classify(self, leaf: Leaf) -> _Classified:
+        """Decide a leaf's role from its bytes, not from what the sender said.
+
+        Only two kinds of part are left untouched: readable body text
+        (``text/*`` without a filename whose bytes are not a document
+        container) and inline raster images (``image/*`` not sent as an
+        attachment, whose bytes sniff as a raster format, and whose filename,
+        if any, does not claim a document type). A Content-ID, an ``inline``
+        disposition, or a missing filename never exempts a part by itself:
+        those are sender-controlled and cost nothing to fabricate.
+        """
+        if leaf.content_type.startswith("message/"):
+            return _Classified(leaf, "attached_message", "attached_message")
+        if leaf.disposition == "attachment":
+            return _Classified(leaf, "attachment", "disposition_attachment")
+
+        data = decode_leaf(leaf)
+        if data is None:
+            return _Classified(leaf, "attachment", "payload_not_decodable")
+        maintype = leaf.part.get_content_maintype()
+        detected = self._sniff(data) if data else "unknown"
+
+        if maintype == _TEXT_MAINTYPE and not leaf.filename_declared:
+            if detected in DOCUMENT_LIKE_FORMATS:
+                return _Classified(
+                    leaf, "attachment", f"declared_text_bytes_{detected}", data, detected
+                )
+            return _Classified(leaf, "body", "text_body", data, detected)
+
+        if maintype == _IMAGE_MAINTYPE:
+            extension_claim = None
+            if leaf.filename:
+                extension_claim = EXTENSION_FORMATS.get(Path(leaf.filename).suffix.lower())
+            raster = self._image_sniff(data) if data else "unknown"
+            if raster in RASTER_IMAGE_FORMATS and extension_claim is None:
+                return _Classified(leaf, "inline_image", f"raster_{raster}", data, detected)
+            return _Classified(leaf, "attachment", f"image_declared_bytes_{raster}", data, detected)
+
+        reason = "filename_declared" if leaf.filename_declared else "binary_without_filename"
+        return _Classified(leaf, "attachment", reason, data, detected)
 
     # -- public -----------------------------------------------------------
 
@@ -235,19 +324,18 @@ class MailAdapter:
             evidence["signed_or_encrypted"] = list(structure.signed_or_encrypted)
             return self._terminal("hold", ["signed_or_encrypted_message"], evidence)
 
-        candidates = [
-            leaf
-            for leaf in structure.leaves
-            if _classify_leaf(leaf) in ("attachment", "attached_message")
-        ]
+        classified = [self._classify(leaf) for leaf in structure.leaves]
+        candidates = [c for c in classified if c.role in ("attachment", "attached_message")]
         evidence["leaves"] = [
             {
-                "part_id": leaf.part_id,
-                "content_type": leaf.content_type,
-                "role": _classify_leaf(leaf),
-                "display_name": leaf.filename,
+                "part_id": c.leaf.part_id,
+                "content_type": c.leaf.content_type,
+                "disposition": c.leaf.disposition,
+                "role": c.role,
+                "why": c.reason,
+                "display_name": c.leaf.filename,
             }
-            for leaf in structure.leaves
+            for c in classified
         ]
         if len(candidates) > limits.max_attachments:
             evidence["attachment_count"] = len(candidates)
@@ -255,11 +343,11 @@ class MailAdapter:
 
         outcomes: list[AttachmentOutcome] = []
         replacements: dict[str, bytes] = {}
-        for leaf in candidates:
-            outcome, output = self._handle_attachment(leaf, request)
+        for candidate in candidates:
+            outcome, output = self._handle_attachment(candidate, request)
             outcomes.append(outcome)
             if output is not None:
-                replacements[leaf.part_id] = output
+                replacements[candidate.leaf.part_id] = output
 
         blocking = [
             o
@@ -289,11 +377,17 @@ class MailAdapter:
         needs_rewrite = bool(replacements or stripped or bcc_removed or request.outbound_marker)
         evidence["rewritten"] = needs_rewrite
         if not needs_rewrite:
+            # The output limit applies to every release, including a message
+            # that goes out byte-for-byte as it came in.
+            evidence["output_bytes"] = len(raw)
+            if len(raw) > limits.output_limit:
+                return self._terminal(
+                    "hold", ["output_exceeds_limit"], evidence, attachments=tuple(outcomes)
+                )
             outbound = OutboundMessage(
                 raw=raw, envelope=request.envelope, sha256=evidence["input_sha256"], rewritten=False
             )
             evidence["output_sha256"] = outbound.sha256
-            evidence["output_bytes"] = len(raw)
             return AdapterResult(
                 decision="release",
                 reasons=(),
@@ -369,8 +463,9 @@ class MailAdapter:
         )
 
     def _handle_attachment(
-        self, leaf: Leaf, request: AdapterRequest
+        self, candidate: _Classified, request: AdapterRequest
     ) -> tuple[AttachmentOutcome, bytes | None]:
+        leaf = candidate.leaf
         base = AttachmentOutcome(
             part_id=leaf.part_id,
             display_name=leaf.filename,
@@ -379,10 +474,10 @@ class MailAdapter:
             disposition="unsupported",
             reason="",
         )
-        if leaf.content_type.startswith("message/"):
+        if candidate.role == "attached_message":
             return replace(base, reason="attached_message"), None
 
-        data = decode_leaf(leaf)
+        data = candidate.data if candidate.data is not None else decode_leaf(leaf)
         if data is None:
             return replace(base, disposition="undecodable", reason="payload_not_decodable"), None
         source_sha = sha256_hex(data)
@@ -390,22 +485,21 @@ class MailAdapter:
         if len(data) > request.limits.max_attachment_bytes:
             return replace(base, disposition="oversize", reason="attachment_exceeds_limit"), None
 
-        detected = self._sniff(data) if data else "unknown"
-        declared = _declared_format(leaf)
+        detected = candidate.detected or (self._sniff(data) if data else "unknown")
+        declared = _declared_formats(leaf)
         base = replace(base, detected_format=detected)
         if detected == "encrypted_office":
             return replace(base, reason="password_protected_office"), None
-        if detected in SUPPORTED_FORMATS:
-            if declared is not None and declared != detected:
-                return replace(
-                    base, disposition="ambiguous", reason=f"declared_{declared}_detected_{detected}"
-                ), None
-        elif declared in SUPPORTED_FORMATS:
-            return replace(
-                base, disposition="ambiguous", reason=f"declared_{declared}_bytes_{detected}"
-            ), None
-        else:
-            return replace(base, reason=f"format_{declared or detected}"), None
+        conflict = _declaration_conflict(declared, detected)
+        if conflict:
+            return replace(base, disposition="ambiguous", reason=conflict), None
+        if detected not in SUPPORTED_FORMATS:
+            # No declaration contradicted the bytes, so whatever was declared
+            # agrees that this is not a supported document.
+            label = (
+                detected if detected != "unknown" else (declared.get("content_type") or "unknown")
+            )
+            return replace(base, reason=f"format_{label}"), None
 
         process_request = ProcessRequest(
             part_id=leaf.part_id,

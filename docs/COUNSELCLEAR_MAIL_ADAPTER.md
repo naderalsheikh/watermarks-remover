@@ -20,7 +20,7 @@ routing, message authentication, native isolation, or production readiness.
 | Deterministic test double (labelled; refused in production mode) | `service/app/mail/synthetic.py` |
 | Synthetic message/document builders | `service/app/mail/fixtures.py` |
 | Runnable harness | `service/app/mail/demo.py` |
-| Tests with the test double (49) / with the real engine (6) | `tests/test_mail_adapter.py`, `tests/test_mail_adapter_engine.py` |
+| Tests with the test double (77) / with the real engine (9) | `tests/test_mail_adapter.py`, `tests/test_mail_adapter_engine.py` |
 
 Run from a fresh checkout:
 
@@ -53,12 +53,17 @@ which only the transport process can populate:
 | `PolicyReference` chosen by the transport for that tenant | filenames, content types, `Message-ID`, `Content-ID` |
 | The injected processor's *bytes*, after re-hashing them | the processor's *claims* without re-checking them |
 
-`provenance_verified` must be set by the code that authenticated the peer,
-for example an SMTP listener that verified Exchange Online's TLS client
-certificate for the tenant's outbound connector. A message-supplied boolean or
-a secret-looking header value is never a substitute; the adapter refuses the
-submission (`untrusted_submission`) before parsing if the context is not
-marked verified.
+`provenance_verified` must be set by the code that authenticated the peer
+*and* bound the submission to a tenant. Exchange Online's TLS client
+certificate is shared across its tenants, so verifying it says "this is
+Exchange Online", not "this is tenant A"; the transport needs a per-tenant
+binding as well (the tenant-specific certificate domain and connector
+identity, see "Untrusted marker headers") before it may fill in
+`tenant_id`. A message-supplied boolean or a secret-looking header value is
+never a substitute; the adapter refuses the submission
+(`untrusted_submission`) before parsing if the context is not marked
+verified. The adapter cannot tell a correct binding from a wrong one; that
+is the transport's responsibility and a live-proof test.
 
 Decision semantics are mandatory-cleaning only. There is no advisory mode in
 M1: a hold or refusal never carries an outbound message, and no message is
@@ -70,19 +75,60 @@ released with some attachments replaced and others pending.
 | `hold` | operator or retry needed: processor unavailable/failed; unsupported, ambiguous or oversize part; signed/encrypted message; output over the size limit | `True` only for processor unavailable/failed |
 | `refuse` | definitive: untrusted submission, malformed MIME, structural bound exceeded, policy refusal, processor evidence contradicting the request, undecodable part, re-verification failure | `False` |
 
+### Which parts are selected
+
+Selection is decided by bytes, not by what the sender declared. Every leaf
+is decoded and sniffed with the engine's own detectors
+(`container_meta.detect_container_format` with no extension, and
+`image_meta.detect_format`). Exactly two kinds of part are left untouched:
+
+- **body text**: `text/*` with no filename whose bytes are not a document
+  container;
+- **inline raster image**: `image/*` not sent with `Content-Disposition:
+  attachment`, whose bytes sniff as PNG/JPEG/WebP/AVIF/HEIC/BMP/GIF/TIFF, and
+  whose filename, if any, does not claim a document extension. A
+  `Content-ID` is recorded but neither required nor sufficient.
+
+Everything else is an attachment candidate: any part with an `attachment`
+disposition, any part with a filename, any non-text/non-image part, an
+`image/*` part whose bytes are not a raster image, a `text/*` part whose
+bytes are a document container, and attached messages. A `Content-ID`, an
+`inline` disposition, or a missing filename never exempts a part: those are
+sender-controlled and cost nothing to fabricate.
+
+For each candidate the sender's assertions are checked *independently*
+against the sniffed bytes: the filename extension, the media type (or its
+`text`/`image` category), each on its own. Any assertion that contradicts
+the bytes makes the part `ambiguous` — a DOCX named `Agreement.docx` but
+declared `application/pdf` holds, and so does a PDF declared as DOCX, or a
+document declared as `image/png`. A generic `application/octet-stream` or a
+missing filename makes no assertion, so byte detection alone decides. Legacy
+binary Office declarations (`.doc`, `application/msword`, …) are compatible
+with the detector's `cfbf` answer and are `unsupported`, not `ambiguous`.
+
 `AdapterRequest.unsupported_parts="pass_through"` lets parts the engine does
-not handle at all (archives, images, legacy binary Office, text attachments,
-attached messages) travel untouched while supported ones are still replaced.
-The default is `hold`. Ambiguous parts (extension or content type says one
-supported format, bytes say another), password-protected Office packages,
-oversize parts and undecodable parts never pass through. Whether a tenant
-runs `hold` or `pass_through` is a policy decision that belongs in central
-administration; M1 only makes it explicit.
+not handle at all (archives, images sent as attachments, legacy binary
+Office, text attachments, attached messages, unknown inline binaries) travel
+untouched while supported ones are still replaced. The default is `hold`,
+and it stays the default after central administration exists: an
+administrative screen is not a reason to relax mandatory cleaning. Any
+pass-through is an explicitly authorised, versioned tenant policy exception,
+attributable in the evidence, and its outcome (`unsupported`) never implies
+the part was cleaned. Ambiguous parts, password-protected Office packages,
+signed/encrypted messages, oversize parts and undecodable parts never pass
+through.
 
 Bounds (defaults in `AdapterLimits`): message 50 MiB, output 50 MiB, 200 MIME
 parts, nesting depth 10, 25 attachments, 25 MiB per attachment. Exceeding
 message/part/attachment-count bounds refuses; an oversize attachment or an
-oversize rewritten message holds.
+oversize outbound message holds — the output limit applies to every release,
+including one that goes out byte-for-byte. What the bounds are, honestly:
+the message-size check runs before parsing; the part-count and depth bounds
+are enforced while walking a tree the standard-library parser has already
+built in memory from the whole message. They stop the adapter from
+enumerating or processing an unbounded structure; they are not a
+pre-allocation limit on the parser and not a sandbox. Parser resource
+isolation is production work that belongs with the runner boundary.
 
 What the adapter changes in a released message, and nothing else:
 
@@ -99,28 +145,52 @@ inbound bytes are returned verbatim (`rewritten=False`).
 
 ## Processor contract and the engine
 
-`AttachmentProcessor.process(ProcessRequest) -> ProcessResult`. The adapter
-re-derives the output digest and size, checks the reported source digest,
-policy id and version against the request, and accepts only
-`verification="engine_verified"` (or `"synthetic"` when constructed with
-`allow_synthetic=True`, which tests and the demo do and production must not).
-Anything else is `inconsistent` and refuses the message. This mirrors
-`app.runner._validated_bundle`: original identity, policy, verification pass,
-derivative digest and size.
+`AttachmentProcessor.process(ProcessRequest) -> ProcessResult`. What the
+adapter itself checks on a `released` result, and all it checks: the
+reported source digest equals the digest of the bytes it submitted; the
+output digest and size equal the bytes returned; the reported policy id and
+version equal the request's; and the verification label is one it is
+allowed to accept (`engine_verified`, or `synthetic` only when constructed
+with `allow_synthetic=True`, which tests and the demo do and production must
+not). Anything else is `inconsistent` and refuses the message.
 
-`LocalEngineProcessor` maps the real engine onto that contract: malware scan
-(`app.malware.get_scanner`, the same pre-check the worker runs), then
-`clean_to_bundle(..., retain_original=False)` in a private temporary
-directory, then the manifest checks above. Its `evidence_ref` is the SHA-256
-of the canonical manifest JSON. A `plan refused` `CustodyError` becomes
-`status="refused"`; any other exception becomes `status="failed"`.
+The evidence boundary is narrower than that list may suggest. The adapter
+does not, and cannot, re-derive an injected processor's `engine_verified`
+assertion: it has no manifest, no bundle, and no engine. It trusts the
+processor implementation for that label the way the API trusts
+`runner._validated_bundle`. Verification therefore lives in the processor:
 
-It is deliberately *not* the production path. The API executes jobs in a
-one-shot subprocess or a hardened container so a hostile document cannot
-reach the API process, and a mail gateway needs that isolation at least as
-much: attachments arrive from arbitrary senders. `LocalEngineProcessor` parses
-attachments inside the calling process. It exists for fixtures and
-engine-backed tests.
+- `LocalEngineProcessor` performs it. It runs the malware pre-check
+  (`app.malware.get_scanner`, as the worker does), then
+  `clean_to_bundle(..., retain_original=False)` in a private temporary
+  directory, then checks the manifest the way `_validated_bundle` does:
+  original filename/digest/size match the submitted bytes, policy id and
+  version match, `verification.pass` is true, the derivative's digest and
+  size match the bytes read back. Only then does it label the result
+  `engine_verified`. Its `evidence_ref` (`manifest:sha256:…`) is the digest
+  of a manifest that lived in a temporary directory and is deleted when the
+  call returns: it is a correlation value for the run log, not retrievable
+  custody evidence.
+- A future runner-backed processor must obtain the *retained* job and bundle
+  evidence from the job store, validate it the same way, and only then
+  produce a `released` result whose `evidence_ref` points at something an
+  auditor can fetch.
+
+A `plan refused` `CustodyError` becomes `status="refused"`; any other
+exception becomes `status="failed"`.
+
+`LocalEngineProcessor` is deliberately *not* the production path, and the
+reason needs stating precisely. It parses attachments inside the calling
+process, so a parser bug or a hostile document has whatever the calling
+process has. The API's subprocess mode is only process separation: the
+worker runs under the same account with the same filesystem privileges, and
+`docs/PRODUCTION_FOUNDATION.md` says so ("Passing scoped paths does not
+create a filesystem or network sandbox"). Configured container mode
+(`--network none`, read-only rootfs, a per-job mount) is the isolation the
+product currently offers, and native/desktop isolation remains a separate
+hardening and qualification task. A mail gateway receives documents from
+arbitrary senders and needs at least the container-mode boundary, qualified
+for that exposure, before any production claim.
 
 ### The interface the shared core still lacks
 
@@ -146,10 +216,15 @@ authenticated operator session, and `runner.run_job` reads the `Job` and
    operator `operator`; mail jobs need the service principal and tenant
    recorded, which depends on the IdP/attribution work.
 
-Until those exist, an M2 gateway can wire `MailAdapter` to a processor that
-submits through a private queue to a worker process running
-`LocalEngineProcessor`-equivalent code; that is an interim isolation
-boundary, not the runner's, and should be labelled as such.
+Production attachment processing for mail uses the shared durable-job
+runner once it exists; there will be no parallel production queue or second
+engine execution path (Codex, acceptance review, 2026-09-11). Until then, M2
+advances the transport/runner contract, the controlled fixture harness, and
+tenant-routing feasibility. If exercising the harness needs a queue or a
+separate process, it is disposable test infrastructure running synthetic
+data, and it carries no claim of isolation, custody, recovery, or delivery
+readiness. The contract is coordinated with Codex before any transport
+worker is written against it.
 
 ## Untrusted marker headers, rule ordering, loop prevention
 
@@ -189,25 +264,45 @@ order:
    headers exist for this path, cannot be supplied by a client, and are
    matchable by a rule is a tenant-observable fact to verify, not an
    assumption to build on.
-3. **Make the service the delivery path for external recipients.** The
-   service delivers cleaned external mail itself (or via a distinct outbound
-   route) and only returns internal-recipient copies to Exchange, which the
-   recipient-scoped rule from (1) no longer matches. No header exception is
-   needed for loop prevention. Cost: the service becomes an outbound MTA for
-   the tenant's domains (SPF include, DKIM signing keys, reputation), which is
-   how hosted email-security gateways operate but is a larger onboarding
-   footprint.
+3. **Not in scope: making the service the delivery path.** Delivering
+   cleaned external mail directly from the service would remove the need for
+   a header exception, at the cost of the service becoming an outbound MTA
+   for the tenant's domains (SPF, DKIM keys, reputation). The owner's
+   direction is to prefer return through Exchange with recipient scoping and
+   a *demonstrated* authenticated provenance distinction. If the live proof
+   cannot demonstrate one, the result is a reported blocker with
+   alternatives brought back for a decision, not a quiet expansion of the
+   assignment into direct delivery.
+
+Recipient scoping alone does not prevent re-routing: a return whose
+recipients are external still matches a "recipient outside the
+organisation" rule. Candidate (2) is a hypothesis until tenant tests show
+that clients cannot forge or replay whatever Exchange stamps, and that a
+legitimate return completes exactly one service trip.
+
+The service side of provenance is not a boolean either. The submission
+Exchange makes to the service must be authenticated and bound to the tenant:
+a TLS client certificate presented by Exchange Online is shared across
+tenants and cannot by itself say *which* tenant's connector sent the
+message. The transport therefore needs a per-tenant binding (the tenant's
+own certificate domain on the inbound side, the connector/tenant identity
+Exchange presents on the outbound side, or both) before it sets
+`TrustedCallerContext.tenant_id` and `provenance_verified`. The adapter only
+consumes that context; establishing it is transport work in M2 and a
+tenant-observable fact in the live proof.
 
 Required negative tests, all in the tenant: internal sender pre-sets
 `X-CounselClear-Processed`; internal sender pastes the full header block of
 an earlier delivered message; a message that legitimately returned once is
 re-sent by the recipient (reply/forward) and must be processed again as a new
-message. Required positive test: a legitimate return completes delivery
-without a second trip. Record rule order, the `Received` and
-`X-MS-Exchange-Organization-*` headers observed at the service and at the
-final mailbox, and the delivered attachment digests. Exchange Online's own
-hop-count loop detection is a safety net that produces NDRs; it is not the
-design.
+message; a submission arriving through the wrong connector or from another
+tenant must be refused; mixed internal/external/Bcc recipient sets must
+route and return exactly once. Required positive test: a legitimate return
+completes delivery without a second trip. Record rule order, the `Received`
+and `X-MS-Exchange-Organization-*` headers observed at the service and at
+the final mailbox, and the delivered attachment digests. Exchange Online's
+own hop-count loop detection is a safety net that produces NDRs; it is not
+the design.
 
 ## Durable queue and SMTP acknowledgment ambiguity
 
@@ -215,13 +310,36 @@ The adapter is stateless. The gateway around it needs a durable outbox with
 an explicit state machine:
 
 ```
-accepted (bytes + envelope + caller context persisted, idempotency key =
-          tenant + Message-ID + sha256(raw))
+accepted (bytes + envelope + caller context persisted under a trusted
+          request identity; see admission below)
   -> processing (attachment jobs submitted; lease + heartbeat)
   -> released | held | refused (adapter decision + evidence persisted)
   -> submitted (DATA sent to the return smart host)
   -> acknowledged (250 received) | ambiguous (timeout/disconnect after DATA)
 ```
+
+**Admission and idempotency.** The request identity the transport assigns
+(`TrustedCallerContext.request_id`) is the admission key, and it is bound to
+a digest over everything that defines the delivery: the raw bytes, the
+complete SMTP envelope (sender and every recipient, Bcc included), the
+tenant, and the resolved policy id and version. Two submissions with the
+same request id and the same binding digest are one request; the same
+request id with a different binding digest is a conflict that must fail
+loudly, never a silent overwrite or a second delivery. A key built from
+`Message-ID` and a body hash is not enough: `Message-ID` is sender-supplied
+correlation data, and two deliveries of identical bytes to different
+recipient sets (a different Bcc, for example) are different deliveries that
+such a key would collapse. `Message-ID` is recorded for correlation and
+message trace, not used for identity.
+
+SMTP itself gives the transport no reliable idempotency token across
+retries: when Exchange retries a submission after an ambiguous outcome on
+its side, the gateway sees a new connection carrying the same bytes and
+envelope and must decide whether that is a duplicate. The binding digest
+lets it recognise byte-identical resubmissions to the same envelope and
+tenant; it cannot promise that every retry is recognised (a retried
+message may differ in `Received` headers), and the local request id does
+not create exactly-once recovery on its own.
 
 `ambiguous` is the state this note is asked to address. After the message
 body has been sent, a dropped connection or timeout does not say whether
@@ -331,9 +449,18 @@ mail; delegate and shared-mailbox sends; connector rollback.
   (images, ODT, EPUB, HTML); M1 keeps mail to ordinary document attachments.
 - Attached messages, archives, TNEF, calendar parts with filenames and text
   attachments are unsupported, not descended.
+- The inline-image exemption is by raster magic bytes. An inline SVG, an
+  icon, or an image in a format the engine's detector does not name is not
+  exempt: it becomes an `unsupported` candidate and holds under the default
+  policy. That is the conservative side of the trade; a tenant that sees it
+  often decides through policy, not by widening the exemption.
 - Signed and encrypted messages are held whole. Rewriting a
   `multipart/signed` body would invalidate the signature; the correct
   disposition is a policy question.
+- The adapter's checks on a processor result establish identity (the bytes
+  it sent, the bytes it got back), policy fields, and an accepted
+  verification label. They do not establish that the label is true; that is
+  the processor's responsibility, as described under "Processor contract".
 - Header preservation relies on the parser's `refold_source="none"`: source
   headers are emitted with their original folding. Headers containing raw
   8-bit bytes are re-encoded by the serializer; the re-verification compares

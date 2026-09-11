@@ -19,6 +19,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "service" / "scripts"
 SERVICE = ROOT / "service"
@@ -134,6 +136,44 @@ def test_engine_results_are_stable_across_runs():
     assert first.decision == second.decision == "release"
     assert first.attachments[0].output_sha256 == second.attachments[0].output_sha256
     assert first.outbound.raw == second.outbound.raw
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        AttachmentSpec(
+            "Agreement.docx",
+            synthetic_docx("inline", creator="Jane Associate"),
+            DOCX_CT,
+            "inline",
+            "doc@x",
+        ),
+        AttachmentSpec(None, synthetic_docx("inline", creator="Jane Associate"), DOCX_CT, "inline"),
+    ],
+    ids=["inline+filename+cid", "inline-no-filename"],
+)
+def test_engine_cleans_inline_document_parts(spec):
+    raw = build_message(attachments=(spec,))
+    result = MailAdapter(LocalEngineProcessor()).process(request(raw))
+    assert result.decision == "release", (result.reasons, result.attachments)
+    outcome = result.attachments[0]
+    assert outcome.disposition == "replaced" and outcome.verification == "engine_verified"
+    derivative = leaves(result.outbound.raw)[1].get_payload(decode=True)
+    assert derivative != spec.content
+    assert hashlib.sha256(derivative).hexdigest() == outcome.output_sha256
+    with zipfile.ZipFile(io.BytesIO(derivative)) as zf:
+        assert b"Jane Associate" not in zf.read("docProps/core.xml")
+        assert b"inline" in zf.read("word/document.xml")
+
+
+def test_engine_never_sees_a_conflicting_declaration():
+    raw = build_message(
+        attachments=(AttachmentSpec("Agreement.docx", synthetic_docx("c"), "application/pdf"),)
+    )
+    result = MailAdapter(LocalEngineProcessor()).process(request(raw))
+    assert result.decision == "hold"
+    assert result.attachments[0].disposition == "ambiguous"
+    assert result.outbound is None
 
 
 def test_demo_harness_engine_mode(tmp_path):
