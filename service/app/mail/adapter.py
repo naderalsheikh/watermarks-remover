@@ -220,6 +220,11 @@ def _text_body_problem(leaf: Leaf, data: bytes, detected: str) -> str | None:
         return "charset_unknown"
     try:
         text = data.decode(codec.name, errors="strict")
+    except LookupError:
+        # codecs.lookup() also resolves bytes-to-bytes codecs (base64_codec,
+        # rot_13, zlib_codec, ...); bytes.decode() then refuses them because
+        # they are not text encodings. A charset naming one is not a charset.
+        return "charset_not_text"
     except (UnicodeDecodeError, ValueError):
         return f"not_{codec.name.replace('-', '_')}"
     if any((ch < " " or ch == "\x7f") and ch not in _TEXT_CONTROLS_ALLOWED for ch in text):
