@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import path from "node:path";
 
 // Same-origin by design (see docs/COUNSELCLEAR_DESIGN.md, PR 19): the
 // cc_session cookie is SameSite=Strict, so this app must never be fetched
@@ -12,6 +13,8 @@ import type { NextConfig } from "next";
 const isDev = process.env.NODE_ENV === "development";
 
 const nextConfig: NextConfig = {
+  // The browser verifier imports the canonical artifact schemas from service/.
+  turbopack: { root: path.join(__dirname, "..") },
   ...(isDev
     ? {
         async rewrites() {

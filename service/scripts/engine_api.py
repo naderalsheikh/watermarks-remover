@@ -207,9 +207,7 @@ def _write_bundle_report(
         derivative_sha256=derivative_sha256,
         processor=processor,
     )
-    path, _created = custody_mod.write_once(
-        out_dir / "report.html", html_report.encode("utf-8")
-    )
+    path, _created = custody_mod.write_once(out_dir / "report.html", html_report.encode("utf-8"))
     return path
 
 
@@ -717,9 +715,7 @@ def _layer_b_rewrite(
     from rewrite_text import meaning_lock_ok, rewrite
 
     if kind != "text":
-        raise custody_mod.CustodyError(
-            f"layer b requires a text document, got kind={kind!r}"
-        )
+        raise custody_mod.CustodyError(f"layer b requires a text document, got kind={kind!r}")
     try:
         text = cleaned.decode("utf-8")
     except UnicodeDecodeError as e:
@@ -867,8 +863,7 @@ def _residual_metadata(
     return {
         "stripped": stripped,
         "retained": [
-            {"field": field, "reason": reason}
-            for field, reason in AUTHORING_EXHAUST_RETAINED
+            {"field": field, "reason": reason} for field, reason in AUTHORING_EXHAUST_RETAINED
         ],
     }
 
@@ -884,6 +879,7 @@ def clean_to_bundle(
     decisions: dict[str, str] | None = None,
     legal_justifications: dict[str, Any] | None = None,
     layer_b_strength: str | None = None,
+    retain_original: bool = True,
 ) -> dict[str, Any]:
     """Inspect -> plan -> apply -> verify -> store write-once + manifest.
 
@@ -900,6 +896,11 @@ def clean_to_bundle(
     ``src``; refuses any bundle path resolving onto the input. Re-running a
     completed job with identical inputs short-circuits on the existing
     manifest; conflicting content raises :class:`CustodyError`.
+
+    ``retain_original=False`` omits the bundle's original copy and returns
+    ``original=None``. API workers use this because their input is temporary
+    plaintext staged from a separate custody backend; the original's hash
+    and metadata still bind the derivative in the unchanged manifest.
     """
     import custody as custody_mod
     from policies import PolicyError, apply_actions, plan_actions
@@ -931,9 +932,7 @@ def clean_to_bundle(
         # best-effort fallback: a meaning-lock miss (or any other rewrite
         # failure) raises CustodyError, which the worker maps to a failed
         # job — the original is never silently substituted.
-        layer_b = _layer_b_rewrite(
-            data, cleaned, src.name, result.kind, layer_b_strength
-        )
+        layer_b = _layer_b_rewrite(data, cleaned, src.name, result.kind, layer_b_strength)
         cleaned = layer_b["cleaned"]
 
     verification = verify_derivative(
@@ -967,7 +966,7 @@ def clean_to_bundle(
     except OSError:
         src_resolved = None
     if src_resolved is not None:
-        for p in (original_dest, derivative_dest):
+        for p in (original_dest, derivative_dest) if retain_original else (derivative_dest,):
             try:
                 if p.resolve() == src_resolved:
                     raise custody_mod.CustodyError(
@@ -976,7 +975,9 @@ def clean_to_bundle(
             except OSError:
                 continue
 
-    original_path, _orig_created = custody_mod.write_once(original_dest, data)
+    original_path = None
+    if retain_original:
+        original_path, _orig_created = custody_mod.write_once(original_dest, data)
     derivative_path, _deriv_created = custody_mod.write_once(derivative_dest, cleaned)
 
     action_records = [r.to_dict() if hasattr(r, "to_dict") else dict(r) for r in records]
@@ -1027,7 +1028,7 @@ def clean_to_bundle(
             existing_report = out_dir / "report.html"
             return {
                 "bundle": str(out_dir),
-                "original": str(original_path),
+                "original": str(original_path) if original_path is not None else None,
                 "derivative": str(derivative_path),
                 "manifest": str(manifest_path),
                 "manifest_data": existing,
@@ -1059,9 +1060,7 @@ def clean_to_bundle(
         # (plan_actions consumed it) but dropped at this call, so every
         # manifest recorded emit_manifest's default regardless of what
         # the operator actually attested.
-        attestation_kind=(
-            "signature_break_attested" if signature_break_attestation else "none"
-        ),
+        attestation_kind=("signature_break_attested" if signature_break_attestation else "none"),
         layer_b=layer_b,
     )
     manifest_path, _m_created = custody_mod.write_manifest(out_dir, manifest)
@@ -1082,7 +1081,7 @@ def clean_to_bundle(
 
     return {
         "bundle": str(out_dir),
-        "original": str(original_path),
+        "original": str(original_path) if original_path is not None else None,
         "derivative": str(derivative_path),
         "manifest": str(manifest_path),
         "manifest_data": manifest,

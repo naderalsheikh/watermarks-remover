@@ -9,6 +9,7 @@ reconciles terminal state.
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
 import sys
 import zipfile
@@ -220,10 +221,22 @@ def test_worker_cli_is_pure_no_db_access(tmp_path):
     env = dict(__import__("os").environ, PYTHONPATH=str(REPO / "service"))
     proc = sp.run(
         [
-            sys.executable, "-m", "app.worker", "run-job",
-            "--kind", "inspect", "--input", str(src), "--output-dir", str(out),
+            sys.executable,
+            "-m",
+            "app.worker",
+            "run-job",
+            "--kind",
+            "inspect",
+            "--input",
+            str(src),
+            "--output-dir",
+            str(out),
         ],
-        capture_output=True, text=True, env=env, cwd=str(REPO / "service"), check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO / "service"),
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
     result = (out / "result.json").read_text()
@@ -247,13 +260,22 @@ def test_run_job_real_subprocess_timeout_is_recorded_as_failed(tmp_path, monkeyp
     original.write_bytes(b"hello")
     s.add(Matter(id="m1", name="m"))
     s.flush()
-    s.add(Document(id="doc1", matter_id="m1", filename="orig.txt", sha256="0" * 64,
-                   bytes=5, storage_path=str(original)))
+    s.add(
+        Document(
+            id="doc1",
+            matter_id="m1",
+            filename="orig.txt",
+            sha256=hashlib.sha256(b"hello").hexdigest(),
+            bytes=5,
+            storage_path=str(original),
+        )
+    )
     s.add(Job(id="j1", matter_id="m1", document_id="doc1", kind="inspect"))
     s.commit()
 
     monkeypatch.setattr(
-        runner, "build_subprocess_cmd",
+        runner,
+        "build_subprocess_cmd",
         lambda **kw: [sys.executable, "-c", "import time; time.sleep(30)"],
     )
     res = runner.run_job(cfg, s, "j1", kind="inspect")
@@ -278,8 +300,9 @@ def test_sync_backstop_marks_failed_on_crash(tmp_path, monkeypatch):
     s = make_session_factory(make_engine(Config(root)))()
     s.add(Matter(id="m", name="m"))
     s.flush()
-    s.add(Document(id="d", matter_id="m", filename="f.txt", sha256="0" * 64,
-                   bytes=0, storage_path=""))
+    s.add(
+        Document(id="d", matter_id="m", filename="f.txt", sha256="0" * 64, bytes=0, storage_path="")
+    )
     job = Job(matter_id="m", document_id="d", kind="inspect", status="running")
     s.add(job)
     s.commit()
@@ -332,6 +355,10 @@ def test_docker_cmd_is_hardened_and_digest_pinned(tmp_path):
         assert flag in joined, flag
     assert cmd[cmd.index("--network") + 1] == "none"
     assert "/data" in joined and cfg.worker_image in cmd
+    # The image ENTRYPOINT is python3. Supplying another interpreter after
+    # the image would execute `python3 python -m ...` and fail before startup.
+    assert cmd[cmd.index("--entrypoint") + 1] == "python3"
+    assert cmd[cmd.index(cfg.worker_image) + 1 :][:3] == ["-m", "app.worker", "run-job"]
 
 
 def test_docker_mount_is_scoped_to_one_job_not_the_whole_data_root(tmp_path):
@@ -361,6 +388,20 @@ def test_docker_mode_refuses_unpinned_image(tmp_path):
         build_docker_cmd(cfg, **_docker_kwargs(mount_root))
 
 
+def test_docker_command_without_posix_identity_uses_image_user(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.delattr(os, "geteuid", raising=False)
+    monkeypatch.delattr(os, "getegid", raising=False)
+    cfg = Config.__new__(Config)
+    cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
+    cfg.worker_runtime = ""
+    cmd = build_docker_cmd(cfg, **_docker_kwargs(tmp_path))
+    assert "--user" not in cmd
+    assert cmd[cmd.index("--input") + 1] == "/data/input/x.docx"
+    assert cmd[cmd.index("--output-dir") + 1] == "/data/output"
+
+
 def test_docker_cmd_selects_hardened_runtime_when_configured(tmp_path):
     """COUNSELCLEAR_WORKER_RUNTIME (e.g. gVisor's runsc) must translate to
     an explicit --runtime flag on the worker container."""
@@ -383,8 +424,12 @@ def test_config_rejects_unknown_worker_mode(monkeypatch, tmp_path):
 
 def test_build_subprocess_cmd_shape(tmp_path):
     cmd = build_subprocess_cmd(
-        input_path=tmp_path / "in" / "x.docx", output_dir=tmp_path / "out",
-        kind="inspect", policy_id="external_sharing", attest=False, matter_id="m1",
+        input_path=tmp_path / "in" / "x.docx",
+        output_dir=tmp_path / "out",
+        kind="inspect",
+        policy_id="external_sharing",
+        attest=False,
+        matter_id="m1",
     )
     assert cmd[:4] == [sys.executable, "-m", "app.worker", "run-job"]
     assert "--input" in cmd and str(tmp_path / "in" / "x.docx") in cmd

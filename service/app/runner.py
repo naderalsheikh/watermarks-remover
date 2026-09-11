@@ -6,17 +6,21 @@ Two modes:
 - docker: per-job container with --network none, read-only rootfs, tmpfs,
   dropped capabilities and a digest-pinned image recorded on the job row.
 
-**Neither mode gives the worker database access or any path outside its own
-job directory.** ``run_job`` stages a fresh ``{data_root}/matters/{matter}/
+``run_job`` passes only paths in a fresh ``{data_root}/matters/{matter}/
 jobs/{job}/`` directory containing only a copy of the one document being
 processed (``input/``); the worker writes its outcome to ``output/
 result.json`` (and, for sanitize, ``output/bundle/``). In docker mode *only
 that directory* is mounted — not the shared SQLite database, not other
 matters, not other jobs. The worker process performs no job-status writes at
 all; ``sync_job`` (run in the trusted parent, after the subprocess/container
-exits) reads ``result.json`` and is the sole writer of the Job row. A worker
+exits) validates ``result.json`` and its artifacts and is the sole writer of
+the Job row. A worker
 that crashes or times out before writing that file leaves sync_job's
 crash-backstop path to record "failed".
+
+The subprocess development mode does not enforce a filesystem or secret
+boundary: the child retains the launching user's privileges. Docker mode
+provides the scoped mount and restricted environment described above.
 
 This replaces an earlier design where the worker held a live database
 session and the whole data root was mounted into the container — that let a
@@ -26,14 +30,16 @@ or corrupt every matter's files and the audit chain directly.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy.orm import Session
 
@@ -61,17 +67,32 @@ def job_root(cfg: Config, matter_id: str, job_id: str) -> Path:
 
 
 def build_subprocess_cmd(
-    *, input_path: Path, output_dir: Path, kind: str, policy_id: str,
-    attest: bool, matter_id: str, decisions: dict[str, str] | None = None,
-    legal_justifications: dict | None = None, layer_b: dict | None = None,
+    *,
+    input_path: Path,
+    output_dir: Path,
+    kind: str,
+    policy_id: str,
+    attest: bool,
+    matter_id: str,
+    decisions: dict[str, str] | None = None,
+    legal_justifications: dict | None = None,
+    layer_b: dict | None = None,
 ) -> list[str]:
     cmd = [
-        sys.executable, "-m", "app.worker", "run-job",
-        "--kind", kind,
-        "--input", str(input_path),
-        "--output-dir", str(output_dir),
-        "--policy", policy_id,
-        "--matter-id", matter_id,
+        sys.executable,
+        "-m",
+        "app.worker",
+        "run-job",
+        "--kind",
+        kind,
+        "--input",
+        str(input_path),
+        "--output-dir",
+        str(output_dir),
+        "--policy",
+        policy_id,
+        "--matter-id",
+        matter_id,
     ]
     if attest:
         cmd.append("--attest")
@@ -88,8 +109,15 @@ def build_subprocess_cmd(
 
 
 def build_docker_cmd(
-    cfg: Config, *, mount_root: Path, input_path: Path, output_dir: Path,
-    kind: str, policy_id: str, attest: bool, matter_id: str,
+    cfg: Config,
+    *,
+    mount_root: Path,
+    input_path: Path,
+    output_dir: Path,
+    kind: str,
+    policy_id: str,
+    attest: bool,
+    matter_id: str,
     decisions: dict[str, str] | None = None,
     legal_justifications: dict | None = None,
     layer_b: dict | None = None,
@@ -102,8 +130,8 @@ def build_docker_cmd(
         )
     # Container-side paths mirror the host layout under mount_root exactly,
     # so the same --input/--output-dir args work in both modes.
-    c_input = "/data" / input_path.relative_to(mount_root)
-    c_output = "/data" / output_dir.relative_to(mount_root)
+    c_input = PurePosixPath("/data", *input_path.relative_to(mount_root).parts)
+    c_output = PurePosixPath("/data", *output_dir.relative_to(mount_root).parts)
     network = "none"
     if layer_b:
         # Layer B jobs need egress to the rewrite endpoint. PR 20 doctrine:
@@ -120,6 +148,16 @@ def build_docker_cmd(
         # Optional hardened OCI runtime (e.g. gVisor's "runsc"): the
         # deployment registers the runtime with Docker; we only select it.
         cmd += ["--runtime", cfg.worker_runtime]
+    cmd += [
+        "--entrypoint",
+        "python3",
+    ]
+    # POSIX bind mounts must be writable by the same UID that staged the
+    # job. Docker Desktop on Windows has no host POSIX UID/GID; keep the
+    # image's configured unprivileged USER there.
+    geteuid, getegid = getattr(os, "geteuid", None), getattr(os, "getegid", None)
+    if geteuid is not None and getegid is not None:
+        cmd += ["--user", f"{geteuid()}:{getegid()}"]
     cmd += [
         "--network",
         network,
@@ -153,7 +191,6 @@ def build_docker_cmd(
                 cmd += ["-e", f"{k}={v}"]
     cmd += [
         image,
-        "python",
         "-m",
         "app.worker",
         "run-job",
@@ -198,7 +235,9 @@ def job_budget_s(kind: str, caps=None) -> int:
     return c.inspect_timeout_s + c.apply_timeout_s + c.verify_timeout_s + 60
 
 
-def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storage=None) -> RunnerResult:
+def run_job(
+    cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storage=None
+) -> RunnerResult:
     """Blocking execution of one queued job in an isolated worker.
 
     Stages ``{job_root}/input/{name}`` (a copy of the document — the real
@@ -214,7 +253,7 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storag
     if storage is None:
         storage = LocalStorage(cfg.data_root)
     job = s.get(Job, job_id)
-    doc = s.get(Document, job.document_id)
+    doc = s.get(Document, job.document_id) if job is not None else None
     if job is None or doc is None:
         raise RuntimeError(f"job {job_id} or its document is missing")
 
@@ -224,7 +263,7 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storag
     # queued. Fails the job with a labeled error (sync_job records it).
     if job.layer_b and not cfg.watermark_tools_enabled:
         return RunnerResult(
-            rc=0,
+            rc=-1,
             stderr_tail="watermark tools disabled",
             timed_out=False,
             output_dir=job_root(cfg, job.matter_id, job.id) / "output",
@@ -232,25 +271,47 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storag
 
     root = job_root(cfg, job.matter_id, job.id)
     input_dir, output_dir = root / "input", root / "output"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    output_dir.mkdir(parents=True, exist_ok=True)
     staged_input = input_dir / doc.filename
-    if not staged_input.exists():
-        staged_input.write_bytes(storage.read(doc.storage_path))
 
     job.status = "running"
     job.worker_image = cfg.worker_image if cfg.worker_mode == "docker" else ""
     s.commit()
 
     common = dict(
-        input_path=staged_input, output_dir=output_dir, kind=kind,
-        policy_id=job.policy_id, attest=bool(job.attestation), matter_id=job.matter_id,
+        input_path=staged_input,
+        output_dir=output_dir,
+        kind=kind,
+        policy_id=job.policy_id,
+        attest=bool(job.attestation),
+        matter_id=job.matter_id,
         decisions=job.finding_decisions or None,
         legal_justifications=job.legal_justifications or None,
         layer_b=job.layer_b or None,
     )  # type: ignore[arg-type]  # layer_b: dict | None (Pyright: attribute of None)
 
     try:
+        input_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _output_directory(input_dir)
+        _output_directory(output_dir)
+        if (
+            not doc.filename
+            or doc.filename in {".", ".."}
+            or "/" in doc.filename
+            or "\\" in doc.filename
+        ):
+            raise ValueError("stored document filename is not a basename")
+        original = storage.read(doc.storage_path)
+        if len(original) != doc.bytes or hashlib.sha256(original).hexdigest() != doc.sha256:
+            raise ValueError("custody original differs from its recorded hash or size")
+        if staged_input.exists() or staged_input.is_symlink():
+            _output_file(staged_input)
+            if staged_input.read_bytes() != original:
+                raise ValueError("staged input differs from the custody original")
+        else:
+            with staged_input.open("xb") as stream:
+                stream.write(original)
+        del original
         # Building the command (build_docker_cmd in particular: it raises
         # ValueError on an unpinned/empty COUNSELCLEAR_WORKER_IMAGE — exactly
         # compose.yaml's own ${COUNSELCLEAR_WORKER_IMAGE:-} default) used to
@@ -293,7 +354,10 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storag
     except subprocess.TimeoutExpired as e:
         tail = ((e.stderr or b"").decode(errors="replace"))[-1000:]
         return RunnerResult(
-            rc=-1, stderr_tail=tail or "worker timed out", timed_out=True, output_dir=output_dir,
+            rc=-1,
+            stderr_tail=tail or "worker timed out",
+            timed_out=True,
+            output_dir=output_dir,
         )
     except Exception as e:
         # Any other setup/launch failure (bad worker config, missing docker
@@ -311,6 +375,135 @@ def run_job(cfg: Config, s: Session, job_id: str, kind: str = "sanitize", storag
         shutil.rmtree(input_dir, ignore_errors=True)
 
 
+_MAX_RESULT_BYTES = 16 * 1024 * 1024
+
+
+def _output_directory(path: Path) -> None:
+    if not stat.S_ISDIR(path.lstat().st_mode):
+        raise ValueError("worker output contains a non-directory or symbolic link")
+
+
+def _output_file(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError("worker output contains a non-regular file or link")
+
+
+def _read_output_json(path: Path) -> dict:
+    _output_file(path)
+    # The size cap bounds the trusted parent's result-channel allocation.
+    with path.open("rb") as stream:
+        data = stream.read(_MAX_RESULT_BYTES + 1)
+    if len(data) > _MAX_RESULT_BYTES:
+        raise ValueError("worker JSON output exceeds size limit")
+    value = json.loads(data)
+    if not isinstance(value, dict):
+        raise ValueError("worker JSON output must be an object")
+    return value
+
+
+def _validated_bundle(output_dir: Path, payload: dict, job: Job, doc: Document) -> Path:
+    """Map the worker protocol to the parent's fixed path after worker exit.
+
+    Never resolve an arbitrary path supplied by the worker. The two exact
+    absolute spellings accommodate host/container path conventions; new
+    workers emit only ``bundle``. This does not support old workers that
+    retain plaintext originals: API and worker must be upgraded together.
+    None of these spellings selects a different directory.
+    Every file the download/audit paths may later read must be a confined
+    regular file, including additional derivative entries and report HTML.
+    """
+    bundle = output_dir / "bundle"
+    declared = payload.get("bundle_dir")
+    if not isinstance(declared, str) or declared not in {
+        "bundle",
+        str(bundle),
+        "/data/output/bundle",
+    }:
+        raise ValueError("worker reported an invalid bundle path")
+    _output_directory(bundle)
+    artifacts = {p.name for p in bundle.iterdir()}
+    if "original" in artifacts:
+        raise ValueError("incompatible worker bundle; upgrade API and pinned worker image together")
+    if artifacts != {"derivative", "manifest.json", "report.html"}:
+        raise ValueError("worker bundle has missing or unexpected artifacts")
+    derivative_dir = bundle / "derivative"
+    _output_directory(derivative_dir)
+    _output_file(bundle / "report.html")
+    manifest = _read_output_json(bundle / "manifest.json")
+    result = payload["result"]
+    if result.get("manifest") != manifest:
+        raise ValueError("worker result and stored manifest disagree")
+    if result.get("verification_pass") is not True or not isinstance(
+        manifest.get("verification"), dict
+    ):
+        raise ValueError("worker bundle lacks passing verification")
+    if manifest["verification"].get("pass") is not True:
+        raise ValueError("worker bundle verification did not pass")
+    original = manifest.get("original")
+    derivative = manifest.get("derivative")
+    policy = manifest.get("policy")
+    if not all(isinstance(value, dict) for value in (original, derivative, policy)):
+        raise ValueError("worker manifest lacks custody metadata")
+    if (
+        any(
+            original.get(key) != value
+            for key, value in {
+                "filename": doc.filename,
+                "sha256": doc.sha256,
+                "bytes": doc.bytes,
+            }.items()
+        )
+        or policy.get("id") != job.policy_id
+    ):
+        raise ValueError("worker manifest does not match the job's original or policy")
+    name = result.get("derivative")
+    if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError("worker reported an invalid derivative name")
+    if derivative.get("filename") != name:
+        raise ValueError("worker derivative name differs from manifest")
+    if {p.name for p in derivative_dir.iterdir()} != {name}:
+        raise ValueError("worker bundle must contain exactly the declared derivative")
+    path = derivative_dir / name
+    _output_file(path)
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    if derivative.get("sha256") != digest.hexdigest() or derivative.get("bytes") != size:
+        raise ValueError("worker derivative differs from its custody hash or size")
+    return bundle
+
+
+def _validated_result(output_dir: Path, job: Job, doc: Document | None) -> tuple[dict, str]:
+    _output_directory(output_dir)
+    payload = _read_output_json(output_dir / "result.json")
+    if payload.get("status") not in {"done", "refused", "failed"}:
+        raise ValueError("worker reported an invalid terminal status")
+    if not isinstance(payload.get("error", ""), str):
+        raise ValueError("worker error must be text")
+    result = payload.get("result")
+    if payload["status"] != "done":
+        if result is not None or payload.get("bundle_dir"):
+            raise ValueError("unsuccessful worker result contains artifacts")
+        return payload, ""
+    if not isinstance(result, dict):
+        raise ValueError("completed worker result must be an object")
+    if job.kind == "sanitize":
+        if doc is None:
+            raise ValueError("job original is missing")
+        return payload, str(_validated_bundle(output_dir, payload, job, doc))
+    if job.kind != "inspect" or payload.get("bundle_dir"):
+        raise ValueError("worker result does not match the job kind")
+    if not isinstance(result.get("findings"), list) or not all(
+        isinstance(finding, dict) for finding in result["findings"]
+    ):
+        raise ValueError("inspect worker findings must be a list of objects")
+    return payload, ""
+
+
 def sync_job(s: Session, job_id: str, res: RunnerResult) -> None:
     """Reconcile after a worker exit. The worker itself never touches the
     database — this reads back ``result.json`` (the worker's only output
@@ -322,22 +515,29 @@ def sync_job(s: Session, job_id: str, res: RunnerResult) -> None:
     if job.status in ("done", "refused", "failed"):
         return
 
-    result_path = res.output_dir / "result.json" if res.output_dir else None
     payload = None
-    if result_path and result_path.is_file():
+    bundle_dir = ""
+    validation_error = ""
+    if res.output_dir is not None and res.rc == 0 and not res.timed_out:
         try:
-            payload = json.loads(result_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            payload = None
+            payload, bundle_dir = _validated_result(
+                res.output_dir,
+                job,
+                s.get(Document, job.document_id),
+            )
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            validation_error = f"invalid worker output: {exc}"
 
     if payload is not None:
-        job.status = payload.get("status", "failed")
+        job.status = payload["status"]
         job.error = str(payload.get("error") or "")[:1000]
         job.result_json = payload.get("result")
-        job.bundle_dir = str(payload.get("bundle_dir") or "")
+        job.bundle_dir = bundle_dir
     else:
         job.status = "failed"
         reason = "worker timed out" if res.timed_out else f"worker exited rc={res.rc}"
-        job.error = f"{reason}: {res.stderr_tail}".strip()[:1000]
+        job.error = (validation_error or f"{reason}: {res.stderr_tail}").strip()[:1000]
+        job.result_json = None
+        job.bundle_dir = ""
     job.finished_utc = _now()
     s.commit()

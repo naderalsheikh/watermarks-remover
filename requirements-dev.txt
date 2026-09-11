@@ -1,5 +1,7 @@
 # Dev/test dependencies for CI — exact pins (no drift).
 # Dependabot can bump these; keep them in sync with the local .venv.
+# Exercise the complete shipped runtime in every clean test environment.
+-r service/requirements-app.txt
 pytest==9.1.1
 pip-audit==2.10.1
 openapi-spec-validator==0.9.0
@@ -10,13 +12,7 @@ ruff==0.16.3
 # explicitly because tests import it directly.
 jsonschema==4.26.0
 
-# Product control plane (PR 15) — single-tenant FastAPI profile
-fastapi==0.141.1
-uvicorn==0.52.4
-SQLAlchemy==2.0.52
-alembic==1.16.5
-argon2-cffi==25.1.0
-python-multipart==0.0.32
+# HTTP test client (not needed by the shipped service).
 httpx==0.28.1
 # Differential-testing oracle for the hand-rolled RFC 3161 DER/CMS parser
 # in tools/counselclear_verify_release_packet.py (tests only — the shipped

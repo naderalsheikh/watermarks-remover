@@ -1,0 +1,145 @@
+{
+  "packet": {
+    "anchor": {
+      "digest": null,
+      "reference": null,
+      "type": "none"
+    },
+    "audit_refs": {
+      "bundle_download_seq": 1,
+      "certificate_issued_seq": 2
+    },
+    "document_id": "DOC1",
+    "generated_at": "2026-08-27T00:00:00+00:00",
+    "generated_by": "operator",
+    "hashes": {
+      "certificate_html_sha256": "0ca175573ee4a75172bd459d67bd92c7cb4446525b1cac77bfcd1a722b684734",
+      "derivative": {
+        "filename": "out.docx",
+        "sha256": "ac7d07b437b2857ca4abcd82b14aebdf5af7f4b746c8d0b1863d35526db09a5b"
+      },
+      "manifest_json_sha256": "c572faaa987c85baed63e06b4e4a17906981bc14288bb18a569c006ed2ba790f",
+      "readme_txt_sha256": "6f7a8ed642f8152c6c67fca16d126a8185b73dbc6238b5f76a6ae65c27c52c4e",
+      "report_json_sha256": "609c9c2ff73a9bb633cb8441782daf66d9b0111db53eeec35d268612f9f2a21c"
+    },
+    "job_id": "JOB1",
+    "kind": "sanitize",
+    "legal_justifications": [
+      {
+        "action": "keep",
+        "legal_justification": {
+          "basis": "privilege",
+          "note": "Attorney-client comments withheld."
+        },
+        "subtype": "comments_and_notes"
+      }
+    ],
+    "limitations": [],
+    "matter_id": "MAT1",
+    "original_sha256": "9af8e698a35d535a5d86525b1c7e4aa835658412dba5f622f50fa18f31b2250e",
+    "packet_id": "JOB1",
+    "policy": {
+      "digest": null,
+      "id": "external_sharing",
+      "version": 1
+    },
+    "release_id": null,
+    "spec_version": "1.0",
+    "status": "done"
+  },
+  "signedPacket": {
+    "anchor": {
+      "digest": null,
+      "reference": "34750f98bd59fcfc",
+      "type": "ed25519-operator"
+    },
+    "audit_refs": {
+      "bundle_download_seq": 1,
+      "certificate_issued_seq": 2
+    },
+    "document_id": "DOC1",
+    "generated_at": "2026-08-27T00:00:00+00:00",
+    "generated_by": "operator",
+    "hashes": {
+      "certificate_html_sha256": "0ca175573ee4a75172bd459d67bd92c7cb4446525b1cac77bfcd1a722b684734",
+      "derivative": {
+        "filename": "out.docx",
+        "sha256": "ac7d07b437b2857ca4abcd82b14aebdf5af7f4b746c8d0b1863d35526db09a5b"
+      },
+      "manifest_json_sha256": "c572faaa987c85baed63e06b4e4a17906981bc14288bb18a569c006ed2ba790f",
+      "readme_txt_sha256": "6f7a8ed642f8152c6c67fca16d126a8185b73dbc6238b5f76a6ae65c27c52c4e",
+      "report_json_sha256": "609c9c2ff73a9bb633cb8441782daf66d9b0111db53eeec35d268612f9f2a21c"
+    },
+    "job_id": "JOB1",
+    "kind": "sanitize",
+    "legal_justifications": [
+      {
+        "action": "keep",
+        "legal_justification": {
+          "basis": "privilege",
+          "note": "Attorney-client comments withheld."
+        },
+        "subtype": "comments_and_notes"
+      }
+    ],
+    "limitations": [],
+    "matter_id": "MAT1",
+    "original_sha256": "9af8e698a35d535a5d86525b1c7e4aa835658412dba5f622f50fa18f31b2250e",
+    "packet_id": "JOB1",
+    "policy": {
+      "digest": null,
+      "id": "external_sharing",
+      "version": 1
+    },
+    "release_id": null,
+    "signature": {
+      "algorithm": "ed25519",
+      "digest": "sha256:27ab627aed5513ec480bd251839fce43eaa00e7701d4137bec008c69d5cfcb0c",
+      "key_id": "34750f98bd59fcfc",
+      "signed_fields": "release_packet.v1.canonical",
+      "value": "a9b637506cef1cd9fe5b288b8ece5cd98743ddb74f49b67ff9ba776923aeae5e2798378ce3dc674516d9aa66664fd14ff49de646b4c89bfbf3060b74483fc80d"
+    },
+    "spec_version": "1.0",
+    "status": "done"
+  },
+  "result": {
+    "spec_version": "1.0",
+    "release_id": "REL1",
+    "job_id": "JOB1",
+    "document_id": "DOC1",
+    "matter_id": "MAT1",
+    "status": "refused",
+    "policy_id": "external_sharing",
+    "profile_id": "counterparty_deal_room",
+    "recipient_type": "opposing_counsel",
+    "recipient_name": "Jane Doe, Esq.",
+    "purpose": "settlement negotiation",
+    "intended_external": true,
+    "reason": "plan refused: macro-enabled file",
+    "original_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "created_at": "2026-08-27T00:00:00+00:00",
+    "finished_at": "2026-08-27T00:00:05+00:00",
+    "audit_refs": {
+      "release_created_seq": 1,
+      "release_terminal_seq": 2
+    },
+    "legal_justifications": [],
+    "limitations": [
+      "job refused: plan refused: macro-enabled file"
+    ],
+    "certificate_html_sha256": "368ab3c324007f8fdf66bceb742cbc88a53c1e1ad6565871ffbf148734679383",
+    "generated_at": "2026-08-27T00:00:05+00:00",
+    "anchor": {
+      "type": "none",
+      "digest": null,
+      "reference": null
+    }
+  },
+  "files": {
+    "manifest.json": "{\"action_records\": [{\"action\": \"keep\", \"detail\": \"kept: reviewed and kept by operator\", \"legal_justification\": {\"basis\": \"privilege\", \"note\": \"Attorney-client comments withheld.\"}, \"subtype\": \"comments_and_notes\"}], \"derivative\": {\"filename\": \"out.docx\", \"sha256\": \"ac7d07b437b2857ca4abcd82b14aebdf5af7f4b746c8d0b1863d35526db09a5b\"}, \"policy\": {\"id\": \"external_sharing\", \"version\": 1}}",
+    "report.json": "{\"action_records\": [{\"action\": \"keep\", \"detail\": \"kept: reviewed and kept by operator\", \"legal_justification\": {\"basis\": \"privilege\", \"note\": \"Attorney-client comments withheld.\"}, \"subtype\": \"comments_and_notes\"}], \"findings_before\": [], \"report_version\": 1, \"verification\": {\"checks\": [], \"pass\": true}}",
+    "certificate.html": "<!doctype html><html><body>Job ID: <code>JOB1</code> Matter: X (<code>MAT1</code>) Document ID: <code>DOC1</code> status: <span class=\"status\">done</span></body></html>",
+    "README.txt": "CounselClear release packet\n",
+    "derivative/out.docx": "fake derivative bytes"
+  }
+}

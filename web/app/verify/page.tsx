@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { Header } from "@/components/Header";
 import {
   verifyReleasePacket,
   type VerificationReport,
+  type CheckStatus,
 } from "@/lib/packetVerifier";
 
 function formatBytes(n?: number): string {
@@ -16,65 +17,121 @@ function formatBytes(n?: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
+const checkLabels: Record<CheckStatus, string> = {
+  passed: "Passed", failed: "Failed", not_checked: "Not checked", unavailable: "Unavailable",
+};
+const checkColors: Record<CheckStatus, string> = {
+  passed: "bg-emerald-600/10 text-emerald-700 dark:text-emerald-300",
+  failed: "bg-red-600/10 text-red-700 dark:text-red-300",
+  not_checked: "bg-amber-600/10 text-amber-800 dark:text-amber-300",
+  unavailable: "bg-black/5 text-muted dark:bg-white/5",
+};
+type DerivativeFile = { name: string; data: ArrayBuffer };
+
 export default function VerifyPage() {
   const [packetText, setPacketText] = useState("");
   const [packetFileName, setPacketFileName] = useState<string | null>(null);
-  const [derivativeFile, setDerivativeFile] = useState<{
-    name: string;
-    data: ArrayBuffer;
-  } | null>(null);
+  const [derivativeFile, setDerivativeFile] = useState<DerivativeFile | null>(null);
   const [report, setReport] = useState<VerificationReport | null>(null);
   const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const activeRun = useRef(0);
+  const packetRead = useRef(0);
+  const derivativeRead = useRef(0);
+  const readingPacket = useRef(false);
+  const readingDerivative = useRef(false);
+  const latestPacket = useRef("");
+  const latestDerivative = useRef<DerivativeFile | null>(null);
 
-  function copyHash(hash: string) {
-    navigator.clipboard.writeText(hash).then(() => {
+  async function copyHash(hash: string) {
+    setCopyError(null);
+    try {
+      await navigator.clipboard.writeText(hash);
       setCopiedHash(hash);
-      setTimeout(() => setCopiedHash(null), 1200);
-    });
+    } catch {
+      setCopyError("The browser could not copy the digest. Select the digest text and copy it manually.");
+    }
   }
 
-  async function runVerification(
-    text: string,
-    deriv = derivativeFile,
-  ) {
+  async function runVerification(text = latestPacket.current, deriv = latestDerivative.current) {
+    const run = ++activeRun.current;
+    setReport(null);
+    setCopyError(null);
+    setCopiedHash(null);
+    if (readingPacket.current || readingDerivative.current) {
+      setVerifying(true);
+      return;
+    }
     if (!text.trim()) {
-      setReport(null);
+      setVerifying(false);
       return;
     }
     setVerifying(true);
     try {
-      const rep = await verifyReleasePacket(text, {
-        derivative: deriv ?? undefined,
-      });
-      setReport(rep);
+      const nextReport = await verifyReleasePacket(text, { derivative: deriv ?? undefined });
+      if (run === activeRun.current) setReport(nextReport);
+    } catch {
+      if (run === activeRun.current) setError("Browser verification could not finish. Retry with the complete JSON file, or run the offline verifier on the packet.");
     } finally {
-      setVerifying(false);
+      if (run === activeRun.current) setVerifying(false);
     }
   }
 
-  function handlePacketUpload(file: File) {
+  async function handlePacketUpload(file: File) {
+    const read = ++packetRead.current;
+    ++activeRun.current;
+    readingPacket.current = true;
+    latestPacket.current = "";
+    setPacketText("");
     setPacketFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = String(e.target?.result ?? "");
+    setReport(null);
+    setError(null);
+    setVerifying(true);
+    try {
+      const text = await file.text();
+      if (read !== packetRead.current) return;
+      readingPacket.current = false;
+      latestPacket.current = text;
       setPacketText(text);
-      runVerification(text, derivativeFile);
-    };
-    reader.readAsText(file);
+      if (!text.trim()) {
+        setError("The JSON file is empty. Select a complete release_packet.json or release_result.json.");
+        setVerifying(readingDerivative.current);
+        return;
+      }
+      await runVerification();
+    } catch {
+      if (read !== packetRead.current) return;
+      readingPacket.current = false;
+      setVerifying(readingDerivative.current);
+      setError("The JSON file could not be read. Select it again or paste its contents below.");
+    }
   }
 
-  function handleDerivativeUpload(file: File) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const buffer = e.target?.result as ArrayBuffer;
-      const deriv = { name: file.name, data: buffer };
-      setDerivativeFile(deriv);
-      if (packetText.trim()) {
-        runVerification(packetText, deriv);
-      }
-    };
-    reader.readAsArrayBuffer(file);
+  async function handleDerivativeUpload(file: File) {
+    const read = ++derivativeRead.current;
+    ++activeRun.current;
+    readingDerivative.current = true;
+    latestDerivative.current = null;
+    setDerivativeFile(null);
+    setReport(null);
+    setError(null);
+    setVerifying(true);
+    try {
+      const data = await file.arrayBuffer();
+      if (read !== derivativeRead.current) return;
+      readingDerivative.current = false;
+      const derivative = { name: file.name, data };
+      latestDerivative.current = derivative;
+      setDerivativeFile(derivative);
+      await runVerification();
+    } catch {
+      if (read !== derivativeRead.current) return;
+      readingDerivative.current = false;
+      setVerifying(readingPacket.current);
+      setError("The document could not be read. Select the file again to compare its bytes.");
+    }
   }
 
   return (
@@ -88,7 +145,7 @@ export default function VerifyPage() {
               Release Packet Verifier
             </h1>
             <p className="text-xs text-muted mt-1">
-              Client-side evidentiary verification (WebCrypto) · No bytes are sent to any server.
+              Schema and SHA-256 checks run in this browser. Selected file contents stay on this device.
             </p>
           </div>
           <Link
@@ -104,7 +161,7 @@ export default function VerifyPage() {
           {/* Packet upload */}
           <div className="rounded-md border border-border p-4 shadow-card">
             <h2 className="text-sm font-semibold tracking-tight mb-2">
-              1. Release Packet JSON <span className="text-red-600 dark:text-red-400">*</span>
+              1. Release JSON (required)
             </h2>
             <p className="text-xs text-muted mb-3">
               Upload <code className="font-mono">release_packet.json</code> or{" "}
@@ -124,7 +181,7 @@ export default function VerifyPage() {
                 }}
                 className="flex cursor-pointer flex-col items-center justify-center rounded-md border border-dashed border-border bg-black/[0.01] p-4 text-center hover:bg-black/[0.03] focus-within:ring-2 focus-within:ring-accent dark:hover:bg-white/[0.03]"
               >
-                <span className="text-xs font-medium">
+                <span className="text-sm font-medium break-all">
                   {packetFileName ? packetFileName : "Select release_packet.json"}
                 </span>
                 <span className="text-[11px] text-muted mt-0.5">
@@ -137,6 +194,7 @@ export default function VerifyPage() {
                   className="sr-only"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
+                    e.currentTarget.value = "";
                     if (file) handlePacketUpload(file);
                   }}
                 />
@@ -147,14 +205,18 @@ export default function VerifyPage() {
                 <textarea
                   value={packetText}
                   onChange={(e) => {
+                    ++packetRead.current;
+                    readingPacket.current = false;
+                    latestPacket.current = e.target.value;
+                    setError(null);
                     setPacketText(e.target.value);
                     setPacketFileName("Pasted JSON");
-                    runVerification(e.target.value, derivativeFile);
+                    void runVerification();
                   }}
                   rows={4}
                   aria-label="Paste raw release packet JSON"
                   placeholder='{"spec_version": "1.0", "hashes": ...}'
-                  className="mt-2 w-full rounded border border-border bg-transparent p-2 font-mono text-[11px] focus-visible:border-accent"
+                  className="mt-2 w-full rounded border border-border bg-transparent p-2 font-mono text-base focus-visible:border-accent"
                 />
               </details>
             </div>
@@ -163,10 +225,10 @@ export default function VerifyPage() {
           {/* Derivative upload */}
           <div className="rounded-md border border-border p-4 shadow-card">
             <h2 className="text-sm font-semibold tracking-tight mb-2">
-              2. Derivative Document (Optional)
+              2. Released document (optional)
             </h2>
             <p className="text-xs text-muted mb-3">
-              Upload the released file (PDF, DOCX) to independently verify its SHA-256 byte match.
+              Select the released file to compare its bytes with the digest in release_packet.json. A release_result.json does not declare a document digest.
             </p>
             <label
               onDragOver={(e) => {
@@ -181,7 +243,7 @@ export default function VerifyPage() {
               }}
               className="flex cursor-pointer flex-col items-center justify-center rounded-md border border-dashed border-border bg-black/[0.01] p-4 text-center hover:bg-black/[0.03] focus-within:ring-2 focus-within:ring-accent dark:hover:bg-white/[0.03]"
             >
-              <span className="text-xs font-medium">
+              <span className="text-sm font-medium break-all">
                 {derivativeFile ? `${derivativeFile.name} (${formatBytes(derivativeFile.data.byteLength)})` : "Select derivative file"}
               </span>
               <span className="text-[11px] text-muted mt-0.5">
@@ -193,6 +255,7 @@ export default function VerifyPage() {
                 className="sr-only"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
+                  e.currentTarget.value = "";
                   if (file) handleDerivativeUpload(file);
                 }}
               />
@@ -200,8 +263,12 @@ export default function VerifyPage() {
             {derivativeFile && (
               <button
                 onClick={() => {
+                  ++derivativeRead.current;
+                  readingDerivative.current = false;
+                  latestDerivative.current = null;
+                  setError(null);
                   setDerivativeFile(null);
-                  if (packetText) runVerification(packetText, null);
+                  void runVerification();
                 }}
                 className="mt-2 text-xs text-muted hover:text-foreground"
               >
@@ -211,19 +278,23 @@ export default function VerifyPage() {
           </div>
         </div>
 
-        {verifying && (
-          <p className="text-xs text-muted animate-pulse">Computing cryptographic hashes…</p>
-        )}
+        <div role="status" aria-live="polite" className="text-sm text-muted">
+          {verifying && <p>Reading selected files and checking available evidence…</p>}
+        </div>
+        {error && <p role="alert" className="mb-4 text-sm text-red-700 dark:text-red-300">{error}</p>}
+        {copyError && <p role="alert" className="mb-4 text-sm text-red-700 dark:text-red-300">{copyError}</p>}
 
         {/* Verification Report Display */}
         {report && (
           <div className="space-y-6">
             {/* Top Status Banner */}
             <div
+              role="status"
+              aria-live="polite"
               className={`rounded-md border p-4 shadow-card ${
-                report.status === "INTERNALLY CONSISTENT"
-                  ? "border-emerald-600/30 bg-emerald-600/5 text-emerald-800 dark:text-emerald-300"
-                  : "border-red-600/30 bg-red-600/5 text-red-800 dark:text-red-300"
+                report.status === "INTERNALLY INCONSISTENT"
+                  ? "border-red-600/30 bg-red-600/5 text-red-800 dark:text-red-300"
+                  : "border-amber-600/30 bg-amber-600/5 text-amber-900 dark:text-amber-200"
               }`}
             >
               <div className="flex items-center justify-between gap-4">
@@ -232,14 +303,15 @@ export default function VerifyPage() {
                     {report.status}
                   </span>
                   <p className="text-xs mt-2 font-medium">
-                    {report.status === "INTERNALLY CONSISTENT"
-                      ? report.derivativeVerified
-                        ? "All declared hashes, schema bindings, and derivative file bytes verified."
-                        : "Packet structure and internal custody digests verified (no derivative document provided for byte comparison)."
-                      : "One or more cryptographic or structural checks failed. Do not rely on this packet without investigation."}
+                    {report.status === "INTERNALLY INCONSISTENT"
+                      ? "A structural check or evidence comparison failed. Review the failed checks below before relying on this artifact."
+                      : "No check failed, but verification is incomplete. Only checks marked Passed were performed successfully."}
                   </p>
-                  <p className="text-[11px] text-muted mt-1">
-                    Doctrine §5: Confirms internal consistency only; does not establish external truth, third-party authentication, or legal privilege.
+                  <p className="text-sm mt-2">
+                    {report.checks.filter((check) => check.status === "passed").length} passed · {report.checks.filter((check) => check.status === "failed").length} failed · {report.checks.filter((check) => check.status === "not_checked").length} not checked · {report.checks.filter((check) => check.status === "unavailable").length} unavailable
+                  </p>
+                  <p className="text-sm mt-2">
+                    This browser does not authenticate the operator signature or timestamp, verify the audit chain, or inspect the complete packet. Use the offline verifier with the complete packet, a trusted operator key, and the exported audit CSV for those checks.
                   </p>
                 </div>
               </div>
@@ -249,36 +321,37 @@ export default function VerifyPage() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-4">
               <div className="rounded-md border border-border p-3 shadow-card">
                 <p className="text-[11px] text-muted uppercase">Release ID</p>
-                <p className="font-mono text-xs font-medium truncate mt-1">
+                <p className="font-mono text-xs font-medium break-words mt-1">
                   {report.releaseId ?? "—"}
                 </p>
               </div>
               <div className="rounded-md border border-border p-3 shadow-card">
                 <p className="text-[11px] text-muted uppercase">Policy</p>
-                <p className="text-xs font-medium truncate mt-1">
+                <p className="text-xs font-medium break-words mt-1">
                   {report.policyId ?? "—"}
                 </p>
               </div>
               <div className="rounded-md border border-border p-3 shadow-card">
-                <p className="text-[11px] text-muted uppercase">Status</p>
+                <p className="text-[11px] text-muted uppercase">Declared release status</p>
                 <p className="text-xs font-medium capitalize mt-1">
                   {report.jobStatus ?? "—"}
                 </p>
               </div>
               <div className="rounded-md border border-border p-3 shadow-card">
-                <p className="text-[11px] text-muted uppercase">Anchor</p>
-                <p className="text-xs font-medium truncate mt-1">
+                <p className="text-[11px] text-muted uppercase">Declared anchor</p>
+                <p className="text-xs font-medium break-words mt-1">
                   {report.anchor.type}
                 </p>
+                <p className="text-sm text-muted mt-1">{report.anchor.detail}</p>
               </div>
             </div>
 
             {/* Custody Hashes */}
             <div className="rounded-md border border-border p-4 shadow-card space-y-3">
-              <h3 className="text-sm font-semibold tracking-tight">Custody Digest Chain</h3>
+              <h3 className="text-sm font-semibold tracking-tight">Declared and compared digests</h3>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div>
-                  <p className="text-xs text-muted mb-1">Original SHA-256 (Declared WORM)</p>
+                  <p className="text-xs text-muted mb-1">Original SHA-256 (declared only)</p>
                   <div className="flex items-center gap-2 font-mono text-xs break-all bg-black/[0.02] p-2 rounded border border-border dark:bg-white/[0.02]">
                     <span>{report.originalSha256 ?? "Not declared"}</span>
                     {report.originalSha256 && (
@@ -294,7 +367,7 @@ export default function VerifyPage() {
                 </div>
 
                 <div>
-                  <p className="text-xs text-muted mb-1">Derivative SHA-256</p>
+                  <p className="text-xs text-muted mb-1">Released document SHA-256</p>
                   <div className="flex items-center gap-2 font-mono text-xs break-all bg-black/[0.02] p-2 rounded border border-border dark:bg-white/[0.02]">
                     <span>{report.derivativeDeclared?.sha256 ?? "Not declared"}</span>
                     {report.derivativeDeclared?.sha256 && (
@@ -310,8 +383,10 @@ export default function VerifyPage() {
                   {report.derivativeDeclared && (
                     <p className="text-[11px] text-muted mt-1">
                       {report.derivativeVerified
-                        ? "✓ Verified matching against uploaded derivative bytes"
-                        : "Upload derivative file to verify byte-identical match"}
+                        ? "Selected document bytes match the declared SHA-256."
+                        : derivativeFile
+                          ? "Document bytes have not passed comparison. See the digest check below."
+                          : "Select the released document to compare its bytes."}
                     </p>
                   )}
                 </div>
@@ -321,23 +396,17 @@ export default function VerifyPage() {
             {/* Checks List */}
             <div className="rounded-md border border-border shadow-card overflow-hidden">
               <div className="border-b border-border bg-black/[0.02] px-4 py-2.5 text-xs font-semibold uppercase tracking-wider dark:bg-white/[0.02]">
-                Verification Checks ({report.checks.length})
+                Evidence checks ({report.checks.length})
               </div>
               <ul className="divide-y divide-border">
                 {report.checks.map((c, i) => (
                   <li key={i} className="flex items-start justify-between gap-4 px-4 py-2.5 text-xs">
-                    <div>
+                    <div className="min-w-0 break-words">
                       <p className="font-medium">{c.name}</p>
-                      <p className="text-muted text-[11px] mt-0.5">{c.detail}</p>
+                      <p className="text-muted text-sm mt-0.5 [overflow-wrap:anywhere]">{c.detail}</p>
                     </div>
-                    <span
-                      className={`shrink-0 rounded px-1.5 py-0.5 font-medium ${
-                        c.pass
-                          ? "bg-emerald-600/10 text-emerald-700 dark:text-emerald-300"
-                          : "bg-red-600/10 text-red-700 dark:text-red-300"
-                      }`}
-                    >
-                      {c.pass ? "Pass" : "Fail"}
+                    <span className={`shrink-0 rounded px-1.5 py-0.5 font-medium ${checkColors[c.status]}`}>
+                      {checkLabels[c.status]}
                     </span>
                   </li>
                 ))}
@@ -347,19 +416,20 @@ export default function VerifyPage() {
             {/* Dispositions & Legal Justifications */}
             {(report.dispositions.stripped.length > 0 ||
               report.dispositions.kept.length > 0 ||
+              report.dispositions.refused.length > 0 ||
               report.legalJustifications.length > 0) && (
               <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
                 {/* Dispositions */}
                 <div className="rounded-md border border-border p-4 shadow-card space-y-3">
-                  <h3 className="text-sm font-semibold tracking-tight">Disposition Summary</h3>
+                  <h3 className="text-sm font-semibold tracking-tight">Declared dispositions</h3>
                   {report.dispositions.stripped.length > 0 && (
                     <div>
                       <p className="text-xs font-medium text-emerald-700 dark:text-emerald-400 mb-1">
-                        Stripped Actions ({report.dispositions.stripped.length})
+                        Declared removals ({report.dispositions.stripped.length})
                       </p>
                       <ul className="list-disc list-inside text-xs text-muted space-y-0.5">
                         {report.dispositions.stripped.map((a, idx) => (
-                          <li key={idx} className="truncate">{a}</li>
+                          <li key={idx} className="break-words">{a}</li>
                         ))}
                       </ul>
                     </div>
@@ -368,12 +438,20 @@ export default function VerifyPage() {
                   {report.dispositions.kept.length > 0 && (
                     <div>
                       <p className="text-xs font-medium text-amber-700 dark:text-amber-400 mb-1">
-                        Retained Content ({report.dispositions.kept.length})
+                        Declared retained content ({report.dispositions.kept.length})
                       </p>
                       <ul className="list-disc list-inside text-xs text-muted space-y-0.5">
                         {report.dispositions.kept.map((a, idx) => (
-                          <li key={idx} className="truncate">{a}</li>
+                          <li key={idx} className="break-words">{a}</li>
                         ))}
+                      </ul>
+                    </div>
+                  )}
+                  {report.dispositions.refused.length > 0 && (
+                    <div>
+                      <p className="text-sm font-medium mb-1">Declared refusals ({report.dispositions.refused.length})</p>
+                      <ul className="list-disc list-inside text-sm text-muted space-y-1">
+                        {report.dispositions.refused.map((action, index) => <li key={index} className="break-words">{action}</li>)}
                       </ul>
                     </div>
                   )}
@@ -382,24 +460,33 @@ export default function VerifyPage() {
                 {/* Legal Justifications */}
                 <div className="rounded-md border border-border p-4 shadow-card space-y-3">
                   <h3 className="text-sm font-semibold tracking-tight">Asserted Withholding Grounds</h3>
+                  <p className="text-sm text-muted">Copied from the artifact. These assertions do not establish legal privilege or a valid withholding basis.</p>
                   {report.legalJustifications.length === 0 ? (
                     <p className="text-xs text-muted">No specific withholding grounds asserted.</p>
                   ) : (
                     <ul className="divide-y divide-border text-xs">
                       {report.legalJustifications.map((j, idx) => (
                         <li key={idx} className="py-2 space-y-0.5">
-                          <div className="flex justify-between items-center">
-                            <span className="font-medium">{j.subtype}</span>
+                          <div className="flex flex-wrap justify-between items-start gap-2">
+                            <span className="min-w-0 break-words font-medium">{j.subtype}</span>
                             <span className="rounded bg-black/[0.04] dark:bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px]">
                               {j.basis}
                             </span>
                           </div>
-                          {j.note && <p className="text-muted text-[11px]">{j.note}</p>}
+                          {j.note && <p className="text-muted text-sm [overflow-wrap:anywhere]">{j.note}</p>}
                         </li>
                       ))}
                     </ul>
                   )}
                 </div>
+              </div>
+            )}
+            {report.limitations.length > 0 && (
+              <div className="rounded-md border border-border p-4">
+                <h3 className="text-sm font-semibold">Artifact limitations</h3>
+                <ul className="mt-2 list-disc pl-5 text-sm text-muted space-y-1">
+                  {report.limitations.map((limitation, index) => <li key={index} className="break-words">{limitation}</li>)}
+                </ul>
               </div>
             )}
           </div>

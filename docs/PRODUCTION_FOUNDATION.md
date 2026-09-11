@@ -1,0 +1,110 @@
+# Production foundation: integration and release notes
+
+The product roadmap includes CounselClear Desktop, Server, and Cloud. This
+increment repairs shared processing and evidence behavior; it does not ship the
+native desktop client, central policy administration, managed cloud operations,
+or Outlook/mobile mail integration.
+
+## Integration baseline
+
+Implementation starts from `6db22621fd08c1c0b3b1fa9a53415dec344b7e66` on the
+product fork, `naderalsheikh/watermarks-remover`. The integration branch for this
+increment is `build/production-foundation`, targeting the existing product branch
+`feat/custody-record-truthfulness`.
+
+Open PRs #3–#6 each contain one unique commit after that baseline. Their shared
+earlier UI change is already present. This increment selectively integrates the
+DOCX direct-highlight transformation from #6, preserving the existing detectors
+and final verification. Style-only highlighting remains subject to the existing
+limitation/refusal behavior. It does not merge the PR's broader detection/copy
+changes.
+
+Do not merge the other PRs wholesale to obtain this work:
+
+- #3's deployment documentation needs correction for actual configuration and
+  network egress, including timestamp anchoring and malware-definition updates.
+- #4's upload allowlist omits existing supported Office input families. Rebuild
+  that guard against the actual server capabilities.
+- #5 needs explicit handling of the existing API `/` route, trusted proxy
+  configuration, version metadata, and the chosen deployment branch.
+
+## Runtime and worker upgrades
+
+Upgrade the API and its pinned worker image together. New workers omit the
+duplicate original from their output bundle because the original is already
+retained in the custody backend. Older worker images emit that extra copy and
+will fail the new parent's artifact checks. Legacy absolute bundle path strings
+are understood only when all other output requirements are satisfied; they do
+not guarantee compatibility with an older worker implementation.
+
+The parent maps worker results to the expected job output directory and checks
+file types, artifact names, result/manifest agreement, original identity, policy,
+and actual derivative digest/size before recording a usable bundle. A timeout or
+unsuccessful process exit cannot become success through a result file.
+
+Existing terminal records and artifacts are not rewritten by this change.
+Original downloads continue through the existing explicit `download_original`
+permission and custody backend. This increment does not remove plaintext copies
+from historical bundles or establish protection/retention for all historical
+outputs and backups. Any remediation of existing records requires an inventory
+and a procedure that preserves their evidence and access semantics.
+
+Subprocess mode remains a development execution mode with the host user's
+privileges. Passing scoped paths does not create a filesystem or network sandbox.
+Docker execution has a separate real-image CI gate; native desktop isolation is
+a later per-OS implementation and qualification task.
+
+## Browser verification
+
+The browser validates the published JSON contract and compares only the file
+bytes the operator supplies. It does not authenticate signatures, timestamp
+authority trust, custody chains, or complete archive membership. Missing evidence
+is shown as not checked or unavailable. Passing partial checks produce
+`VERIFICATION INCOMPLETE`; they cannot establish an authenticated packet.
+
+Use the offline verifier with the complete packet and a trusted installation key
+fingerprint for its broader supported checks. A self-published key alone does not
+establish the producer's identity. Historical signed artifacts remain unchanged.
+
+## Reproducible checks
+
+CI installs the complete shipped Python runtime through `requirements-dev.txt`
+and uses Python 3.14, matching the product image. It runs the Python suite on
+Linux, Windows, and macOS, lint/format checks, dependency audits, web tests/lint/
+static export, and the actual worker image workflow. The web job uses Node 24 and
+the lockfile. The frontend dependency patches address the advisories reported by
+the September 11 clean install; the deployed static export does not run a Next.js
+server, but development/build dependencies must still be maintained.
+
+```sh
+python -m pip install -r requirements-dev.txt
+python -m pytest
+python -m ruff check service tests
+python -m ruff format --check service tests
+```
+
+Run `npm ci`, `npm test`, `npm run lint`, and `npm run build` from `web/`.
+The optional Docker test is `tests/test_worker_docker_smoke.py`; CI sets
+`COUNSELCLEAR_TEST_WORKER_IMAGE` to the digest of an image built from the current
+checkout in a loopback registry. Without that setting, only the Docker test skips;
+the encrypted-custody subprocess workflow still runs.
+
+The image publisher calls this CI workflow against the release commit before
+publishing. Publishing requires a stable `vMAJOR.MINOR.PATCH` tag; dispatching a
+branch cannot update `latest`. This remains the backend/worker image publisher;
+complete UI/service packaging still needs the separate deployment workstream.
+
+## Remaining shared release blockers
+
+- Durable job admission, ownership, finalization, and restart recovery.
+- Exact S3 object-version references and tested storage/key recovery.
+- Production configuration propagation, readiness, and one qualified complete
+  deployment, including UI, API, workers, storage, TLS, and backup/restore.
+- Actual IdP qualification and consistent operator identity in custody records.
+- Release-page decision hierarchy, unavailable-evidence states, accessible forms,
+  and the shared brand/system refinements.
+- Edition packaging, tenant isolation, administration, and live mail integration
+  qualification as defined in the three-edition roadmap.
+
+Successful tests for this increment do not establish production readiness for
+the whole product or any unimplemented edition.

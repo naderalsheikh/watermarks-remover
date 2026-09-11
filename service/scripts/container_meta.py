@@ -1161,9 +1161,7 @@ _DOCX_VANISH_RE = re.compile(_WX_TAG + rb"vanish\b")
 # quotes (w:val='FFFFFF') hide from this exact privilege-risk detector.
 # The colour ELEMENT and its val ATTRIBUTE are prefix-tolerant too: both
 # ride the document's (arbitrary) namespace binding.
-_DOCX_WHITE_RE = re.compile(
-    _WX_TAG + rb"color\b[^>]*" + _WX_ATTR + rb"val=([\"'])[Ff]{6}\1"
-)
+_DOCX_WHITE_RE = re.compile(_WX_TAG + rb"color\b[^>]*" + _WX_ATTR + rb"val=([\"'])[Ff]{6}\1")
 # Body-bearing parts, i.e. parts that can carry actual text runs. Every
 # other word/*.xml part (styles.xml, numbering.xml, settings.xml,
 # theme/*.xml, fontTable.xml ...) is Word's formatting machinery: a white
@@ -1186,19 +1184,29 @@ _DOCX_BODY_PART_RE = re.compile(
 # Prefix-tolerant on both the rPr and color elements (namespace prefixes are
 # arbitrary -- see the _WX_TAG note above).
 _DOCX_APPLIED_WHITE_RE = re.compile(
-    _WX_TAG + rb"rPr\b(?:(?!" + _WX_CLOSE + rb"rPr>).)*?"
-    + _WX_TAG + rb"color\b[^>]*" + _WX_ATTR + rb"val=([\"'])[Ff]{6}\1",
+    _WX_TAG
+    + rb"rPr\b(?:(?!"
+    + _WX_CLOSE
+    + rb"rPr>).)*?"
+    + _WX_TAG
+    + rb"color\b[^>]*"
+    + _WX_ATTR
+    + rb"val=([\"'])[Ff]{6}\1",
     re.S,
 )
 
 
 def _is_docx_body_part(name: str) -> bool:
     return bool(_DOCX_BODY_PART_RE.match(name))
+
+
 # highlight is a DrawingML name too (a:highlight, shape-text run property),
 # so it gets the scoped dialect — see the _WML_TAG note.
 _DOCX_HIGHLIGHT_RE = re.compile(_WML_TAG + rb"highlight\b")
 # commentRangeStart/End/Reference are unique to WordprocessingML.
-_DOCX_COMMENT_MARKER_RE = re.compile(_WX_TAG + rb"(?:commentRangeStart|commentRangeEnd|commentReference)\b")
+_DOCX_COMMENT_MARKER_RE = re.compile(
+    _WX_TAG + rb"(?:commentRangeStart|commentRangeEnd|commentReference)\b"
+)
 # Anything that makes a part worth an XML-aware pass on clean.
 #
 # Prefix tolerance matters double here: this regex is the GATE for the whole
@@ -1310,7 +1318,9 @@ def _inspect_docx_legal(zf: zipfile.ZipFile, budget: list[int]) -> tuple[dict, l
     }
     findings: list[str] = []
     if comment_parts:
-        findings.append(f"docx-comments: {comment_count} comment(s) across {len(comment_parts)} part(s)")
+        findings.append(
+            f"docx-comments: {comment_count} comment(s) across {len(comment_parts)} part(s)"
+        )
     if ins or de or fmt_changes:
         findings.append(
             f"docx-tracked-changes: insertions={ins} deletions={de} format-changes={fmt_changes}"
@@ -1486,9 +1496,7 @@ def _inspect_ooxml_layer_a(data: bytes, fmt: str) -> tuple[int, list[dict], list
                     continue
                 xml = _read_zip_member(zf, info, budget).decode("utf-8", errors="surrogateescape")
                 if fmt == "docx":
-                    n, h = _inspect_text_runs(
-                        xml, _W_T_OPEN_RE, _W_T_CLOSE_RE
-                    )
+                    n, h = _inspect_text_runs(xml, _W_T_OPEN_RE, _W_T_CLOSE_RE)
                 elif fmt == "xlsx":
                     n, h = _inspect_text_runs(xml, re.compile(r"<t\b[^>]*>"), re.compile(r"</t>"))
                 else:
@@ -1575,9 +1583,7 @@ def extract_docx_deleted_text(data: bytes, *, min_len: int = 4) -> list[str]:
                 name = info.filename
                 if not _is_docx_content_part(name):
                     continue
-                xml = _read_zip_member(zf, info, budget).decode(
-                    "utf-8", errors="surrogateescape"
-                )
+                xml = _read_zip_member(zf, info, budget).decode("utf-8", errors="surrogateescape")
                 for _os, oe, cs, _ce in _iter_tag_blocks(
                     xml, _W_DELTEXT_OPEN_RE, _W_DELTEXT_CLOSE_RE
                 ):
@@ -1828,7 +1834,9 @@ def _layer_a_body_part(fmt: str, name: str) -> bool:
     if fmt == "docx":
         return name == "word/document.xml"
     if fmt == "xlsx":
-        return bool(re.match(r"^xl/worksheets/sheet\d+\.xml$", name)) or name == "xl/sharedStrings.xml"
+        return (
+            bool(re.match(r"^xl/worksheets/sheet\d+\.xml$", name)) or name == "xl/sharedStrings.xml"
+        )
     if fmt == "pptx":
         return bool(re.match(r"^ppt/slides/slide\d+\.xml$", name))
     return True
@@ -2197,6 +2205,8 @@ def _merge_deleted_paragraph_marks_scoped(
         out.append(child)
         i += 1
     return out, merged
+
+
 _DOCX_COMMENT_MARKER_TAGS = frozenset(
     {_W_NS + "commentRangeStart", _W_NS + "commentRangeEnd", _W_NS + "commentReference"}
 )
@@ -2556,6 +2566,47 @@ def _docx_strip_hidden_text(xml_bytes: bytes, model: DocxHiddenModel):
     return out, stats
 
 
+def _docx_strip_highlight(xml_bytes: bytes):
+    """Remove direct Word highlight formatting without deleting visible text.
+
+    Highlighted runs are not concealed runs: keep this pass independent of
+    the hidden-text model and its extractor. Only direct ``w:r/w:rPr``
+    highlights are removed; paragraph marks, style definitions, DrawingML
+    and explicit ``w:val="none"`` overrides are preserved. Style-resolved
+    highlighting remains subject to the existing inspection/verification
+    gate; this helper does not narrow what that gate checks.
+
+    Return None for malformed XML, or byte-identical input when unchanged.
+    The caller only invokes this on budget-capped body-bearing zip members.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_bytes)  # noqa: S314 - budget-capped zip member
+    except ET.ParseError:
+        return None
+
+    stats = {"runs_affected": 0}
+    for run in root.iter(_W_R):
+        rpr = run.find(_W_RPR)
+        if rpr is None:
+            continue
+        removed = False
+        for highlight in rpr.findall(_W_NS + "highlight"):
+            if (highlight.get(_W_VAL) or "").strip().lower() == "none":
+                continue
+            rpr.remove(highlight)
+            removed = True
+        if removed:
+            stats["runs_affected"] += 1
+
+    if not stats["runs_affected"]:
+        return xml_bytes, stats
+    with _scoped_namespace_registration(xml_bytes):
+        out = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    return out, stats
+
+
 def extract_docx_hidden_text(data: bytes) -> list[str]:
     """Every concealed text fragment in a DOCX, for the verify postcondition.
 
@@ -2624,8 +2675,11 @@ def _docx_accept_all(xml_bytes: bytes, *, strip_comment_markers: bool):
         return None
 
     stats = {
-        "unwrapped": 0, "dropped": 0, "markers": 0,
-        "rows_deleted": 0, "paragraphs_merged": 0,
+        "unwrapped": 0,
+        "dropped": 0,
+        "markers": 0,
+        "rows_deleted": 0,
+        "paragraphs_merged": 0,
     }
 
     def walk(elem, depth: int = 0) -> None:
@@ -2733,9 +2787,7 @@ def _docx_legal_clean(
         if strip_hidden_text:
             styles_bytes = b""
             if "word/styles.xml" in set(zin.namelist()):
-                styles_bytes = _read_zip_member(
-                    zin, zin.getinfo("word/styles.xml"), budget
-                )
+                styles_bytes = _read_zip_member(zin, zin.getinfo("word/styles.xml"), budget)
             hidden_model = docx_hidden_model(styles_bytes)
         for info in zin.infolist():
             _check_zip_budget(info, budget)
@@ -2769,9 +2821,7 @@ def _docx_legal_clean(
                 # first would leave it in the derivative.
                 result = _docx_strip_hidden_text(raw, hidden_model)
                 if result is None:
-                    actions.append(
-                        f"warning: {name} not well-formed XML; hidden text not removed"
-                    )
+                    actions.append(f"warning: {name} not well-formed XML; hidden text not removed")
                 else:
                     raw, st = result
                     if st["runs_removed"]:
@@ -2780,6 +2830,20 @@ def _docx_legal_clean(
                         actions.append(
                             f"hidden-text: removed {st['runs_removed']} concealed run(s) "
                             f"({st['chars_removed']} chars) from {name}"
+                        )
+                # Concealed runs have already been removed. Strip only
+                # highlighter marks from the remaining, visible runs.
+                highlight_result = _docx_strip_highlight(raw)
+                if highlight_result is None:
+                    actions.append(
+                        f"warning: {name} not well-formed XML; highlight formatting not removed"
+                    )
+                else:
+                    raw, highlight_stats = highlight_result
+                    if highlight_stats["runs_affected"]:
+                        actions.append(
+                            "hidden-text: removed highlight formatting from "
+                            f"{highlight_stats['runs_affected']} run(s) in {name}"
                         )
             kept.append((info, raw))
 
@@ -2793,9 +2857,7 @@ def _docx_legal_clean(
                     if n:
                         actions.append(f"prune dangling relationships x{n} in {info.filename}")
                 elif info.filename == "[Content_Types].xml":
-                    new, n = _prune_ooxml_overrides(
-                        raw.decode("utf-8", errors="replace"), dropped
-                    )
+                    new, n = _prune_ooxml_overrides(raw.decode("utf-8", errors="replace"), dropped)
                     if n:
                         actions.append(f"prune Content_Types overrides x{n}")
                         out_raw = new.encode("utf-8")
@@ -2922,9 +2984,7 @@ def _xlsx_legal_clean(
                     if n:
                         actions.append(f"prune dangling relationships x{n} in {info.filename}")
                 elif info.filename == "[Content_Types].xml":
-                    new, n = _prune_ooxml_overrides(
-                        raw.decode("utf-8", errors="replace"), dropped
-                    )
+                    new, n = _prune_ooxml_overrides(raw.decode("utf-8", errors="replace"), dropped)
                     if n:
                         actions.append(f"prune Content_Types overrides x{n}")
                         out_raw = new.encode("utf-8")
@@ -3019,16 +3079,17 @@ def inspect_odt(data: bytes) -> tuple[bool, bool, list[str], dict]:
 
 # Same quote-tolerance fix as _DOCX_WHITE_RE above: a hidden slide marked
 # with show='0' (single-quoted) was invisible to this detector.
-_PPTX_HIDDEN_SLIDE_RE = re.compile(
-    rb'<(?:\w+:)?sld\b[^>]*\bshow=(["\'])(?:0|false)\1'
-)
+_PPTX_HIDDEN_SLIDE_RE = re.compile(rb'<(?:\w+:)?sld\b[^>]*\bshow=(["\'])(?:0|false)\1')
 
 _PART_PANE_MAP = (
     (re.compile(r"^word/document\.xml$"), "body"),
     (re.compile(r"^word/header"), "header"),
     (re.compile(r"^word/footer"), "footer"),
     (re.compile(r"^word/footnotes\.xml$|^word/endnotes\.xml$"), "footnote"),
-    (re.compile(r"^(?:word|xl|ppt)/comments|^xl/threadedComments/|^ppt/commentAuthors\.xml$"), "comment"),
+    (
+        re.compile(r"^(?:word|xl|ppt)/comments|^xl/threadedComments/|^ppt/commentAuthors\.xml$"),
+        "comment",
+    ),
     (re.compile(r"^ppt/notesSlides/"), "note"),
     (re.compile(r"^docProps/|^customXml/"), "metadata"),
 )
@@ -3041,9 +3102,7 @@ def _part_pane(name: str) -> str:
     return "other"
 
 
-def ooxml_review_diff(
-    orig: bytes, cleaned: bytes, fmt: str, *, limit: int = 50
-) -> dict:
+def ooxml_review_diff(orig: bytes, cleaned: bytes, fmt: str, *, limit: int = 50) -> dict:
     """Per-part reviewer diff of an OOXML clean.
 
     For each part present in both archives, reports per-character Layer A
@@ -3073,23 +3132,30 @@ def ooxml_review_diff(
     for name in sorted(before):
         pane = _part_pane(name)
         if name not in after:
-            if name.startswith(("docProps/", "customXml/", "[Content_Types]")) or name.endswith(".rels"):
+            if name.startswith(("docProps/", "customXml/", "[Content_Types]")) or name.endswith(
+                ".rels"
+            ):
                 continue  # plumbing drops are already itemized in actions
             parts.append({"part": name, "pane": pane, "removed_part": True})
             total_removed_parts += 1
             continue
         if before[name] == after[name]:
             continue
-        d = diff_entries(before[name].decode("utf-8", errors="surrogateescape"),
-                         after[name].decode("utf-8", errors="surrogateescape"), limit=limit)
+        d = diff_entries(
+            before[name].decode("utf-8", errors="surrogateescape"),
+            after[name].decode("utf-8", errors="surrogateescape"),
+            limit=limit,
+        )
         if d["changed_total"]:
-            parts.append({
-                "part": name,
-                "pane": pane,
-                "changed_total": d["changed_total"],
-                "truncated": d["truncated"],
-                "entries": d["entries"],
-            })
+            parts.append(
+                {
+                    "part": name,
+                    "pane": pane,
+                    "changed_total": d["changed_total"],
+                    "truncated": d["truncated"],
+                    "entries": d["entries"],
+                }
+            )
             total_changed += d["changed_total"]
             truncated = truncated or d["truncated"]
     return {
@@ -3186,9 +3252,7 @@ def _pptx_legal_clean(
                     if n:
                         actions.append(f"prune dangling relationships x{n} in {info.filename}")
                 elif info.filename == "[Content_Types].xml":
-                    new, n = _prune_ooxml_overrides(
-                        raw.decode("utf-8", errors="replace"), dropped
-                    )
+                    new, n = _prune_ooxml_overrides(raw.decode("utf-8", errors="replace"), dropped)
                     if n:
                         actions.append(f"prune Content_Types overrides x{n}")
                         out_raw = new.encode("utf-8")
@@ -3717,9 +3781,7 @@ def inspect_pdf(path: Path, data: bytes) -> tuple[bool, bool, list[str], dict]:
     metadata_present, provenance_present = pdf_deep_image_scan(data)
     if provenance_present:
         has_c2pa = True
-        findings.append(
-            "embedded-image provenance: an image XObject carries a C2PA/JUMBF marker"
-        )
+        findings.append("embedded-image provenance: an image XObject carries a C2PA/JUMBF marker")
     elif metadata_present:
         findings.append("embedded-image metadata: an image XObject carries EXIF/APPn metadata")
 
@@ -4027,9 +4089,7 @@ def strip_pdf_image_metadata(
         new_dict_content = (
             dict_content[:len_start] + str(len(stripped)).encode("ascii") + dict_content[len_end:]
         )
-        replacement = (
-            b"<<" + new_dict_content + b">>" + data[dict_close + 2 : start] + stripped
-        )
+        replacement = b"<<" + new_dict_content + b">>" + data[dict_close + 2 : start] + stripped
         edits.append((dict_open, end, replacement))
     if not edits:
         return data, 0
@@ -4136,9 +4196,7 @@ def strip_pdf_image_gps(data: bytes) -> tuple[bytes, int, list[str]]:
         new_dict_content = (
             dict_content[:len_start] + str(len(stripped)).encode("ascii") + dict_content[len_end:]
         )
-        replacement = (
-            b"<<" + new_dict_content + b">>" + data[dict_close + 2 : start] + stripped
-        )
+        replacement = b"<<" + new_dict_content + b">>" + data[dict_close + 2 : start] + stripped
         edits.append((dict_open, end, replacement))
     if not edits:
         return data, 0, []
