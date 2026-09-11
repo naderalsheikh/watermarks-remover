@@ -148,3 +148,29 @@ def test_upgrade_preserves_legacy_execution_and_round_trips_new_pin(tmp_path, qu
         assert s.get(Job, "j").worker_mode == "docker"
         assert s.get(Job, "j").worker_image == OLD_IMAGE
     engine.dispose()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_batch_actor_lookup_does_not_hold_transaction_during_worker(queued, monkeypatch, legacy):
+    from app.models import Batch
+
+    cfg, s = queued
+    s.add(Batch(id="b", matter_id="m", kind="inspect", requested_by="mail:legacy", total=1))
+    s.flush()
+    job = s.get(Job, "j")
+    job.batch_id = "b"
+    if legacy:
+        job.requested_by = None
+    s.commit()
+    seen = []
+
+    def execute(cmd, **kwargs):
+        assert not s.in_transaction(), "worker launch holds a database transaction"
+        seen.append(cmd)
+        return SimpleNamespace(returncode=1, stderr="synthetic exit")
+
+    monkeypatch.setattr(runner.subprocess, "run", execute)
+    result = runner.run_job(cfg, s, "j", kind="inspect")
+    assert seen, result.stderr_tail
+    expected = "mail:legacy" if legacy else "oidc:test"
+    assert seen[0][seen[0].index("--operator-id") + 1] == expected

@@ -309,10 +309,12 @@ def run_job(
     job.status = "running"
     if job.worker_mode is None:  # Jobs admitted before execution pinning.
         job.worker_image = cfg.worker_image if cfg.worker_mode == "docker" else ""
+    # Resolve legacy attribution before committing: a post-commit Batch
+    # lookup would reopen SQLite's write transaction for the entire worker.
+    batch = s.get(Batch, job.batch_id) if not job.requested_by and job.batch_id else None
+    actor = job.requested_by or (batch.requested_by if batch else "operator")
     s.commit()
 
-    batch = s.get(Batch, job.batch_id) if job.batch_id else None
-    actor = job.requested_by or (batch.requested_by if batch else "operator")
     common = dict(
         input_path=staged_input,
         output_dir=output_dir,
