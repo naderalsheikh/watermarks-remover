@@ -149,7 +149,9 @@ class _ControlledWorker:
         finally:
             with self._lock:
                 self._current -= 1
-        return RunnerResult(rc=0, stderr_tail="", timed_out=False, output_dir=Path("/nonexistent-output"))
+        return RunnerResult(
+            rc=0, stderr_tail="", timed_out=False, output_dir=Path("/nonexistent-output")
+        )
 
 
 # --- create returns immediately -------------------------------------------------
@@ -196,7 +198,11 @@ def test_polling_shows_partial_mixed_results(tmp_path, monkeypatch):
         worker = _ControlledWorker()
         monkeypatch.setattr("app.dispatcher.run_job", worker)
         mid = _matter(c)
-        docs = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt"), _upload(c, mid, "spa.docx")]
+        docs = [
+            _upload(c, mid, "spa.docx"),
+            _upload(c, mid, "spa.txt"),
+            _upload(c, mid, "spa.docx"),
+        ]
 
         r = _create_batch(c, mid, docs, "inspect")
         assert r.status_code == 200, r.text
@@ -429,7 +435,9 @@ def test_cancel_batch_concurrent_claim_does_not_flip_running_job(tmp_path, monke
         assert r.status_code == 200, r.text
         bid = r.json()["id"]
         with sf() as s:
-            ids = [row[0] for row in s.query(Job.id).filter(Job.batch_id == bid).order_by(Job.id).all()]
+            ids = [
+                row[0] for row in s.query(Job.id).filter(Job.batch_id == bid).order_by(Job.id).all()
+            ]
         claimed = ids[0]  # the one "the dispatcher claims" mid-race
 
         def _claim_mid_race(conn, clauseelement, multiparams, params, execution_options):
@@ -515,10 +523,23 @@ def test_cancel_batch_concurrent_claim_does_not_flip_running_job(tmp_path, monke
         final = _wait_batch_done(c, mid, bid)
         # Counts that state what ACTUALLY happened: one cancel, one
         # normal finish -- not "two cancels".
-        assert final["summary"] == {"requested": 2, "done": 1, "refused": 0, "failed": 1, "queued": 0, "running": 0}
+        assert final["summary"] == {
+            "requested": 2,
+            "done": 1,
+            "refused": 0,
+            "failed": 1,
+            "queued": 0,
+            "running": 0,
+        }
         done_ev = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
         assert len(done_ev) == 1
-        assert done_ev[0]["payload"] == {"batch_id": bid, "total": 2, "done": 1, "refused": 0, "failed": 1}
+        assert done_ev[0]["payload"] == {
+            "batch_id": bid,
+            "total": 2,
+            "done": 1,
+            "refused": 0,
+            "failed": 1,
+        }
     finally:
         _close_client(c)
 
@@ -561,7 +582,13 @@ def test_cancel_all_before_any_child_claimed_completes_the_batch(tmp_path, monke
             assert s.get(Batch, bid).finished_utc is not None
         completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
         assert len(completed) == 1
-        assert completed[0]["payload"] == {"batch_id": bid, "total": 2, "done": 0, "refused": 0, "failed": 2}
+        assert completed[0]["payload"] == {
+            "batch_id": bid,
+            "total": 2,
+            "done": 0,
+            "refused": 0,
+            "failed": 2,
+        }
     finally:
         _close_client(c)
 
@@ -794,11 +821,11 @@ def test_batch_rejects_non_bulk_safe_policies(env):
     for policy_id in ("production", "evidence_preservation"):
         r = _create_batch(c, mid, [d], "sanitize", policy_id=policy_id)
         assert r.status_code == 400, policy_id
-        assert "per-finding decisions" in r.json()["detail"] or "no derivative" in r.json()["detail"]
+        assert (
+            "per-finding decisions" in r.json()["detail"] or "no derivative" in r.json()["detail"]
+        )
     assert c.get(f"/v1/matters/{mid}/jobs").json()["total"] == 0
-    assert all(
-        e["action"] not in ("job.inspect", "job.sanitize") for e in _audit_actions(c, mid)
-    )
+    assert all(e["action"] not in ("job.inspect", "job.sanitize") for e in _audit_actions(c, mid))
 
 
 def test_batch_rejects_empty_duplicates_and_unknown_kind(env):
@@ -887,4 +914,3 @@ def test_cancel_batch_unauthorized_oracle_prevented(env):
     r_fake_matter = c.post(f"/v1/matters/nonexistent-matter/batches/{bid}/cancel", headers=headers)
     assert r_fake_matter.status_code == 403
     assert r_fake_matter.json() == {"detail": "missing permission: read"}
-

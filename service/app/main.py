@@ -142,8 +142,7 @@ def _retention_limitations(manifest: dict, actions: list[str]) -> list[str]:
             # The exact combination the test case caught: retained AND no
             # operator justification. Named as such, not buried.
             basis_clause = (
-                " NO OPERATOR LEGAL BASIS WAS SUPPLIED for retaining it "
-                "(legal basis: unspecified)."
+                " NO OPERATOR LEGAL BASIS WAS SUPPLIED for retaining it (legal basis: unspecified)."
             )
         else:
             basis_clause = f" Operator legal basis: {basis}" + (f" — {note}" if note else "") + "."
@@ -480,7 +479,9 @@ def _render_job_certificate_html(
         if release_context.get("recipient_name"):
             recipient_line += f" — {esc(release_context['recipient_name'])}"
         purpose_line = (
-            f"<br>Purpose: {esc(release_context['purpose'])}" if release_context.get("purpose") else ""
+            f"<br>Purpose: {esc(release_context['purpose'])}"
+            if release_context.get("purpose")
+            else ""
         )
         intent_line = (
             "Intended to leave the organization"
@@ -606,10 +607,12 @@ def _render_job_certificate_html(
         v_pass = verification.get("pass")
         checks = verification.get("checks") or []
         checks_html = (
-            "".join(f"<li>{esc(c)}</li>" for c in checks) if checks else "<li>(no detail recorded)</li>"
+            "".join(f"<li>{esc(c)}</li>" for c in checks)
+            if checks
+            else "<li>(no detail recorded)</li>"
         )
         verification_html = (
-            f"<p>Result: <span class=\"{'chain-ok' if v_pass else 'chain-broken'}\">"
+            f'<p>Result: <span class="{"chain-ok" if v_pass else "chain-broken"}">'
             f"{'passed' if v_pass else 'FAILED'}</span></p><ul>{checks_html}</ul>"
         )
 
@@ -648,7 +651,7 @@ def _render_job_certificate_html(
                 f"<tr><td>{esc(d.get('subtype', ''))}</td>"
                 f"<td>{esc(d.get('action', ''))}</td>"
                 f"<td>{esc(d.get('reason') or '—')}</td>"
-                f"<td><span class=\"{cls}\">{esc(label)}</span></td>"
+                f'<td><span class="{cls}">{esc(label)}</span></td>'
                 f"<td>{esc(basis or 'unspecified')}</td></tr>"
             )
         dispositions_html = (
@@ -679,7 +682,9 @@ def _render_job_certificate_html(
     # retained half stays a policy position on purpose: retention IS the
     # policy's standing decision, independent of what one file contained.
     residual_html = ""
-    if residual_metadata and (residual_metadata.get("stripped") or residual_metadata.get("retained")):
+    if residual_metadata and (
+        residual_metadata.get("stripped") or residual_metadata.get("retained")
+    ):
         stripped = residual_metadata.get("stripped") or []
         retained = residual_metadata.get("retained") or []
         stripped_html = (
@@ -1253,6 +1258,7 @@ class BatchReleaseBody(BaseModel):
     intended_external: bool = True
     reason: str = ""
 
+
 class AttestationBody(BaseModel):
     matter_id: str
     document_id: str
@@ -1356,10 +1362,7 @@ def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
     affected_job_ids = [
         row[0]
         for row in s.query(Job.id)
-        .filter(
-            (Job.status == "running")
-            | ((Job.status == "queued") & (Job.batch_id.is_(None)))
-        )
+        .filter((Job.status == "running") | ((Job.status == "queued") & (Job.batch_id.is_(None))))
         .all()
     ]
     result = s.execute(
@@ -1443,7 +1446,7 @@ def _log_startup_posture(cfg: Config, swept: int, storage, *, reconciled_release
         )
     if cfg.worker_mode != "docker":
         log.warning(
-            'worker_mode=%s: sanitize/inspect jobs run as a plain child '
+            "worker_mode=%s: sanitize/inspect jobs run as a plain child "
             "process of this API, sharing its filesystem access — not "
             "isolated from a hostile file. Set COUNSELCLEAR_WORKER_MODE="
             "docker (see compose.yaml's legal profile) for real isolation.",
@@ -1698,7 +1701,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
         key = cfg.ensure_custody_signing_key().public_key()
         pem = key.public_bytes(
-            encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         ).decode("utf-8")
         return {"key_id": custody_key_id(cfg), "algorithm": "ed25519", "public_key_pem": pem}
 
@@ -1713,7 +1717,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         return {
             "product": "CounselClear",
             "message": "This is the CounselClear API root. Authenticated resources live under /v1/...",
-            "unauthenticated_routes": ["/health", "/health/ready", "/v1/auth/login", "/v1/auth/config"],
+            "unauthenticated_routes": [
+                "/health",
+                "/health/ready",
+                "/v1/auth/login",
+                "/v1/auth/config",
+            ],
             "docs": "docs/COUNSELCLEAR_DESIGN.md, docs/COUNSELCLEAR_PRODUCTION.md",
         }
 
@@ -1805,8 +1814,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # COUNSELCLEAR_COOKIE_SECURE=true/false overrides for proxy
         # deployments that cannot forward the proto.
         response.set_cookie(
-            "cc_session", issue_session(cfg),
-            httponly=True, samesite="strict", secure=_cookie_secure(request),
+            "cc_session",
+            issue_session(cfg),
+            httponly=True,
+            samesite="strict",
+            secure=_cookie_secure(request),
         )
         return {"ok": True}
 
@@ -1989,7 +2001,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         }
 
     @app.post("/v1/matters")
-    def create_matter(body: MatterBody, user: str = Depends(principal), s: Session = Depends(db_session)):
+    def create_matter(
+        body: MatterBody, user: str = Depends(principal), s: Session = Depends(db_session)
+    ):
         matter = Matter(name=body.name)
         s.add(matter)
         s.flush()
@@ -2019,7 +2033,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     # --- documents ----------------------------------------------------------
 
-    def _upload_document_bytes(matter_id: str, filename: str, data: bytes, user: str, s: Session) -> Document:
+    def _upload_document_bytes(
+        matter_id: str, filename: str, data: bytes, user: str, s: Session
+    ) -> Document:
         """Shared body of upload_document, taking already-read bytes rather
         than an UploadFile -- lets a non-HTTP caller (POST .../demo-seed,
         PR 45) create a real Document through the exact same scan/storage/
@@ -2410,8 +2426,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # the only structured record the predecessor ever produced.
             # Omitted entirely for a first release (None), never a
             # fabricated or null-typed link.
-            **({"predecessor_release_id": release.predecessor_release_id}
-               if release.predecessor_release_id else {}),
+            **(
+                {"predecessor_release_id": release.predecessor_release_id}
+                if release.predecessor_release_id
+                else {}
+            ),
             "original_sha256": doc.sha256,
             "created_at": release.created_utc,
             "finished_at": release.finished_utc,
@@ -2505,7 +2524,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if body.layer_b is not None:
             if not cfg.watermark_tools_enabled:
                 raise HTTPException(403, "watermark tools are disabled")
-            claims = verify_attestation(cfg, body.layer_b.token, matter_id=matter_id, doc_sha256=doc.sha256)
+            claims = verify_attestation(
+                cfg, body.layer_b.token, matter_id=matter_id, doc_sha256=doc.sha256
+            )
             if claims is None:
                 raise HTTPException(403, "invalid or expired attestation token")
             if claims.get("sub") != user:
@@ -2582,8 +2603,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 # rides the audit chain's own payload too (not just the
                 # Release row) so it is tamper-evident like every other
                 # custody fact -- the chain hash commits to it.
-                **({"predecessor_release_id": predecessor_release_id}
-                   if predecessor_release_id else {}),
+                **(
+                    {"predecessor_release_id": predecessor_release_id}
+                    if predecessor_release_id
+                    else {}
+                ),
             },
         )
         s.commit()
@@ -2624,7 +2648,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         s.commit()
 
-        audit_refs = {"release_created_seq": created_event.seq, "release_terminal_seq": terminal_event.seq}
+        audit_refs = {
+            "release_created_seq": created_event.seq,
+            "release_terminal_seq": terminal_event.seq,
+        }
         release_result = _build_release_result(
             s, matter=matter, release=release, job=finished, doc=doc, audit_refs=audit_refs
         )
@@ -2650,7 +2677,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         checks before ever showing the button.
         """
         if cfg.oidc_enabled:
-            raise HTTPException(403, "sample-matter seeding is only available in local-password mode")
+            raise HTTPException(
+                403, "sample-matter seeding is only available in local-password mode"
+            )
 
         matter = s.query(Matter).filter_by(name=_DEMO_MATTER_NAME, is_demo=True).first()
         if matter is None:
@@ -2667,7 +2696,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             )
             s.commit()
 
-        existing_docs = {d.filename: d for d in s.query(Document).filter_by(matter_id=matter.id).all()}
+        existing_docs = {
+            d.filename: d for d in s.query(Document).filter_by(matter_id=matter.id).all()
+        }
         released_doc_ids = {
             r[0] for r in s.query(Release.document_id).filter_by(matter_id=matter.id).all()
         }
@@ -2795,7 +2826,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             }
             for j in jobs
         ]
-        summary = {"requested": b.total, "done": 0, "refused": 0, "failed": 0, "queued": 0, "running": 0}
+        summary = {
+            "requested": b.total,
+            "done": 0,
+            "refused": 0,
+            "failed": 0,
+            "queued": 0,
+            "running": 0,
+        }
         for r in results:
             summary[r["status"]] = summary.get(r["status"], 0) + 1
         return {
@@ -2866,9 +2904,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         s.add(batch)
         s.flush()  # assigns batch.id
-        job_kw = {"policy_id": body.policy_id, "reason": body.reason[:500]} if body.kind == "sanitize" else {}
+        job_kw = (
+            {"policy_id": body.policy_id, "reason": body.reason[:500]}
+            if body.kind == "sanitize"
+            else {}
+        )
         for doc_id in body.document_ids:
-            s.add(Job(matter_id=matter_id, document_id=doc_id, kind=body.kind, batch_id=batch.id, **job_kw))
+            s.add(
+                Job(
+                    matter_id=matter_id,
+                    document_id=doc_id,
+                    kind=body.kind,
+                    batch_id=batch.id,
+                    **job_kw,
+                )
+            )
         append_event(
             s,
             matter_id=matter_id,
@@ -3033,7 +3083,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # cancelled job's sibling Release (if any) needs syncing too.
         cancelled_ids = [
             row[0]
-            for row in s.query(Job.id).filter(Job.batch_id == batch_id, Job.status == "queued").all()
+            for row in s.query(Job.id)
+            .filter(Job.batch_id == batch_id, Job.status == "queued")
+            .all()
         ]
         cancelled = 0
         if cancelled_ids:
@@ -3131,7 +3183,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     j,
                     include_result=False,
                     release_id=releases_by_job[j.id].id if j.id in releases_by_job else None,
-                    profile_id=releases_by_job[j.id].profile_id if j.id in releases_by_job else None,
+                    profile_id=releases_by_job[j.id].profile_id
+                    if j.id in releases_by_job
+                    else None,
                 )
                 for j in jobs
             ],
@@ -3176,9 +3230,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         writer = csv.writer(buf)
         writer.writerow(
             [
-                "job_id", "document_id", "document_filename", "kind", "policy_id",
-                "status", "error", "verification_pass", "created_utc", "finished_utc",
-                "release_id", "profile_id",
+                "job_id",
+                "document_id",
+                "document_filename",
+                "kind",
+                "policy_id",
+                "status",
+                "error",
+                "verification_pass",
+                "created_utc",
+                "finished_utc",
+                "release_id",
+                "profile_id",
             ]
         )
         for job, filename in jobs:
@@ -3186,10 +3249,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             release = releases_by_job.get(job.id)
             writer.writerow(
                 [
-                    job.id, job.document_id, filename, job.kind, job.policy_id,
-                    job.status, job.error, result.get("verification_pass", ""),
-                    job.created_utc, job.finished_utc or "",
-                    release.id if release else "", release.profile_id if release else "",
+                    job.id,
+                    job.document_id,
+                    filename,
+                    job.kind,
+                    job.policy_id,
+                    job.status,
+                    job.error,
+                    result.get("verification_pass", ""),
+                    job.created_utc,
+                    job.finished_utc or "",
+                    release.id if release else "",
+                    release.profile_id if release else "",
                 ]
             )
         return Response(
@@ -3211,7 +3282,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         _require(matter_id, "read", s, user)
         job = _job(matter_id, job_id, s)
         release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
-        return _job_dict(job, release_id=release.id if release else None, profile_id=release.profile_id if release else None)
+        return _job_dict(
+            job,
+            release_id=release.id if release else None,
+            profile_id=release.profile_id if release else None,
+        )
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}/manifest")
     def job_manifest(
@@ -3255,9 +3330,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             policy_description = policy_meta["description"] if policy_meta else None
 
         limitations: list[str] = _retention_limitations(manifest, actions)
-        dispositions: list[dict] = [
-            d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)
-        ] if job.kind == "sanitize" else []
+        dispositions: list[dict] = (
+            [d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)]
+            if job.kind == "sanitize"
+            else []
+        )
         # Cross-check, not decoration: the disposition ledger is built from
         # the verifier's own before/after observation, while limitations
         # come from the action records. If the ledger says a finding is
@@ -3269,7 +3346,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # tests/test_disposition_ledger.py so this branch stays unreachable
         # in practice.
         retained_rows = [
-            d for d in dispositions
+            d
+            for d in dispositions
             if d.get("postcondition") in ("retained_as_planned", "retained_unplanned")
         ]
         if retained_rows and not limitations:
@@ -3303,7 +3381,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         job_events = [
             ev
             for ev in s.query(AuditEvent)
-            .filter(AuditEvent.matter_id == matter.id, AuditEvent.action.in_(("job.inspect", "job.sanitize")))
+            .filter(
+                AuditEvent.matter_id == matter.id,
+                AuditEvent.action.in_(("job.inspect", "job.sanitize")),
+            )
             .all()
             if (ev.payload or {}).get("job_id") == job.id
         ]
@@ -3352,8 +3433,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # derivative is produced): None -> section absent, same as
         # policy_html.
         attestation_kind = (
-            "signature_break_attested" if job.attestation else "none"
-        ) if job.kind == "sanitize" else None
+            ("signature_break_attested" if job.attestation else "none")
+            if job.kind == "sanitize"
+            else None
+        )
 
         body = _render_job_certificate_html(
             matter_id=matter.id,
@@ -3447,7 +3530,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body, policy_id, _limitations = _build_certificate_html(
             s, matter=matter, job=job, doc=doc, generated_by=user
         )
-        _append_certificate_issued(s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id)
+        _append_certificate_issued(
+            s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id
+        )
         s.commit()
         return Response(content=body, media_type="text/html")
 
@@ -3540,8 +3625,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "  release_packet.json -- machine-readable manifest: content hashes of every\n"
             "                     file in this packet, audit references, an Ed25519\n"
             "                     signature over the whole packet's metadata+hashes\n"
-            "                     (see its \"signature\" field), and the anchoring\n"
-            "                     status (see its own \"anchor\" field). Check it with\n"
+            '                     (see its "signature" field), and the anchoring\n'
+            '                     status (see its own "anchor" field). Check it with\n'
             "                     tools/counselclear_verify_release_packet.py.\n"
             "  README.txt      -- this file\n\n"
             "The packet's signature is made by this CounselClear deployment's\n"
@@ -3587,7 +3672,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         def _sha256(data: bytes) -> str:
             return hashlib.sha256(data).hexdigest()
 
-        policy_version = (job.result_json or {}).get("manifest", {}).get("policy", {}).get("version", 1)
+        policy_version = (
+            (job.result_json or {}).get("manifest", {}).get("policy", {}).get("version", 1)
+        )
         # Nullable: absent for a bundle pulled from a Job created via the
         # legacy, unwrapped /sanitize-jobs route (no Release exists for
         # it). release_id is additive, not a replacement for packet_id --
@@ -3646,8 +3733,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # document. Like attestation above it is part of the SIGNED
             # canonical bytes -- a custody fact the signature must cover
             # -- and omitted for a first release rather than nulled.
-            **({"predecessor_release_id": release.predecessor_release_id}
-               if release and release.predecessor_release_id else {}),
+            **(
+                {"predecessor_release_id": release.predecessor_release_id}
+                if release and release.predecessor_release_id
+                else {}
+            ),
             "policy": {
                 "id": policy_id,
                 "version": policy_version if policy_id else None,
@@ -3705,7 +3795,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # changes a release (see test_tsa_anchor_client.py for the
         # never-blocks contract).
         if anchor_enabled():
-            release_packet["signature"] = sign_release_packet(cfg, release_packet, exclude_anchor=True)
+            release_packet["signature"] = sign_release_packet(
+                cfg, release_packet, exclude_anchor=True
+            )
             sig_bytes = bytes.fromhex(release_packet["signature"]["value"])
             anchor = request_anchor(sig_bytes)
             if anchor["type"] == "rfc3161-tsa":
@@ -3849,11 +3941,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     ):
         _require(matter_id, "admin", s, user)
         _matter(matter_id, s)
-        if (
-            body.user_id == user
-            and body.perm in ("admin", "read")
-            and not body.confirm_self_revoke
-        ):
+        if body.user_id == user and body.perm in ("admin", "read") and not body.confirm_self_revoke:
             raise HTTPException(
                 400,
                 f"revoking your own {body.perm!r} grant requires confirm_self_revoke=true "
@@ -4012,9 +4100,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             result = job.result_json or {}
             manifest = result.get("manifest") or {} if job.kind == "sanitize" else {}
             derivative_sha256 = manifest.get("derivative", {}).get("sha256") or ""
-            dispositions = [
-                d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)
-            ] if job.kind == "sanitize" else []
+            dispositions = (
+                [d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)]
+                if job.kind == "sanitize"
+                else []
+            )
             legal_justifications: dict = job.legal_justifications or {}
 
             common = {
@@ -4036,17 +4126,31 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     sub = str(d.get("subtype") or "")
                     act = str(d.get("action") or "")
                     post = str(d.get("postcondition") or "")
-                    just = legal_justifications.get(sub) if isinstance(legal_justifications, dict) else None
-                    basis = d.get("legal_basis") or (just.get("basis") if isinstance(just, dict) else None) or "unspecified"
-                    note = (just.get("note") if isinstance(just, dict) else None) or d.get("reason") or ""
+                    just = (
+                        legal_justifications.get(sub)
+                        if isinstance(legal_justifications, dict)
+                        else None
+                    )
+                    basis = (
+                        d.get("legal_basis")
+                        or (just.get("basis") if isinstance(just, dict) else None)
+                        or "unspecified"
+                    )
+                    note = (
+                        (just.get("note") if isinstance(just, dict) else None)
+                        or d.get("reason")
+                        or ""
+                    )
                     rec = dict(common)
-                    rec.update({
-                        "finding_subtype": sub,
-                        "action": act,
-                        "postcondition": post,
-                        "legal_basis": basis,
-                        "operator_note": note,
-                    })
+                    rec.update(
+                        {
+                            "finding_subtype": sub,
+                            "action": act,
+                            "postcondition": post,
+                            "legal_basis": basis,
+                            "operator_note": note,
+                        }
+                    )
                     records.append(rec)
             elif legal_justifications:
                 for sub, just in legal_justifications.items():
@@ -4054,31 +4158,39 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     basis = (just.get("basis") if isinstance(just, dict) else None) or "unspecified"
                     note = (just.get("note") if isinstance(just, dict) else None) or ""
                     rec = dict(common)
-                    rec.update({
-                        "finding_subtype": str(sub),
-                        "action": str(act),
-                        "postcondition": "",
-                        "legal_basis": basis,
-                        "operator_note": note,
-                    })
+                    rec.update(
+                        {
+                            "finding_subtype": str(sub),
+                            "action": str(act),
+                            "postcondition": "",
+                            "legal_basis": basis,
+                            "operator_note": note,
+                        }
+                    )
                     records.append(rec)
             else:
                 rec = dict(common)
-                rec.update({
-                    "finding_subtype": "",
-                    "action": "refuse" if release.status == "refused" else (job.kind or ""),
-                    "postcondition": "",
-                    "legal_basis": "unspecified",
-                    "operator_note": job.error if release.status in ("refused", "failed") else "",
-                })
+                rec.update(
+                    {
+                        "finding_subtype": "",
+                        "action": "refuse" if release.status == "refused" else (job.kind or ""),
+                        "postcondition": "",
+                        "legal_basis": "unspecified",
+                        "operator_note": job.error
+                        if release.status in ("refused", "failed")
+                        else "",
+                    }
+                )
                 records.append(rec)
 
         if fmt == "json":
-            return JSONResponse({
-                "matter_id": matter_id,
-                "total_records": len(records),
-                "records": records,
-            })
+            return JSONResponse(
+                {
+                    "matter_id": matter_id,
+                    "total_records": len(records),
+                    "records": records,
+                }
+            )
 
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -4234,7 +4346,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # cross-matter problem list.
             demo_ids = {
                 r[0]
-                for r in s.query(Matter.id).filter(Matter.id.in_(matter_ids), Matter.is_demo.is_(True))
+                for r in s.query(Matter.id).filter(
+                    Matter.id.in_(matter_ids), Matter.is_demo.is_(True)
+                )
             }
             if demo_ids:
                 matter_ids = [m for m in matter_ids if m not in demo_ids]
@@ -4341,7 +4455,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # second exclusion to keep in sync.
             demo_ids = {
                 r[0]
-                for r in s.query(Matter.id).filter(Matter.id.in_(matter_ids), Matter.is_demo.is_(True))
+                for r in s.query(Matter.id).filter(
+                    Matter.id.in_(matter_ids), Matter.is_demo.is_(True)
+                )
             }
             if demo_ids:
                 matter_ids = [m for m in matter_ids if m not in demo_ids]
@@ -4365,9 +4481,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         }
 
         total_matters = s.query(Matter).filter(Matter.id.in_(matter_ids)).count()
-        total_documents = (
-            s.query(Document).filter(Document.matter_id.in_(matter_ids)).count()
-        )
+        total_documents = s.query(Document).filter(Document.matter_id.in_(matter_ids)).count()
         job_counts = {st: 0 for st in ("queued", "running", "done", "failed", "refused")}
         for status, n in (
             s.query(Job.status, func.count(Job.id))
@@ -4378,9 +4492,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             if status in job_counts:  # never KeyError on an unknown stored value
                 job_counts[status] = n
 
-        matter_names = dict(
-            s.query(Matter.id, Matter.name).filter(Matter.id.in_(matter_ids)).all()
-        )
+        matter_names = dict(s.query(Matter.id, Matter.name).filter(Matter.id.in_(matter_ids)).all())
         attention = [
             item
             for item in _attention_items(s, matter_ids, matter_names)
@@ -4518,9 +4630,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     "profile_id": (
                         releases_by_job[job.id].profile_id if job.id in releases_by_job else None
                     ),
-                    "detail": (
-                        f"{len(kept_unreviewed)} finding(s) kept without operator review"
-                    ),
+                    "detail": (f"{len(kept_unreviewed)} finding(s) kept without operator review"),
                     "created_utc": job.finished_utc or job.created_utc,
                 }
             )
@@ -4550,7 +4660,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                             releases_by_job[job.id].id if job.id in releases_by_job else None
                         ),
                         "profile_id": (
-                            releases_by_job[job.id].profile_id if job.id in releases_by_job else None
+                            releases_by_job[job.id].profile_id
+                            if job.id in releases_by_job
+                            else None
                         ),
                         "detail": job.error[:300] or label,
                         "created_utc": job.created_utc,
@@ -4586,8 +4698,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                         "matter_id": m.id,
                         "matter_name": m.name,
                         "detail": (
-                            "no audit or job activity since "
-                            f"{latest.isoformat(timespec='seconds')}"
+                            f"no audit or job activity since {latest.isoformat(timespec='seconds')}"
                         ),
                         "created_utc": m.created_utc,
                     }
@@ -4642,7 +4753,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         }
 
     def _job_dict(
-        j: Job, *, include_result: bool = True, release_id: str | None = None, profile_id: str | None = None
+        j: Job,
+        *,
+        include_result: bool = True,
+        release_id: str | None = None,
+        profile_id: str | None = None,
     ) -> dict:
         """release_id/profile_id (PR 40): nullable, non-derived from a
         query inside this function on purpose -- an inspect job or a job

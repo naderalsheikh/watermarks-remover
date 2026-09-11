@@ -59,7 +59,7 @@ def _loaded_document() -> bytes:
     body = (
         f"<w:p><w:r><w:t>{VISIBLE}</w:t></w:r></w:p>"
         # concealed text, split across two w:t the way Word writes it
-        '<w:p><w:r><w:rPr><w:vanish/></w:rPr>'
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr>"
         f"<w:t>{CONCEALED[:16]}</w:t><w:t>{CONCEALED[16:]}</w:t></w:r></w:p>"
         # tracked deletion whose text must not survive
         f"<w:p><w:del><w:r><w:delText>{DELETED}</w:delText></w:r></w:del></w:p>"

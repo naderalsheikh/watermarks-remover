@@ -56,8 +56,14 @@ _MUTATING = {"strip", "accept_all", "rebuild", "sanitize"}
 # only recognizes that one specific, intended part and not an arbitrary
 # unrelated *.custom.xml part elsewhere in the archive.
 _ALLOWED_DROP_TAGS = (
-    "comment", "customxml", "docprops/custom.xml", "embedding", "externallink",
-    "notesslide", "people", "person",
+    "comment",
+    "customxml",
+    "docprops/custom.xml",
+    "embedding",
+    "externallink",
+    "notesslide",
+    "people",
+    "person",
 )
 
 _PDF_PAGE_RE = re.compile(rb"/Type\s*/Page(?![a-zA-Z])")
@@ -176,9 +182,7 @@ def _pptx_slide_count(names: set[str]) -> int | None:
     return len(slides) if slides else None
 
 
-_INVISIBLE_RE = re.compile(
-    "[\u200b\u200c\u200d\u2060\ufeff\u00ad\u180e\u202a-\u202e\u2066-\u2069]"
-)
+_INVISIBLE_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff\u00ad\u180e\u202a-\u202e\u2066-\u2069]")
 
 
 def visible_projection(text: str) -> str:
@@ -265,8 +269,10 @@ def verify_derivative(
     label = name or "input"
     res_before = inspect_bytes(original, label)
     res_after = inspect_bytes(derivative, label)
-    before = pre_present if pre_present is not None else _present_subtypes(
-        res_before.kind, res_before.report
+    before = (
+        pre_present
+        if pre_present is not None
+        else _present_subtypes(res_before.kind, res_before.report)
     )
     after = _present_subtypes(res_after.kind, res_after.report)
     still_there = sorted(mutating & after)
@@ -299,8 +305,10 @@ def verify_derivative(
         producer_ok = pdf_legal.producer_is_allowlisted(d_info)
         orig_producer = (o_info.get("producer") or "").strip()
         # A qpdf stamp is allowed; the document's *original* producer is not.
-        leaked = bool(orig_producer) and not _QPDF_RE.match(orig_producer) and (
-            orig_producer.encode("latin-1", errors="ignore") in derivative
+        leaked = (
+            bool(orig_producer)
+            and not _QPDF_RE.match(orig_producer)
+            and (orig_producer.encode("latin-1", errors="ignore") in derivative)
         )
         checks.append(
             _check(
@@ -438,18 +446,14 @@ def verify_derivative(
         slides_d = _pptx_slide_count(d_names)
         if slides_o is not None and slides_d is not None:
             counts["slide_count"] = [slides_o, slides_d]
-            checks.append(
-                _check("slide_count", slides_o == slides_d, f"{slides_o} -> {slides_d}")
-            )
+            checks.append(_check("slide_count", slides_o == slides_d, f"{slides_o} -> {slides_d}"))
 
     if kind == "image":
         do = _image_dimensions(original)
         dd = _image_dimensions(derivative)
         if do is not None and dd is not None:
             counts["image_dimensions"] = [list(do), list(dd)]
-            checks.append(
-                _check("image_dimensions", do == dd, f"{do} -> {dd}")
-            )
+            checks.append(_check("image_dimensions", do == dd, f"{do} -> {dd}"))
 
     # 3b. Accept All's actual oracle: deleted text must be *gone*, not just
     # its w:delText marker. reinspect_targeted_gone (check 1 above) only
@@ -525,9 +529,7 @@ def verify_derivative(
             derivative_text = _normalize_ws(
                 container_meta.extract_ooxml_plaintext(derivative, "docx")
             )
-            original_text = _normalize_ws(
-                container_meta.extract_ooxml_plaintext(original, "docx")
-            )
+            original_text = _normalize_ws(container_meta.extract_ooxml_plaintext(original, "docx"))
             hidden_before = [_normalize_ws(f) for f in hidden_before]
             remaining = [_normalize_ws(f) for f in remaining]
 
@@ -554,8 +556,7 @@ def verify_derivative(
                     parts.append(f"{len(remaining)} still concealed in the derivative")
                 if surfaced:
                     parts.append(
-                        f"{len(surfaced)} SURFACED as visible text "
-                        "(un-hidden rather than removed)"
+                        f"{len(surfaced)} SURFACED as visible text (un-hidden rather than removed)"
                     )
                 detail = "; ".join(parts)
             checks.append(_check("hidden_text_removed", passed, detail))

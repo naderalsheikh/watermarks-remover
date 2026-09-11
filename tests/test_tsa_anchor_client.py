@@ -120,6 +120,7 @@ def mock_tsa():
 
 # --- §4.5 degradation: every failure mode returns an UNANCHORED result ---
 
+
 def test_timeout_degrades_to_unanchored(mock_tsa):
     """A TSA that stalls past the client timeout must produce the exact
     today-shaped unanchored result, never an exception into the release
@@ -173,6 +174,7 @@ def test_unreachable_host_degrades_to_unanchored():
 
 
 # --- §4 happy path: a granted token becomes the anchor dict ---
+
 
 def test_granted_token_produces_rfc3161_anchor(mock_tsa):
     """The end-to-end happy path against the REAL captured DigiCert

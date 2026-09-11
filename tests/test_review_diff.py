@@ -52,7 +52,10 @@ def _doc(parts: dict[str, str]) -> bytes:
             '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
         )
         if "word/document.xml" in parts:
-            zf.writestr("word/document.xml", wrap("w:document", f'<w:body>{parts["word/document.xml"]}</w:body>'))
+            zf.writestr(
+                "word/document.xml",
+                wrap("w:document", f"<w:body>{parts['word/document.xml']}</w:body>"),
+            )
         if "word/header1.xml" in parts:
             zf.writestr("word/header1.xml", wrap("w:hdr", parts["word/header1.xml"]))
         if "word/comments.xml" in parts:
@@ -136,8 +139,14 @@ def _xlsx_with_sharedstrings() -> bytes:
     )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
-        zf.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>')
+        zf.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        )
+        zf.writestr(
+            "xl/workbook.xml",
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets/></workbook>',
+        )
         zf.writestr("xl/sharedStrings.xml", ss)
     return buf.getvalue()
 
@@ -180,9 +189,7 @@ def test_clean_bytes_text_report_includes_unicode_diff():
 
 
 def test_clean_bytes_container_report_includes_unicode_diff(tmp_path):
-    data = _doc(
-        {"word/document.xml": f"<w:p><w:r><w:t>deal{ZWSP}terms</w:t></w:r></w:p>"}
-    )
+    data = _doc({"word/document.xml": f"<w:p><w:r><w:t>deal{ZWSP}terms</w:t></w:r></w:p>"})
     _cleaned, report = clean_bytes(data, "letter.docx")
     d = report["unicode_diff"]
     assert d["format"] == "docx"

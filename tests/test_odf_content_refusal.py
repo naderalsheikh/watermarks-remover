@@ -55,7 +55,7 @@ def _make_odt(
 
     annotation_xml = (
         f'<office:annotation office:name="__Annotation__1">'
-        f'<dc:creator>Jane Associate</dc:creator>'
+        f"<dc:creator>Jane Associate</dc:creator>"
         f"<text:p>{annotation}</text:p></office:annotation>"
         if annotation
         else ""
@@ -64,7 +64,7 @@ def _make_odt(
         '<text:tracked-changes text:track-changes="false">'
         '<text:changed-region xml:id="ct1" text:id="1">'
         "<text:deletion>"
-        '<text:p>Reserve figure is 4.2, do not disclose</text:p>'
+        "<text:p>Reserve figure is 4.2, do not disclose</text:p>"
         "</text:deletion>"
         "</text:changed-region>"
         "</text:tracked-changes>"
@@ -80,7 +80,7 @@ def _make_odt(
         zf.writestr(
             "meta.xml",
             '<?xml version="1.0" encoding="UTF-8"?>'
-            '<office:document-meta '
+            "<office:document-meta "
             'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
             'xmlns:dc="http://purl.org/dc/elements/1.1/" '
             'xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" '
@@ -92,7 +92,7 @@ def _make_odt(
         zf.writestr(
             "content.xml",
             '<?xml version="1.0" encoding="UTF-8"?>'
-            '<office:document-content '
+            "<office:document-content "
             'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
             'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
             'xmlns:dc="http://purl.org/dc/elements/1.1/" '
@@ -106,7 +106,7 @@ def _make_odt(
         zf.writestr(
             "META-INF/manifest.xml",
             '<?xml version="1.0" encoding="UTF-8"?>'
-            '<manifest:manifest '
+            "<manifest:manifest "
             'xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" '
             'manifest:version="1.2"/>',
         )

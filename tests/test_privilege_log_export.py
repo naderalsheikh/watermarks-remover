@@ -169,7 +169,7 @@ def test_privilege_log_rfc4180_escaping(env):
 
     complex_note = (
         'Memo contains "confidential" communications,\n'
-        'including work-product notes, settlement figures ($1,000,000),\n'
+        "including work-product notes, settlement figures ($1,000,000),\n"
         'and privileged counsel "deliberations".'
     )
     body = {
@@ -192,7 +192,11 @@ def test_privilege_log_rfc4180_escaping(env):
 
     reader = csv.DictReader(io.StringIO(r.text))
     rows = list(reader)
-    row = next(r for r in rows if r["document_filename"] == "memo.docx" and r["finding_subtype"] == "comments_and_notes")
+    row = next(
+        r
+        for r in rows
+        if r["document_filename"] == "memo.docx" and r["finding_subtype"] == "comments_and_notes"
+    )
     assert row["operator_note"] == complex_note
     assert row["legal_basis"] == "work_product_protection"
 

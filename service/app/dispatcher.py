@@ -178,7 +178,9 @@ class BatchDispatcher:
         polling clients waiting forever once all children are terminal.
         """
         with self._session_factory() as s:
-            batch_ids = [row[0] for row in s.query(Batch.id).filter(Batch.finished_utc.is_(None)).all()]
+            batch_ids = [
+                row[0] for row in s.query(Batch.id).filter(Batch.finished_utc.is_(None)).all()
+            ]
             for batch_id in batch_ids:
                 self.check_batch_completion(s, batch_id)
 
@@ -279,7 +281,9 @@ class BatchDispatcher:
                 if finished is None:
                     # Vanishingly unlikely (unique-FK row the dispatcher is
                     # finalizing), and no facts left to record as degraded.
-                    log.error("batch dispatcher: job %s vanished before its audit finalization", job_id)
+                    log.error(
+                        "batch dispatcher: job %s vanished before its audit finalization", job_id
+                    )
                     return
                 self._append_child_audit(s, finished, batch)
                 return
@@ -362,7 +366,9 @@ class BatchDispatcher:
             try:
                 s.rollback()
             except Exception:
-                log.exception("batch dispatcher: job %s rollback after failed degraded append", job_id)
+                log.exception(
+                    "batch dispatcher: job %s rollback after failed degraded append", job_id
+                )
 
     def _finalize_child_release(self, s: Session, job_id: str) -> None:
         """Release sync, single retry, log-only on persistent failure.

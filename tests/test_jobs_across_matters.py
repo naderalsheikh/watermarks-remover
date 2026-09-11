@@ -132,7 +132,15 @@ def test_failed_refused_jobs_across_multiple_matters(env):
         _seed_doc(s, "d4", "m2", "exhibit.docx")
         _seed_job(s, "j1", "m1", "d1", status="refused", error="macro present", created_days_ago=3)
         _seed_job(s, "j2", "m1", "d2", status="failed", error="worker crash", created_days_ago=2)
-        _seed_job(s, "j3", "m2", "d3", status="refused", error="signed without attestation", created_days_ago=1)
+        _seed_job(
+            s,
+            "j3",
+            "m2",
+            "d3",
+            status="refused",
+            error="signed without attestation",
+            created_days_ago=1,
+        )
         _seed_job(s, "j4", "m2", "d4", status="done")
         _seed_job(s, "j5", "m2", "d4", kind="inspect", status="done")
         s.commit()  # session-exit is rollback-without-commit; helpers only flush

@@ -234,5 +234,8 @@ def test_excessive_xml_nesting_depth_refusal(tmp_path):
     # 2. clean_to_bundle catches UnsupportedCleanError and surfaces clean refusal CustodyError
     src = _write(tmp_path, "hostile_depth.docx", data)
     out_dir = tmp_path / "bundle_out"
-    with pytest.raises(CustodyError, match="plan refused: document XML nesting depth exceeds maximum supported limit"):
+    with pytest.raises(
+        CustodyError,
+        match="plan refused: document XML nesting depth exceeds maximum supported limit",
+    ):
         clean_to_bundle(src, out_dir, policy_id="external_sharing")

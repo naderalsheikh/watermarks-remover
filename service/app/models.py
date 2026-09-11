@@ -137,7 +137,9 @@ class Job(Base):
     # by the synchronous single-document routes (the synchronous
     # /bulk-jobs endpoint that used to also leave this NULL was retired in
     # PR 31 commit 3).
-    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"), nullable=True, index=True)
+    batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("batches.id"), nullable=True, index=True
+    )
     kind: Mapped[str] = mapped_column(String(16))  # inspect | sanitize
     policy_id: Mapped[str] = mapped_column(String(40), default="external_sharing")
     reason: Mapped[str] = mapped_column(String(500), default="")
@@ -201,7 +203,9 @@ class Release(Base):
     # server-side Batch", which covers both a true single-document release
     # and a client-driven sequence of independent releases (e.g. the
     # Airlock CLI's own folder loop, which never touches Batch at all).
-    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"), nullable=True, index=True)
+    batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("batches.id"), nullable=True, index=True
+    )
     # 1:1 with its Job, always -- created in the same transaction as the
     # Job it wraps, never pointed at an existing/shared Job.
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), unique=True, index=True)

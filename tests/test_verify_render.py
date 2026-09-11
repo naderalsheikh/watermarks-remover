@@ -122,9 +122,7 @@ def test_feature_flag_defaults_off():
             os.environ.pop("COUNSELCLEAR_VISUAL_COMPARE", None)
 
 
-@pytest.mark.skipif(
-    __import__("shutil").which("pdftoppm") is None, reason="poppler not installed"
-)
+@pytest.mark.skipif(__import__("shutil").which("pdftoppm") is None, reason="poppler not installed")
 def test_visual_compare_incremental_pdf_no_visual_warn():
     original = (FIXTURES / "incremental.pdf").read_bytes()
     import sys as _sys

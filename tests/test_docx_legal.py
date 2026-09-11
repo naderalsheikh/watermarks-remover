@@ -34,20 +34,19 @@ W_DECL = (
 def _document(inner: str) -> bytes:
     return (
         f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        f'<w:document {W_DECL}><w:body>{inner}'
-        '<w:sectPr/></w:body></w:document>'
+        f"<w:document {W_DECL}><w:body>{inner}"
+        "<w:sectPr/></w:body></w:document>"
     ).encode()
 
 
 def _header(inner: str) -> bytes:
     return (
-        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        f'<w:hdr {W_DECL}>{inner}</w:hdr>'
+        f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:hdr {W_DECL}>{inner}</w:hdr>'
     ).encode()
 
 
 def _run(text: str) -> str:
-    return f'<w:r><w:t>{text}</w:t></w:r>'
+    return f"<w:r><w:t>{text}</w:t></w:r>"
 
 
 def _docx(parts: dict[str, bytes]) -> bytes:
@@ -59,10 +58,22 @@ def _docx(parts: dict[str, bytes]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         overrides = [
-            ("/word/document.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"),
-            ("/word/comments.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"),
-            ("/word/people.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.people+xml"),
-            ("/word/header1.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"),
+            (
+                "/word/document.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+            ),
+            (
+                "/word/comments.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+            ),
+            (
+                "/word/people.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.people+xml",
+            ),
+            (
+                "/word/header1.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            ),
         ]
         ct = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
         ct += "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
@@ -103,13 +114,13 @@ def _docx(parts: dict[str, bytes]) -> bytes:
 def _full_docx() -> bytes:
     body = (
         # accepted-state insertion must survive as text
-        '<w:p><w:ins><w:r><w:t>inserted words</w:t></w:r></w:ins>'
+        "<w:p><w:ins><w:r><w:t>inserted words</w:t></w:r></w:ins>"
         # deleted subtree must vanish entirely (delText included)
-        '<w:del><w:r><w:delText>deleted words</w:delText></w:r></w:del>'
+        "<w:del><w:r><w:delText>deleted words</w:delText></w:r></w:del>"
         # property change wrapper must drop, run kept
-        '<w:r><w:rPr><w:rPrChange/></w:rPr><w:t>stable</w:t></w:r></w:p>'
+        "<w:r><w:rPr><w:rPrChange/></w:rPr><w:t>stable</w:t></w:r></w:p>"
         # hidden-text flags (inspect-only in v1)
-        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>sneaky</w:t></w:r>'
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>sneaky</w:t></w:r>"
         '<w:r><w:rPr><w:color w:val="FFFFFF"/></w:rPr><w:t>white</w:t></w:r></w:p>'
         # comment anchors to remove when comment parts are stripped
         "<w:p><w:commentRangeStart/><w:r><w:t>anchored</w:t></w:r>"
@@ -117,7 +128,7 @@ def _full_docx() -> bytes:
     )
     comments = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<w:comments {W_DECL}><w:comment><w:p><w:r><w:t>look here</w:t></w:r></w:p></w:comment></w:comments>'
+        f"<w:comments {W_DECL}><w:comment><w:p><w:r><w:t>look here</w:t></w:r></w:p></w:comment></w:comments>"
     ).encode()
     people = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -188,12 +199,15 @@ def _clean_body_xml(data: bytes) -> ET.Element:
 def test_accept_all_keeps_insertions_and_drops_deletions():
     out, actions = clean_docx(_full_docx())
     root = _clean_body_xml(out)
-    texts = [t.text or "" for t in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")]
+    texts = [
+        t.text or ""
+        for t in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
+    ]
     joined = "".join(texts)
     assert "inserted words" in joined
     assert "stable" in joined
     assert "deleted words" not in joined
-    tags = {e.tag.rsplit('}', 1)[-1] for e in root.iter()}
+    tags = {e.tag.rsplit("}", 1)[-1] for e in root.iter()}
     assert {"ins", "del", "delText", "rPrChange"} & tags == set()
     assert any("unwrapped" in a for a in actions)
     assert any("dropped" in a for a in actions)
@@ -235,7 +249,7 @@ def test_embeddings_default_keep_explicit_strip():
     with zipfile.ZipFile(io.BytesIO(out)) as zf:
         names = zf.namelist()
         assert "word/embeddings/oleObject1.bin" not in names
-        assert b'rId13' not in zf.read("word/_rels/document.xml.rels")
+        assert b"rId13" not in zf.read("word/_rels/document.xml.rels")
         assert "/word/embeddings/" not in zf.read("[Content_Types].xml").decode()
     assert any("drop part word/embeddings/oleObject1.bin" in a for a in actions)
 
@@ -254,8 +268,8 @@ def test_output_is_valid_zip_with_namespaces_preserved(tmp_path):
 
 def test_layer_a_still_runs_after_legal_pass():
     body = (
-        '<w:p><w:ins><w:r><w:t>zero​width</w:t></w:r></w:ins></w:p>'
-        '<w:p><w:del><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>'
+        "<w:p><w:ins><w:r><w:t>zero​width</w:t></w:r></w:ins></w:p>"
+        "<w:p><w:del><w:r><w:delText>gone</w:delText></w:r></w:del></w:p>"
     )
     out, actions = clean_docx(_docx({"word/document.xml": _document(body)}))
     root = _clean_body_xml(out)
@@ -280,7 +294,12 @@ def test_findings_project_docx_legal_signals():
     }
     found = findings_for_report("container", rep)
     by_subtype = {f.subtype: f for f in found}
-    assert {"comments_and_notes", "office_tracked_changes", "hidden_text_formatting", "embeddings_ole"} <= set(by_subtype)
+    assert {
+        "comments_and_notes",
+        "office_tracked_changes",
+        "hidden_text_formatting",
+        "embeddings_ole",
+    } <= set(by_subtype)
     assert by_subtype["office_tracked_changes"].category == "revision_history"
     assert by_subtype["office_tracked_changes"].action_recommended == "accept_all"
     assert by_subtype["hidden_text_formatting"].category == "invisible_text"
@@ -340,9 +359,7 @@ def test_accept_all_namespace_registration_survives_concurrent_documents():
 
     def process(i: int) -> tuple[int, bool]:
         uri = f"urn:doc-{i}"
-        out, _ = container_meta._docx_accept_all(
-            part("wX", uri), strip_comment_markers=False
-        )
+        out, _ = container_meta._docx_accept_all(part("wX", uri), strip_comment_markers=False)
         return i, f'xmlns:wX="{uri}"'.encode() in out
 
     old_interval = sys.getswitchinterval()
@@ -380,9 +397,9 @@ def test_accept_all_removes_a_deleted_row_and_its_visible_text():
     Dropping only the marker (the generic tag-drop path) left a deleted
     row's cell text fully visible after Accept All."""
     xml = _table_doc(
-        '<w:tr><w:tc><w:p><w:r><w:t>keep me</w:t></w:r></w:p></w:tc></w:tr>'
+        "<w:tr><w:tc><w:p><w:r><w:t>keep me</w:t></w:r></w:p></w:tc></w:tr>"
         '<w:tr><w:trPr><w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr>'
-        '<w:tc><w:p><w:r><w:t>PRIVILEGED SETTLEMENT TERMS</w:t></w:r></w:p></w:tc></w:tr>'
+        "<w:tc><w:p><w:r><w:t>PRIVILEGED SETTLEMENT TERMS</w:t></w:r></w:p></w:tc></w:tr>"
     )
     out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
     text = out.decode()
@@ -397,7 +414,7 @@ def test_accept_all_keeps_an_inserted_row():
     (and its properties marker, now unremarkable) stays."""
     xml = _table_doc(
         '<w:tr><w:trPr><w:ins w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr>'
-        '<w:tc><w:p><w:r><w:t>newly added row</w:t></w:r></w:p></w:tc></w:tr>'
+        "<w:tc><w:p><w:r><w:t>newly added row</w:t></w:r></w:p></w:tc></w:tr>"
     )
     out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
     text = out.decode()
@@ -410,7 +427,7 @@ def test_accept_all_drops_property_change_and_range_bookmark_markers():
     xml = (
         f'<?xml version="1.0"?><w:document {_W}><w:body>'
         '<w:p><w:moveFromRangeStart w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z" w:name="m"/>'
-        '<w:r><w:t>body text</w:t></w:r>'
+        "<w:r><w:t>body text</w:t></w:r>"
         '<w:moveFromRangeEnd w:id="1"/>'
         '<w:moveToRangeStart w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z" w:name="m2"/>'
         '<w:moveToRangeEnd w:id="2"/>'
@@ -431,10 +448,17 @@ def test_accept_all_drops_property_change_and_range_bookmark_markers():
     out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
     text = out.decode()
     for tag in (
-        "moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd",
-        "customXmlInsRangeStart", "customXmlInsRangeEnd",
-        "customXmlDelRangeStart", "customXmlDelRangeEnd",
-        "tblGridChange", "trPrChange", "tcPrChange",
+        "moveFromRangeStart",
+        "moveFromRangeEnd",
+        "moveToRangeStart",
+        "moveToRangeEnd",
+        "customXmlInsRangeStart",
+        "customXmlInsRangeEnd",
+        "customXmlDelRangeStart",
+        "customXmlDelRangeEnd",
+        "tblGridChange",
+        "trPrChange",
+        "tcPrChange",
     ):
         assert f"<w:{tag}" not in text, f"{tag} should have been dropped"
     assert "body text" in text and "cell text" in text
@@ -471,7 +495,9 @@ _DEL_MARK = '<w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"/>'
 
 
 def _body_doc(body_xml: str) -> bytes:
-    return f'<?xml version="1.0"?><w:document {_W}><w:body>{body_xml}</w:body></w:document>'.encode()
+    return (
+        f'<?xml version="1.0"?><w:document {_W}><w:body>{body_xml}</w:body></w:document>'.encode()
+    )
 
 
 def test_deleted_paragraph_mark_merges_into_the_next_paragraph():
@@ -480,9 +506,9 @@ def test_deleted_paragraph_mark_merges_into_the_next_paragraph():
     (the generic tag-drop path) left two separate paragraphs where Word
     would show one."""
     xml = _body_doc(
-        f'<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>First sentence.</w:t></w:r></w:p>'
+        f"<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>First sentence.</w:t></w:r></w:p>"
         '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t> Second sentence.</w:t></w:r></w:p>'
-        '<w:p><w:r><w:t>Third, untouched.</w:t></w:r></w:p>'
+        "<w:p><w:r><w:t>Third, untouched.</w:t></w:r></w:p>"
     )
     out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
     text = out.decode()
@@ -496,8 +522,8 @@ def test_deleted_paragraph_mark_merges_into_the_next_paragraph():
 
 def test_paragraph_merge_skips_when_either_side_has_a_section_break():
     xml = _body_doc(
-        f'<w:p><w:pPr><w:sectPr/><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>A</w:t></w:r></w:p>'
-        '<w:p><w:r><w:t>B</w:t></w:r></w:p>'
+        f"<w:p><w:pPr><w:sectPr/><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>A</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>B</w:t></w:r></w:p>"
     )
     out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
     text = out.decode()
@@ -507,7 +533,9 @@ def test_paragraph_merge_skips_when_either_side_has_a_section_break():
 
 
 def test_paragraph_merge_on_last_paragraph_does_not_crash():
-    xml = _body_doc(f'<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>only paragraph</w:t></w:r></w:p>')
+    xml = _body_doc(
+        f"<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>only paragraph</w:t></w:r></w:p>"
+    )
     out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
     assert stats["paragraphs_merged"] == 0
     assert "only paragraph" in out.decode()
@@ -515,9 +543,9 @@ def test_paragraph_merge_on_last_paragraph_does_not_crash():
 
 def test_chained_paragraph_mark_deletions_merge_in_one_pass():
     xml = _body_doc(
-        f'<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>A </w:t></w:r></w:p>'
-        f'<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>B </w:t></w:r></w:p>'
-        '<w:p><w:r><w:t>C</w:t></w:r></w:p>'
+        f"<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>A </w:t></w:r></w:p>"
+        f"<w:p><w:pPr><w:rPr>{_DEL_MARK}</w:rPr></w:pPr><w:r><w:t>B </w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>C</w:t></w:r></w:p>"
     )
     out, stats = container_meta._docx_accept_all(xml, strip_comment_markers=False)
     text = out.decode()
@@ -536,7 +564,9 @@ def test_white_on_white_detected_with_single_quoted_attribute():
     double = b'<w:color w:val="FFFFFF"/>'
     single = b"<w:color w:val='FFFFFF'/>"
     assert container_meta._DOCX_WHITE_RE.search(double)
-    assert container_meta._DOCX_WHITE_RE.search(single), "single-quoted white-on-white must match too"
+    assert container_meta._DOCX_WHITE_RE.search(single), (
+        "single-quoted white-on-white must match too"
+    )
 
 
 def test_xmlns_declarations_detected_with_single_quotes():

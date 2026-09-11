@@ -102,9 +102,7 @@ def test_matter_create_and_get(client):
     mid = r.json()["id"]
     # Creator gets every bootstrap perm except download_original (a
     # deliberate, explicit-grant-only perm — see app.acl.bootstrap_operator).
-    assert sorted(r.json()["perms"]) == sorted(
-        ["read", "upload", "inspect", "sanitize", "admin"]
-    )
+    assert sorted(r.json()["perms"]) == sorted(["read", "upload", "inspect", "sanitize", "admin"])
     r2 = client.get(f"/v1/matters/{mid}")
     assert r2.json()["name"] == "Project Dandelion"
     assert sorted(r2.json()["perms"]) == sorted(r.json()["perms"])
@@ -188,9 +186,10 @@ def test_list_matters_scopes_to_the_caller_and_list_documents_and_jobs(client):
     job = client.post(f"/v1/matters/{m1}/documents/{doc['id']}/inspect-jobs").json()
     jobs = client.get(f"/v1/matters/{m1}/jobs").json()["jobs"]
     assert [j["id"] for j in jobs] == [job["id"]]
-    assert client.get(f"/v1/matters/{m1}/jobs?document_id={doc['id']}").json()["jobs"][0][
-        "id"
-    ] == job["id"]
+    assert (
+        client.get(f"/v1/matters/{m1}/jobs?document_id={doc['id']}").json()["jobs"][0]["id"]
+        == job["id"]
+    )
     assert client.get(f"/v1/matters/{m1}/jobs?document_id=nope").json()["jobs"] == []
 
 
@@ -283,7 +282,9 @@ def test_matters_search_is_server_side_and_composes_with_pagination(client):
     acme = client.get("/v1/matters?q=acme").json()  # case-insensitive
     assert acme["total"] == 3
     assert {m["name"] for m in acme["matters"]} == {
-        "Acme Merger", "Acme Litigation", "Acme Estate Plan",
+        "Acme Merger",
+        "Acme Litigation",
+        "Acme Estate Plan",
     }
     assert acme["q"] == "acme"
 
@@ -377,9 +378,7 @@ def test_audit_pagination_returns_a_page_but_still_verifies_the_full_chain(clien
     assert page["chain_detail"] == full["chain_detail"]
     assert page["total"] == full["total"]
     assert page["offset"] == 1 and page["limit"] == 2
-    assert [e["seq"] for e in page["events"]] == [
-        e["seq"] for e in full["events"]
-    ][1:3]
+    assert [e["seq"] for e in page["events"]] == [e["seq"] for e in full["events"]][1:3]
 
 
 def test_audit_export_returns_every_event_as_csv_never_paginated(client):
@@ -450,9 +449,18 @@ def test_jobs_export_returns_every_job_as_csv_and_the_route_is_not_shadowed(clie
 
     rows = list(csv.reader(io.StringIO(r.text)))
     assert rows[0] == [
-        "job_id", "document_id", "document_filename", "kind", "policy_id",
-        "status", "error", "verification_pass", "created_utc", "finished_utc",
-        "release_id", "profile_id",
+        "job_id",
+        "document_id",
+        "document_filename",
+        "kind",
+        "policy_id",
+        "status",
+        "error",
+        "verification_pass",
+        "created_utc",
+        "finished_utc",
+        "release_id",
+        "profile_id",
     ]
     assert len(rows) - 1 == 3
     assert {row[2] for row in rows[1:]} == {"doc0.txt", "doc1.txt", "doc2.txt"}
@@ -725,18 +733,14 @@ def test_job_sanitize_event_chain_commits_artifact_hashes(client, tmp_path):
     assert sanitize["payload"]["derivative_sha256"], "chain event must carry derivative_sha256"
 
     bundle = client.get(f"/v1/matters/{doc['_matter']}/jobs/{job['id']}/bundle")
-    packet = json.loads(
-        zipfile.ZipFile(io.BytesIO(bundle.content)).read("release_packet.json")
-    )
+    packet = json.loads(zipfile.ZipFile(io.BytesIO(bundle.content)).read("release_packet.json"))
     assert packet["hashes"]["manifest_json_sha256"] == sanitize["payload"]["manifest_sha256"]
     assert packet["hashes"]["derivative"]["sha256"] == sanitize["payload"]["derivative_sha256"]
 
     # The real exported chain + the real downloaded packet through the
     # real verifier with --audit-csv: everything the operator would do.
     csv_path = tmp_path / "audit.csv"
-    csv_path.write_bytes(
-        client.get(f"/v1/matters/{doc['_matter']}/audit/export").content
-    )
+    csv_path.write_bytes(client.get(f"/v1/matters/{doc['_matter']}/audit/export").content)
     zip_path = tmp_path / "packet.zip"
     zip_path.write_bytes(bundle.content)
     tools_dir = str(Path(__file__).resolve().parents[1] / "tools")
@@ -755,8 +759,11 @@ def test_refused_job_event_carries_no_hash_keys(client):
     """MUST-1 edge rule: a refused job produces no manifest, so its
     job.sanitize event omits the keys entirely -- absent, not nulled, so
     'no bundle produced' stays distinguishable from 'hash unknown'."""
-    doc = _upload(client, "macro.docm") if (Path(__file__).parent / "fixtures" / "legal" / "macro.docm").exists() \
+    doc = (
+        _upload(client, "macro.docm")
+        if (Path(__file__).parent / "fixtures" / "legal" / "macro.docm").exists()
         else _upload(client, "signed.pdf")
+    )
     r = client.post(
         f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/sanitize-jobs",
         json={"policy_id": "external_sharing"},
@@ -779,7 +786,15 @@ def test_tampered_manifest_fails_chain_check_but_not_internal_checks(client, tmp
     # The bundle layout is a stable product fact (runner.py's job dirs):
     # data/matters/{matter}/jobs/{job}/output/bundle/manifest.json.
     manifest_path = (
-        tmp_path / "data" / "matters" / doc["_matter"] / "jobs" / job["id"] / "output" / "bundle" / "manifest.json"
+        tmp_path
+        / "data"
+        / "matters"
+        / doc["_matter"]
+        / "jobs"
+        / job["id"]
+        / "output"
+        / "bundle"
+        / "manifest.json"
     )
     assert manifest_path.is_file(), f"expected bundle at {manifest_path}"
     original = manifest_path.read_bytes()
@@ -933,7 +948,10 @@ def _fake_tsa_anchor(rsa_key, cert_der):
             [
                 cms.CMSAttribute({"type": "content_type", "values": ["1.2.840.113549.1.9.16.1.4"]}),
                 cms.CMSAttribute(
-                    {"type": "message_digest", "values": [core.OctetString(hashlib.sha256(econtent).digest())]}
+                    {
+                        "type": "message_digest",
+                        "values": [core.OctetString(hashlib.sha256(econtent).digest())],
+                    }
                 ),
             ]
         )
@@ -954,7 +972,10 @@ def _fake_tsa_anchor(rsa_key, cert_der):
                 ),
                 "digest_algorithm": {"algorithm": "sha256", "parameters": core.Null()},
                 "signed_attrs": signed_attrs,
-                "signature_algorithm": {"algorithm": "1.2.840.113549.1.1.1", "parameters": core.Null()},
+                "signature_algorithm": {
+                    "algorithm": "1.2.840.113549.1.1.1",
+                    "parameters": core.Null(),
+                },
                 "signature": signature,
             }
         )
@@ -966,7 +987,10 @@ def _fake_tsa_anchor(rsa_key, cert_der):
                         "version": "v3",
                         "digest_algorithms": [{"algorithm": "sha256"}],
                         "encap_content_info": cms.EncapsulatedContentInfo(
-                            {"content_type": "1.2.840.113549.1.9.16.1.4", "content": cms.ParsableOctetString(econtent)}
+                            {
+                                "content_type": "1.2.840.113549.1.9.16.1.4",
+                                "content": cms.ParsableOctetString(econtent),
+                            }
                         ),
                         "certificates": [cert],
                         "signer_infos": [signer_info],
@@ -1027,7 +1051,9 @@ def test_job_bundle_tsa_success_stamps_rfc3161_anchor(client, tmp_path, monkeypa
     assert packet["signature"]["signed_fields"] == "release_packet.v1.canonical-excluding-anchor"
     anchor = packet["anchor"]
     assert anchor["type"] == "rfc3161-tsa"
-    assert anchor["digest"] == hashlib.sha256(bytes.fromhex(packet["signature"]["value"])).hexdigest()
+    assert (
+        anchor["digest"] == hashlib.sha256(bytes.fromhex(packet["signature"]["value"])).hexdigest()
+    )
     import base64
 
     token = base64.b64decode(anchor["reference"])
@@ -1066,7 +1092,11 @@ def test_job_bundle_tsa_failure_falls_back_to_operator_anchor(client, tmp_path, 
     bundle, packet = _bundle_packet(client, doc, job)
 
     assert packet["signature"]["signed_fields"] == "release_packet.v1.canonical"
-    assert packet["anchor"] == {"type": "ed25519-operator", "digest": None, "reference": packet["signature"]["key_id"]}
+    assert packet["anchor"] == {
+        "type": "ed25519-operator",
+        "digest": None,
+        "reference": packet["signature"]["key_id"],
+    }
 
     pk = client.get("/v1/custody-public-key").json()
     key_file = tmp_path / "pub.pem"
@@ -1186,8 +1216,12 @@ def test_release_result_carries_signature_ref(client):
     doc = _upload(client, "spa.docx")
     r = client.post(
         f"/v1/matters/{doc['_matter']}/documents/{doc['id']}/releases",
-        json={"profile_id": "counterparty_deal_room", "recipient_type": "opposing_counsel",
-              "recipient_name": "X", "purpose": "prod"},
+        json={
+            "profile_id": "counterparty_deal_room",
+            "recipient_type": "opposing_counsel",
+            "recipient_name": "X",
+            "purpose": "prod",
+        },
     )
     assert r.status_code == 200
     result = r.json()["release_result"]
@@ -1406,7 +1440,8 @@ def test_rerun_release_links_its_predecessor_everywhere(client):
     # names the predecessor inside the hash-covered payload.
     audit = client.get(f"/v1/matters/{matter}/audit").json()
     created = [
-        e for e in audit["events"]
+        e
+        for e in audit["events"]
         if e["action"] == "release.created"
         and (e["payload"] or {}).get("release_id") == new_release_id
     ]
@@ -1439,8 +1474,10 @@ def test_rerun_release_links_its_predecessor_everywhere(client):
     other_doc = _upload(client, "spa.docx", matter=matter)
     cross = client.post(
         f"/v1/matters/{other_doc['_matter']}/documents/{other_doc['id']}/releases",
-        json={"profile_id": "counterparty_deal_room",
-              "predecessor_release_id": original_release_id},
+        json={
+            "profile_id": "counterparty_deal_room",
+            "predecessor_release_id": original_release_id,
+        },
     )
     assert cross.status_code == 400, cross.text
     assert "different document" in cross.json()["detail"]
@@ -1449,8 +1486,7 @@ def test_rerun_release_links_its_predecessor_everywhere(client):
     # lookup) rather than being recorded as an unverifiable string.
     bogus = client.post(
         f"/v1/matters/{matter}/documents/{doc['id']}/releases",
-        json={"profile_id": "counterparty_deal_room",
-              "predecessor_release_id": "nosuchrelease000"},
+        json={"profile_id": "counterparty_deal_room", "predecessor_release_id": "nosuchrelease000"},
     )
     assert bogus.status_code == 404, bogus.text
 
@@ -1830,7 +1866,12 @@ def test_docker_cmd_includes_layer_b_flag_for_layer_b_jobs(tmp_path, monkeypatch
     monkeypatch.setenv("COUNSELCLEAR_WORKER_IMAGE", "repo@sha256:" + "a" * 64)
     monkeypatch.setenv("COUNSELCLEAR_REWRITE_NETWORK", "cc-rewrite-prod")
     cfg = _Config(tmp_path)
-    layer_b = {"strength": "preserve", "label": "content_altering", "subject": "operator", "jti": "j1"}
+    layer_b = {
+        "strength": "preserve",
+        "label": "content_altering",
+        "subject": "operator",
+        "jti": "j1",
+    }
 
     cmd = build_docker_cmd(
         cfg,

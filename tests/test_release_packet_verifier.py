@@ -47,14 +47,20 @@ def _packet_files(
             "subtype": "comments_and_notes",
             "action": "keep",
             "detail": "kept: reviewed and kept by operator",
-            "legal_justification": {"basis": "privilege", "note": "Attorney-client comments withheld."},
+            "legal_justification": {
+                "basis": "privilege",
+                "note": "Attorney-client comments withheld.",
+            },
         }
     ]
     legal_justifications = [
         {
             "subtype": "comments_and_notes",
             "action": "keep",
-            "legal_justification": {"basis": "privilege", "note": "Attorney-client comments withheld."},
+            "legal_justification": {
+                "basis": "privilege",
+                "note": "Attorney-client comments withheld.",
+            },
         }
     ]
     manifest_json = json.dumps(
@@ -66,14 +72,19 @@ def _packet_files(
         sort_keys=True,
     ).encode()
     report_json = json.dumps(
-        {"report_version": 1, "verification": {"pass": True, "checks": []}, "findings_before": [], "action_records": action_records},
+        {
+            "report_version": 1,
+            "verification": {"pass": True, "checks": []},
+            "findings_before": [],
+            "action_records": action_records,
+        },
         sort_keys=True,
     ).encode()
     cert_html = (
         f"<!doctype html><html><body>Job ID: <code>{job_id}</code> "
         f"Matter: X (<code>{matter_id}</code>) "
         f"Document ID: <code>{document_id}</code> "
-        f"status: <span class=\"status\">{status}</span></body></html>"
+        f'status: <span class="status">{status}</span></body></html>'
     ).encode()
     readme_txt = b"CounselClear release packet\n"
 
@@ -396,7 +407,9 @@ def test_packet_schema_hash_mismatch_fails_verification(tmp_path):
     report = verifier.verify_release_packet(dir_path)
     assert not report.valid
     check = next(
-        cc for cc in report.cross_checks if cc.name == "schema_sha256 (release_packet.json vs published schema)"
+        cc
+        for cc in report.cross_checks
+        if cc.name == "schema_sha256 (release_packet.json vs published schema)"
     )
     assert check.status == "mismatch"
 
@@ -480,7 +493,6 @@ def test_superseded_schema_versions_stay_verifiable():
         assert verifier._published_schema_sha256(schema_name, current + 99) is None
 
 
-
 def test_original_sha256_checked_against_included_original_file(tmp_path):
     original_bytes = b"the untouched original document bytes"
     files = _packet_files(original_sha256=_sha256(original_bytes))
@@ -525,7 +537,9 @@ def test_release_aware_packet_uses_internally_consistent_wording_not_valid(tmp_p
     assert report.valid
     text = report.to_text()
     assert text.splitlines()[0] == "INTERNALLY CONSISTENT"
-    assert "VALID" not in text.split("\n\n")[0]  # the top line itself, not e.g. "INVALID" as a substring
+    assert (
+        "VALID" not in text.split("\n\n")[0]
+    )  # the top line itself, not e.g. "INVALID" as a substring
 
 
 def test_release_aware_packet_reports_internally_inconsistent_when_invalid(tmp_path):
@@ -569,12 +583,18 @@ def test_forbidden_claim_words_never_appear_as_affirmative_claims(tmp_path):
     for report in (valid_report, invalid_report):
         text = report.to_text().lower()
         for claim in (
-            "is unforgeable", "this is unforgeable",
-            "is independently timestamped", "this is independently timestamped",
-            "is court-proof", "this is court-proof",
-            "is unimpeachable", "this is unimpeachable",
+            "is unforgeable",
+            "this is unforgeable",
+            "is independently timestamped",
+            "this is independently timestamped",
+            "is court-proof",
+            "this is court-proof",
+            "is unimpeachable",
+            "this is unimpeachable",
         ):
-            assert claim not in text, f"affirmative claim {claim!r} must never appear in verifier output"
+            assert claim not in text, (
+                f"affirmative claim {claim!r} must never appear in verifier output"
+            )
         # "verified" as a bare claim ("This packet is verified") must not
         # appear; "what was verified" (a section heading describing what
         # was *checked*, not an assertion of trust) is fine and expected.
@@ -679,7 +699,9 @@ def test_release_result_missing_required_field_fails_schema(tmp_path):
 
 def test_release_result_always_reports_not_externally_anchored():
     text = verifier.ReleaseResultReport(
-        valid=True, schema_ok=True, anchor_type="none",
+        valid=True,
+        schema_ok=True,
+        anchor_type="none",
     ).to_text()
     assert "NOT EXTERNALLY ANCHORED" in text
     assert text.splitlines()[0] == "INTERNALLY CONSISTENT"
@@ -700,7 +722,9 @@ def test_audit_refs_note_appears_for_both_report_types(tmp_path):
 def test_main_auto_detects_release_result_vs_release_packet(tmp_path, capsys):
     result_dir = tmp_path / "refused"
     result_dir.mkdir()
-    (result_dir / "release_result.json").write_text(json.dumps(_release_result(), indent=2, sort_keys=True))
+    (result_dir / "release_result.json").write_text(
+        json.dumps(_release_result(), indent=2, sort_keys=True)
+    )
     rc = verifier.main([str(result_dir)])
     assert rc == 0
     assert "INTERNALLY CONSISTENT" in capsys.readouterr().out
@@ -747,8 +771,12 @@ def _matching_result_for(packet: dict, files: dict) -> dict:
 
 def test_verify_both_artifacts_agree_when_consistent(tmp_path):
     files = _packet_files(
-        release_id="REL1", job_id="JOB1", document_id="DOC1", matter_id="MAT1",
-        status="done", policy_id="external_sharing",
+        release_id="REL1",
+        job_id="JOB1",
+        document_id="DOC1",
+        matter_id="MAT1",
+        status="done",
+        policy_id="external_sharing",
     )
     out = _write_dir(tmp_path, files)
     packet = json.loads((out / "release_packet.json").read_text())
@@ -771,7 +799,9 @@ def test_verify_both_artifacts_agree_when_consistent(tmp_path):
         "legal_justifications",
         "limitations",
     ):
-        assert f"{field_name} (packet vs result)" in matched, f"{field_name} should have matched, not been skipped"
+        assert f"{field_name} (packet vs result)" in matched, (
+            f"{field_name} should have matched, not been skipped"
+        )
     assert "policy_id (packet vs result)" in matched
     text = report.to_text()
     assert "INTERNALLY CONSISTENT" in text.splitlines()[0]
@@ -781,8 +811,12 @@ def test_verify_both_artifacts_agree_when_consistent(tmp_path):
 
 def test_verify_both_artifacts_fails_loudly_on_status_disagreement(tmp_path):
     files = _packet_files(
-        release_id="REL1", job_id="JOB1", document_id="DOC1", matter_id="MAT1",
-        status="done", policy_id="external_sharing",
+        release_id="REL1",
+        job_id="JOB1",
+        document_id="DOC1",
+        matter_id="MAT1",
+        status="done",
+        policy_id="external_sharing",
     )
     out = _write_dir(tmp_path, files)
     packet = json.loads((out / "release_packet.json").read_text())
@@ -804,7 +838,11 @@ def test_verify_both_artifacts_fails_loudly_on_release_id_disagreement(tmp_path)
     describing a DIFFERENT release than the packet it's sitting next to
     (e.g. two files accidentally mixed from different runs)."""
     files = _packet_files(
-        release_id="REL1", job_id="JOB1", document_id="DOC1", matter_id="MAT1", status="done",
+        release_id="REL1",
+        job_id="JOB1",
+        document_id="DOC1",
+        matter_id="MAT1",
+        status="done",
     )
     out = _write_dir(tmp_path, files)
     packet = json.loads((out / "release_packet.json").read_text())
@@ -814,7 +852,9 @@ def test_verify_both_artifacts_fails_loudly_on_release_id_disagreement(tmp_path)
 
     report = verifier.verify_release_packet_and_result(out)
     assert not report.valid
-    release_id_check = next(cc for cc in report.agreement if cc.name == "release_id (packet vs result)")
+    release_id_check = next(
+        cc for cc in report.agreement if cc.name == "release_id (packet vs result)"
+    )
     assert release_id_check.status == "mismatch"
 
 
@@ -832,7 +872,9 @@ def test_verify_both_artifacts_profile_id_unavailable_for_legacy_packet(tmp_path
 
     report = verifier.verify_release_packet_and_result(out)
     assert report.valid, report.to_text()
-    profile_check = next(cc for cc in report.agreement if cc.name == "profile_id (packet vs result)")
+    profile_check = next(
+        cc for cc in report.agreement if cc.name == "profile_id (packet vs result)"
+    )
     assert profile_check.status == "unavailable"
 
 
@@ -1011,18 +1053,34 @@ def test_audit_refs_match_chain_rows(tmp_path):
     packet = json.loads(files["release_packet.json"])
     chain = _chain_csv(
         [
-            {"action": "document.upload", "actor_id": "operator",
-             "payload": {"document_id": "DOC1"}},
-            {"action": "bundle.download", "actor_id": "operator",
-             "payload": {"job_id": "JOB1", "include_original": False}},
-            {"action": "certificate.issued", "actor_id": "operator",
-             "payload": {"job_id": "JOB1", "document_id": "DOC1"}},
-            {"action": "job.sanitize", "actor_id": "operator",
-             "payload": {"job_id": "JOB1", "document_id": "DOC1",
-                         "status": "done", "verification_pass": True,
-                         "no_decision_count": 0,
-                         "manifest_sha256": packet["hashes"]["manifest_json_sha256"],
-                         "derivative_sha256": packet["hashes"]["derivative"]["sha256"]}},
+            {
+                "action": "document.upload",
+                "actor_id": "operator",
+                "payload": {"document_id": "DOC1"},
+            },
+            {
+                "action": "bundle.download",
+                "actor_id": "operator",
+                "payload": {"job_id": "JOB1", "include_original": False},
+            },
+            {
+                "action": "certificate.issued",
+                "actor_id": "operator",
+                "payload": {"job_id": "JOB1", "document_id": "DOC1"},
+            },
+            {
+                "action": "job.sanitize",
+                "actor_id": "operator",
+                "payload": {
+                    "job_id": "JOB1",
+                    "document_id": "DOC1",
+                    "status": "done",
+                    "verification_pass": True,
+                    "no_decision_count": 0,
+                    "manifest_sha256": packet["hashes"]["manifest_json_sha256"],
+                    "derivative_sha256": packet["hashes"]["derivative"]["sha256"],
+                },
+            },
         ],
         tmp_path,
     )
@@ -1041,16 +1099,29 @@ def test_audit_refs_seq_pointing_at_wrong_event_fails(tmp_path):
     packet = json.loads(files["release_packet.json"])
     chain = _chain_csv(
         [
-            {"action": "document.upload", "actor_id": "operator",
-             "payload": {"document_id": "DOC1"}},
-            {"action": "batch.created", "actor_id": "operator",
-             "payload": {"batch_id": "B1", "kind": "sanitize", "total": 1}},
-            {"action": "job.sanitize", "actor_id": "operator",
-             "payload": {"job_id": "JOB1", "document_id": "DOC1",
-                         "status": "done", "verification_pass": True,
-                         "no_decision_count": 0,
-                         "manifest_sha256": packet["hashes"]["manifest_json_sha256"],
-                         "derivative_sha256": packet["hashes"]["derivative"]["sha256"]}},
+            {
+                "action": "document.upload",
+                "actor_id": "operator",
+                "payload": {"document_id": "DOC1"},
+            },
+            {
+                "action": "batch.created",
+                "actor_id": "operator",
+                "payload": {"batch_id": "B1", "kind": "sanitize", "total": 1},
+            },
+            {
+                "action": "job.sanitize",
+                "actor_id": "operator",
+                "payload": {
+                    "job_id": "JOB1",
+                    "document_id": "DOC1",
+                    "status": "done",
+                    "verification_pass": True,
+                    "no_decision_count": 0,
+                    "manifest_sha256": packet["hashes"]["manifest_json_sha256"],
+                    "derivative_sha256": packet["hashes"]["derivative"]["sha256"],
+                },
+            },
         ],
         tmp_path,
     )
@@ -1073,7 +1144,8 @@ def test_audit_refs_seq_absent_from_chain_fails(tmp_path):
     files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
     chain = _chain_csv(
         _chain_events_for_packet(
-            files, packet["hashes"]["manifest_json_sha256"],
+            files,
+            packet["hashes"]["manifest_json_sha256"],
             packet["hashes"]["derivative"]["sha256"],
         ),
         tmp_path,
@@ -1082,8 +1154,10 @@ def test_audit_refs_seq_absent_from_chain_fails(tmp_path):
     assert not report.valid
     refs = {cc.name: cc for cc in report.chain_hash_checks if cc.name.startswith("audit_refs")}
     assert refs["audit_refs.bundle_download_seq vs audit chain"].status == "mismatch"
-    assert "not present in the exported audit chain" in \
-        refs["audit_refs.bundle_download_seq vs audit chain"].detail
+    assert (
+        "not present in the exported audit chain"
+        in refs["audit_refs.bundle_download_seq vs audit chain"].detail
+    )
 
 
 def test_audit_refs_null_stays_uncheckable_not_a_failure(tmp_path):
@@ -1097,7 +1171,8 @@ def test_audit_refs_null_stays_uncheckable_not_a_failure(tmp_path):
     files["release_packet.json"] = json.dumps(packet, indent=2, sort_keys=True).encode()
     chain = _chain_csv(
         _chain_events_for_packet(
-            files, packet["hashes"]["manifest_json_sha256"],
+            files,
+            packet["hashes"]["manifest_json_sha256"],
             packet["hashes"]["derivative"]["sha256"],
         ),
         tmp_path,
@@ -1115,10 +1190,12 @@ def test_audit_refs_checked_even_when_event_not_found(tmp_path):
     files = _packet_files()
     chain = _chain_csv(
         [
-            {"action": "document.upload", "actor_id": "operator",
-             "payload": {"document_id": "OTHER"}},
-            {"action": "bundle.download", "actor_id": "operator",
-             "payload": {"job_id": "OTHER"}},
+            {
+                "action": "document.upload",
+                "actor_id": "operator",
+                "payload": {"document_id": "OTHER"},
+            },
+            {"action": "bundle.download", "actor_id": "operator", "payload": {"job_id": "OTHER"}},
         ],
         tmp_path,
     )
@@ -1130,19 +1207,29 @@ def test_audit_refs_checked_even_when_event_not_found(tmp_path):
     assert refs["audit_refs.certificate_issued_seq vs audit chain"].status == "mismatch"
 
 
-
-
-
 def test_verifier_never_imports_the_engine_or_app_internals():
     src = (TOOLS / "counselclear_verify_release_packet.py").read_text()
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     for banned in (
-        "engine_api", "clean_to_bundle", "inspect_bytes", "import policies",
-        "import sqlalchemy", "from sqlalchemy", "import fastapi", "from fastapi",
-        "from app.", "import app.", "from app import",
-        "import requests", "import urllib", "import socket", "import http.client",
+        "engine_api",
+        "clean_to_bundle",
+        "inspect_bytes",
+        "import policies",
+        "import sqlalchemy",
+        "from sqlalchemy",
+        "import fastapi",
+        "from fastapi",
+        "from app.",
+        "import app.",
+        "from app import",
+        "import requests",
+        "import urllib",
+        "import socket",
+        "import http.client",
     ):
-        assert banned not in code, f"counselclear_verify_release_packet.py must not reference {banned}"
+        assert banned not in code, (
+            f"counselclear_verify_release_packet.py must not reference {banned}"
+        )
 
 
 # --- MUST-1: audit-chain cross-check (--audit-csv) ----------------------------
@@ -1160,7 +1247,9 @@ def _chain_csv(events: list[dict], tmp_path: Path, name: str = "audit.csv") -> P
     for ev in events:
         ev.setdefault("seq", 0)
         ev["prev_hash"] = prev
-        ev["row_hash"] = verifier._event_row_hash(prev, ev["seq"], ev["actor_id"], ev["action"], ev["payload"])
+        ev["row_hash"] = verifier._event_row_hash(
+            prev, ev["seq"], ev["actor_id"], ev["action"], ev["payload"]
+        )
         prev = ev["row_hash"]
     for i, ev in enumerate(events):
         ev["seq"] = i
@@ -1168,38 +1257,70 @@ def _chain_csv(events: list[dict], tmp_path: Path, name: str = "audit.csv") -> P
     prev = "0" * 64
     for ev in events:
         ev["prev_hash"] = prev
-        ev["row_hash"] = verifier._event_row_hash(prev, ev["seq"], ev["actor_id"], ev["action"], ev["payload"])
+        ev["row_hash"] = verifier._event_row_hash(
+            prev, ev["seq"], ev["actor_id"], ev["action"], ev["payload"]
+        )
         prev = ev["row_hash"]
     buf = _io.StringIO()
     w = csv.writer(buf)
     w.writerow(["seq", "at", "action", "actor_id", "payload_json", "prev_hash", "row_hash"])
     for ev in events:
-        w.writerow([ev["seq"], "2026-08-29T00:00:00+00:00", ev["action"], ev["actor_id"],
-                    json.dumps(ev["payload"]), ev["prev_hash"], ev["row_hash"]])
+        w.writerow(
+            [
+                ev["seq"],
+                "2026-08-29T00:00:00+00:00",
+                ev["action"],
+                ev["actor_id"],
+                json.dumps(ev["payload"]),
+                ev["prev_hash"],
+                ev["row_hash"],
+            ]
+        )
     p = tmp_path / name
     p.write_text(buf.getvalue())
     return p
 
 
-def _chain_events_for_packet(packet_files: dict[bytes], manifest_sha: str, deriv_sha: str,
-                            job_id: str = "JOB1") -> list[dict]:
+def _chain_events_for_packet(
+    packet_files: dict[bytes], manifest_sha: str, deriv_sha: str, job_id: str = "JOB1"
+) -> list[dict]:
     """A realistic matter chain for a pulled packet: the packet's own
     audit_refs (bundle_download_seq=1, certificate_issued_seq=2 in the
     _packet_files fixture) cite bundle.download/certificate.issued rows,
     which job_bundle appends for every real packet -- so the synthetic
     chain carries them at those seqs, the way a real export always does."""
     return [
-        {"action": "document.upload", "actor_id": "operator",
-         "payload": {"document_id": "DOC1"}},
-        {"action": "bundle.download", "actor_id": "operator",
-         "payload": {"job_id": job_id, "include_original": False}},
-        {"action": "certificate.issued", "actor_id": "operator",
-         "payload": {"job_id": job_id, "document_id": "DOC1", "kind": "sanitize",
-                     "policy_id": "external_sharing", "status": "done"}},
-        {"action": "job.sanitize", "actor_id": "operator",
-         "payload": {"job_id": job_id, "document_id": "DOC1", "policy_id": "external_sharing",
-                     "status": "done", "verification_pass": True, "no_decision_count": 0,
-                     "manifest_sha256": manifest_sha, "derivative_sha256": deriv_sha}},
+        {"action": "document.upload", "actor_id": "operator", "payload": {"document_id": "DOC1"}},
+        {
+            "action": "bundle.download",
+            "actor_id": "operator",
+            "payload": {"job_id": job_id, "include_original": False},
+        },
+        {
+            "action": "certificate.issued",
+            "actor_id": "operator",
+            "payload": {
+                "job_id": job_id,
+                "document_id": "DOC1",
+                "kind": "sanitize",
+                "policy_id": "external_sharing",
+                "status": "done",
+            },
+        },
+        {
+            "action": "job.sanitize",
+            "actor_id": "operator",
+            "payload": {
+                "job_id": job_id,
+                "document_id": "DOC1",
+                "policy_id": "external_sharing",
+                "status": "done",
+                "verification_pass": True,
+                "no_decision_count": 0,
+                "manifest_sha256": manifest_sha,
+                "derivative_sha256": deriv_sha,
+            },
+        },
     ]
 
 
@@ -1211,7 +1332,8 @@ def test_audit_chain_cross_check_match(tmp_path):
     packet = json.loads(files["release_packet.json"])
     chain = _chain_csv(
         _chain_events_for_packet(
-            files, packet["hashes"]["manifest_json_sha256"],
+            files,
+            packet["hashes"]["manifest_json_sha256"],
             packet["hashes"]["derivative"]["sha256"],
         ),
         tmp_path,
@@ -1240,13 +1362,17 @@ def test_audit_chain_detects_tampered_manifest(tmp_path):
     tampered[10] ^= 1
     files["manifest.json"] = bytes(tampered)
     files["release_packet.json"] = json.dumps(
-        {**packet, "hashes": {**packet["hashes"],
-                              "manifest_json_sha256": _sha256(files["manifest.json"])}},
-        indent=2, sort_keys=True,
+        {
+            **packet,
+            "hashes": {**packet["hashes"], "manifest_json_sha256": _sha256(files["manifest.json"])},
+        },
+        indent=2,
+        sort_keys=True,
     ).encode()
     chain = _chain_csv(
         _chain_events_for_packet(
-            files, packet["hashes"]["manifest_json_sha256"],  # the honest, original hash
+            files,
+            packet["hashes"]["manifest_json_sha256"],  # the honest, original hash
             packet["hashes"]["derivative"]["sha256"],
         ),
         tmp_path,
@@ -1289,7 +1415,13 @@ def test_audit_chain_missing_event_is_reported_not_crashed(tmp_path):
     a chain that never recorded it."""
     files = _packet_files()
     chain = _chain_csv(
-        [{"action": "document.upload", "actor_id": "operator", "payload": {"document_id": "OTHER"}}],
+        [
+            {
+                "action": "document.upload",
+                "actor_id": "operator",
+                "payload": {"document_id": "OTHER"},
+            }
+        ],
         tmp_path,
     )
     report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
@@ -1320,8 +1452,9 @@ def test_event_hash_matches_app_construction():
     from app.audit import event_hash
 
     payload = {"job_id": "J1", "status": "done", "manifest_sha256": "a" * 64, "n": [1, {"x": None}]}
-    assert verifier._event_row_hash("0" * 64, 3, "operator", "job.sanitize", payload) == \
-        event_hash("0" * 64, 3, "operator", "job.sanitize", payload)
+    assert verifier._event_row_hash("0" * 64, 3, "operator", "job.sanitize", payload) == event_hash(
+        "0" * 64, 3, "operator", "job.sanitize", payload
+    )
 
 
 # --- MUST-2: packet signatures (--public-key) ----------------------------------
@@ -1338,9 +1471,7 @@ def _ed25519():
 def _pub_raw(key) -> bytes:
     from cryptography.hazmat.primitives import serialization
 
-    return key.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
+    return key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
 
 def _sign_packet_files(files: dict[str, bytes], key) -> tuple[dict[str, bytes], dict[str, bytes]]:
@@ -1527,8 +1658,9 @@ def test_public_key_cli_accepts_pem_and_hex_forms(tmp_path):
     for kf in (pem_file, hex_file):
         loaded = verifier._load_public_keys([kf])
         assert list(loaded) == list(keys), f"{kf.name} must load as key_id {next(iter(keys))}"
-        report = verifier.verify_release_packet(_write_dir(tmp_path / kf.stem, files),
-                                                public_keys=loaded)
+        report = verifier.verify_release_packet(
+            _write_dir(tmp_path / kf.stem, files), public_keys=loaded
+        )
         assert report.signature_status == "verified", f"{kf.name} form failed"
 
 
@@ -1645,21 +1777,37 @@ def test_packet_canonical_bytes_matches_app_construction():
         "spec_version": "1.0",
         "packet_id": "pk1",
         "release_id": None,
-        "release": {"profile_id": "p", "recipient_type": "r", "recipient_name": "n",
-                    "purpose": "u", "intended_external": True},
+        "release": {
+            "profile_id": "p",
+            "recipient_type": "r",
+            "recipient_name": "n",
+            "purpose": "u",
+            "intended_external": True,
+        },
         "policy": {"id": None, "version": None, "digest": None},
-        "hashes": {"derivative": {"filename": "f.docx", "sha256": "a" * 64},
-                   "manifest_json_sha256": "b" * 64},
+        "hashes": {
+            "derivative": {"filename": "f.docx", "sha256": "a" * 64},
+            "manifest_json_sha256": "b" * 64,
+        },
         "audit_refs": {"bundle_download_seq": 3, "certificate_issued_seq": 4},
-        "legal_justifications": [{"subtype": "s", "action": "keep",
-                                  "legal_justification": {"basis": "privilege", "note": "x"}}],
+        "legal_justifications": [
+            {
+                "subtype": "s",
+                "action": "keep",
+                "legal_justification": {"basis": "privilege", "note": "x"},
+            }
+        ],
         "limitations": ["l1"],
         "anchor": {"type": "ed25519-operator", "digest": None, "reference": "c" * 16},
-        "signature": {"algorithm": "ed25519", "key_id": "c" * 16,
-                      "signed_fields": "release_packet.v1.canonical",
-                      "digest": "sha256:" + "d" * 64, "value": "e" * 128},
+        "signature": {
+            "algorithm": "ed25519",
+            "key_id": "c" * 16,
+            "signed_fields": "release_packet.v1.canonical",
+            "digest": "sha256:" + "d" * 64,
+            "value": "e" * 128,
+        },
         "unicode": "café — invariant under ensure_ascii?",
-        "escaped": "quote\" backslash\\ newline\n",
+        "escaped": 'quote" backslash\\ newline\n',
     }
     assert verifier._packet_canonical_bytes(packet) == packet_canonical_bytes(packet)
 
@@ -1692,27 +1840,43 @@ def test_packet_canonical_bytes_roundtrip_stability():
         "spec_version": "1.0",
         "packet_id": "pk1",
         "release_id": None,
-        "release": {"profile_id": "p", "recipient_type": "r", "recipient_name": "n",
-                    "purpose": "u", "intended_external": True},
+        "release": {
+            "profile_id": "p",
+            "recipient_type": "r",
+            "recipient_name": "n",
+            "purpose": "u",
+            "intended_external": True,
+        },
         "policy": {"id": None, "version": 3, "digest": None},
-        "hashes": {"derivative": {"filename": "f.docx", "sha256": "a" * 64},
-                   "manifest_json_sha256": "b" * 64},
+        "hashes": {
+            "derivative": {"filename": "f.docx", "sha256": "a" * 64},
+            "manifest_json_sha256": "b" * 64,
+        },
         "audit_refs": {"bundle_download_seq": 3, "certificate_issued_seq": 4},
-        "legal_justifications": [{"subtype": "s", "action": "keep",
-                                  "legal_justification": {"basis": "privilege", "note": "x"}}],
+        "legal_justifications": [
+            {
+                "subtype": "s",
+                "action": "keep",
+                "legal_justification": {"basis": "privilege", "note": "x"},
+            }
+        ],
         "limitations": ["l1", ""],
         "anchor": {"type": "ed25519-operator", "digest": None, "reference": "c" * 16},
         "unicode": "café — ünïcödé ✓",
-        "escaped": "quote\" backslash\\ newline\n\t",
+        "escaped": 'quote" backslash\\ newline\n\t',
         "zero": 0,
         "negative": -42,
         "false": False,
         "nested": {"deep": {"deeper": [{"leaf": None, "n": 1}, {"leaf": True, "n": 2}]}},
         # The signature block is excluded from the canonical content --
         # present here to prove the exclusion holds through the roundtrip.
-        "signature": {"algorithm": "ed25519", "key_id": "c" * 16,
-                      "signed_fields": "release_packet.v1.canonical",
-                      "digest": "sha256:" + "d" * 64, "value": "e" * 128},
+        "signature": {
+            "algorithm": "ed25519",
+            "key_id": "c" * 16,
+            "signed_fields": "release_packet.v1.canonical",
+            "digest": "sha256:" + "d" * 64,
+            "value": "e" * 128,
+        },
     }
 
     original = packet_canonical_bytes(payload)
@@ -1766,8 +1930,11 @@ def test_combined_mode_checks_signature_ref_agreement(tmp_path):
     (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
     report = verifier.verify_release_packet_and_result(out, public_keys=keys)
     assert report.valid, report.to_text()
-    ref_check = next(cc for cc in report.agreement
-                     if cc.name == "signing key_id (packet signature vs result signature_ref)")
+    ref_check = next(
+        cc
+        for cc in report.agreement
+        if cc.name == "signing key_id (packet signature vs result signature_ref)"
+    )
     assert ref_check.status == "match"
 
     # Now the disagreement: a result from a DIFFERENT deployment (different key).
@@ -1775,8 +1942,11 @@ def test_combined_mode_checks_signature_ref_agreement(tmp_path):
     (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
     report = verifier.verify_release_packet_and_result(out, public_keys=keys)
     assert not report.valid
-    ref_check = next(cc for cc in report.agreement
-                     if cc.name == "signing key_id (packet signature vs result signature_ref)")
+    ref_check = next(
+        cc
+        for cc in report.agreement
+        if cc.name == "signing key_id (packet signature vs result signature_ref)"
+    )
     assert ref_check.status == "mismatch"
 
 
@@ -1793,6 +1963,9 @@ def test_combined_mode_signature_ref_unavailable_for_legacy_pair(tmp_path):
 
     report = verifier.verify_release_packet_and_result(out, public_keys=keys)
     assert report.valid, report.to_text()
-    ref_check = next(cc for cc in report.agreement
-                     if cc.name == "signing key_id (packet signature vs result signature_ref)")
+    ref_check = next(
+        cc
+        for cc in report.agreement
+        if cc.name == "signing key_id (packet signature vs result signature_ref)"
+    )
     assert ref_check.status == "unavailable"

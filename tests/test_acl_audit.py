@@ -347,7 +347,9 @@ def test_audit_no_decision_count_reflects_production_findings_kept(tmp_path, mon
     matter = c.post("/v1/matters", json={"name": "m"}).json()
     doc = c.post(
         f"/v1/matters/{matter['id']}/documents",
-        files={"file": ("spa.docx", (FIXTURES / "spa.docx").read_bytes(), "application/octet-stream")},
+        files={
+            "file": ("spa.docx", (FIXTURES / "spa.docx").read_bytes(), "application/octet-stream")
+        },
     ).json()
     job = c.post(
         f"/v1/matters/{matter['id']}/documents/{doc['id']}/sanitize-jobs",
@@ -439,8 +441,13 @@ def test_audit_chain_cannot_fork_even_if_the_process_lock_is_bypassed(tmp_path):
             start.wait()  # maximize the chance both threads read seq=None together
             last = s.query(AuditEvent).filter_by(matter_id="m1").count()
             ev = AuditEvent(
-                matter_id="m1", seq=last, actor_id=actor, action="matter.create",
-                payload={}, prev_hash="0" * 64, row_hash=f"hash-{actor}",
+                matter_id="m1",
+                seq=last,
+                actor_id=actor,
+                action="matter.create",
+                payload={},
+                prev_hash="0" * 64,
+                row_hash=f"hash-{actor}",
             )
             s.add(ev)
             s.commit()

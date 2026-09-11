@@ -110,9 +110,7 @@ def box_blur_1px(width: int, height: int, pix: bytes) -> bytearray:
             base = (row + x) * 3
             for c in range(3):
                 tmp[base + c] = (
-                    src[(row + xl) * 3 + c]
-                    + src[base + c]
-                    + src[(row + xr) * 3 + c]
+                    src[(row + xl) * 3 + c] + src[base + c] + src[(row + xr) * 3 + c]
                 ) // 3
     for y in range(height):
         yt = y - 1 if y > 0 else 0
@@ -121,16 +119,12 @@ def box_blur_1px(width: int, height: int, pix: bytes) -> bytearray:
             base = (y * width + x) * 3
             for c in range(3):
                 out[base + c] = (
-                    tmp[(yt * width + x) * 3 + c]
-                    + tmp[base + c]
-                    + tmp[(yb * width + x) * 3 + c]
+                    tmp[(yt * width + x) * 3 + c] + tmp[base + c] + tmp[(yb * width + x) * 3 + c]
                 ) // 3
     return out
 
 
-def _masked(
-    x: int, y: int, boxes: list[tuple[int, int, int, int]]
-) -> bool:
+def _masked(x: int, y: int, boxes: list[tuple[int, int, int, int]]) -> bool:
     return any(x0 <= x <= x1 and y0 <= y <= y1 for x0, y0, x1, y1 in boxes)
 
 
@@ -287,11 +281,7 @@ def visual_compare(
                 )
                 result["warn"] = True
                 continue
-            masks = (
-                bbox_mask_boxes(original_report or {}, page, w, h)
-                if original_report
-                else []
-            )
+            masks = bbox_mask_boxes(original_report or {}, page, w, h) if original_report else []
             metrics = compare_pixels(w, h, pix_o, pix_d, masks)
             entry = {"page": page, **metrics, "masked_boxes": len(masks)}
             entry["warn"] = metrics["fraction_over"] > THRESHOLD_FRACTION

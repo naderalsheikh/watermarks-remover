@@ -59,9 +59,7 @@ def packet(tmp_path, monkeypatch):
     c = TestClient(create_app(cfg.data_root))
     assert c.post("/v1/auth/login", json={"password": PW}).status_code == 200
     mid = c.post("/v1/matters", json={"name": "keys"}).json()["id"]
-    blob = _docx(
-        {"word/document.xml": _document("<w:p><w:r><w:t>Body.</w:t></w:r></w:p>")}
-    )
+    blob = _docx({"word/document.xml": _document("<w:p><w:r><w:t>Body.</w:t></w:r></w:p>")})
     doc = c.post(
         f"/v1/matters/{mid}/documents",
         files={"file": ("a.docx", blob, "application/octet-stream")},
@@ -179,8 +177,10 @@ def test_published_key_that_lies_about_its_key_id_is_ignored(packet):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     _dir, pkt = packet
-    other = Ed25519PrivateKey.generate().public_key().public_bytes(
-        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
+    other = (
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
     )
     lying = json.loads(json.dumps(pkt))
     lying["signature"]["public_key"] = other.hex()
@@ -224,9 +224,7 @@ def test_strict_mode_rejects_a_self_published_key(packet):
     path, pkt = packet
     assert verifier.main([str(path), "--verify-signature"]) == 1
     assert (
-        verifier.main(
-            [str(path), "--verify-signature", "--key-fingerprint", _fingerprint(pkt)]
-        )
+        verifier.main([str(path), "--verify-signature", "--key-fingerprint", _fingerprint(pkt)])
         == 0
     )
 

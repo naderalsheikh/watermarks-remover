@@ -105,7 +105,9 @@ def test_artifact_schemas_are_valid_draft_2020_12():
         "release_result.schema.json",
     ):
         Draft202012Validator.check_schema(_schema(name))
-    Draft202012Validator.check_schema(json.loads((ENGINE_SCHEMA_DIR / "finding.schema.json").read_text()))
+    Draft202012Validator.check_schema(
+        json.loads((ENGINE_SCHEMA_DIR / "finding.schema.json").read_text())
+    )
 
 
 def test_finding_schema_copies_accept_optional_legal_justification():
@@ -174,9 +176,10 @@ def test_emit_manifest_carries_schema_pin():
     # exists to prove the pin follows the file -- not to freeze a number
     # that has to be hand-edited every time the contract moves.
     assert manifest["schema_version"] == _schema("manifest.schema.json")["version"]
-    assert manifest["schema_sha256"] == hashlib.sha256(
-        (SCHEMA_DIR / "manifest.schema.json").read_bytes()
-    ).hexdigest()
+    assert (
+        manifest["schema_sha256"]
+        == hashlib.sha256((SCHEMA_DIR / "manifest.schema.json").read_bytes()).hexdigest()
+    )
 
 
 def test_real_release_artifacts_match_published_schemas(client):
@@ -208,17 +211,20 @@ def test_real_release_artifacts_match_published_schemas(client):
     # it was built against -- version + file hash, checked here against
     # the same published files the schemas above came from.
     assert manifest["schema_version"] == _schema("manifest.schema.json")["version"]
-    assert manifest["schema_sha256"] == hashlib.sha256(
-        (SCHEMA_DIR / "manifest.schema.json").read_bytes()
-    ).hexdigest()
+    assert (
+        manifest["schema_sha256"]
+        == hashlib.sha256((SCHEMA_DIR / "manifest.schema.json").read_bytes()).hexdigest()
+    )
     assert report["schema_version"] == _schema("report.schema.json")["version"]
-    assert report["schema_sha256"] == hashlib.sha256(
-        (SCHEMA_DIR / "report.schema.json").read_bytes()
-    ).hexdigest()
+    assert (
+        report["schema_sha256"]
+        == hashlib.sha256((SCHEMA_DIR / "report.schema.json").read_bytes()).hexdigest()
+    )
     assert release_packet["schema_version"] == _schema("release_packet.schema.json")["version"]
-    assert release_packet["schema_sha256"] == hashlib.sha256(
-        (SCHEMA_DIR / "release_packet.schema.json").read_bytes()
-    ).hexdigest()
+    assert (
+        release_packet["schema_sha256"]
+        == hashlib.sha256((SCHEMA_DIR / "release_packet.schema.json").read_bytes()).hexdigest()
+    )
     expected = [
         {
             "subtype": "comments_and_notes",
@@ -261,10 +267,14 @@ def test_all_ballot_terms_validate_against_artifact_schemas():
     ):
         schema = _schema(schema_name)
         if "$defs" in schema and "legal_justification" in schema["$defs"]:
-            allowed_bases = set(schema["$defs"]["legal_justification"]["properties"]["basis"]["enum"])
+            allowed_bases = set(
+                schema["$defs"]["legal_justification"]["properties"]["basis"]["enum"]
+            )
         elif "properties" in schema and "legal_justification" in schema["properties"]:
             allowed_bases = set(
-                schema["properties"]["legal_justification"]["oneOf"][1]["properties"]["basis"]["enum"]
+                schema["properties"]["legal_justification"]["oneOf"][1]["properties"]["basis"][
+                    "enum"
+                ]
             )
         else:
             raise ValueError(f"Could not locate legal_justification in {schema_name}")

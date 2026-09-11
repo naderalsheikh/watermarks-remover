@@ -96,7 +96,9 @@ def test_clean_pdf_has_no_legal_hits():
 
 
 def test_info_summary_redacts_but_keeps_producer():
-    blob = _pdf_structured_blob(_pdf(info=b"<< /Author (Very Secret Name) /Producer (Claude Opus) >>"))
+    blob = _pdf_structured_blob(
+        _pdf(info=b"<< /Author (Very Secret Name) /Producer (Claude Opus) >>")
+    )
     info = pdf_legal.pdf_info_summary(blob)
     assert info["author"] == "present (16 chars)"
     assert info["producer"] == "Claude Opus"

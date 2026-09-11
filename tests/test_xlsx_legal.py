@@ -303,7 +303,7 @@ def test_hidden_rows_and_cols_counted():
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
         '<cols><col min="2" max="3" width="9" hidden="1"/><col min="5" max="5" width="9"/></cols>'
-        '<sheetData>'
+        "<sheetData>"
         '<row r="1"><c r="A1"><v>visible</v></c></row>'
         '<row r="4" hidden="1"><c r="A4"><v>secret</v></c></row>'
         '<row r="7" hidden="true"><c r="A7"><v>also</v></c></row>'
@@ -319,13 +319,16 @@ def test_hidden_rows_and_cols_counted():
 
 
 def _full_xlsx() -> bytes:
-    wb = _workbook_xml(
-        sheets=(
-            '<sheet name="Public" sheetId="1" r:id="rId1"/>'
-            '<sheet name="Secret" sheetId="2" state="hidden" r:id="rId2"/>'
-        ),
-        defined_names='<definedName name="HiddenRange" hidden="1">\'Secret\'!$A$1</definedName>',
-    ) + '<externalReferences><externalReference r:id="rIdX"/></externalReferences>'
+    wb = (
+        _workbook_xml(
+            sheets=(
+                '<sheet name="Public" sheetId="1" r:id="rId1"/>'
+                '<sheet name="Secret" sheetId="2" state="hidden" r:id="rId2"/>'
+            ),
+            defined_names='<definedName name="HiddenRange" hidden="1">\'Secret\'!$A$1</definedName>',
+        )
+        + '<externalReferences><externalReference r:id="rIdX"/></externalReferences>'
+    )
     rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -343,7 +346,7 @@ def _full_xlsx() -> bytes:
         "</Types>"
     )
     return _xlsx(
-        ("xl/comments1.xml", "<comments><comment ref=\"A1\"/></comments>"),
+        ("xl/comments1.xml", '<comments><comment ref="A1"/></comments>'),
         ("xl/threadedComments/threadedComment1.xml", "<threadedComments/>"),
         ("xl/persons/person.xml", "<persons><person/></persons>"),
         ("xl/externalLinks/externalLink1.xml", "<externalLink/>"),

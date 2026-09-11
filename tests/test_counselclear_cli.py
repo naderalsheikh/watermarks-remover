@@ -66,18 +66,14 @@ def test_intake_refuses_non_directory(tmp_path, capsys):
     not_a_dir = tmp_path / "x.txt"
     not_a_dir.write_text("hi")
     out = tmp_path / "intake.html"
-    rc = counselclear.main(
-        ["intake", str(not_a_dir), "-o", str(out), "--i-am-authorized"]
-    )
+    rc = counselclear.main(["intake", str(not_a_dir), "-o", str(out), "--i-am-authorized"])
     assert rc == 2
     assert "not a directory" in capsys.readouterr().err
 
 
 def test_intake_writes_report_and_redacts_identities_by_default(tmp_path):
     out = tmp_path / "intake.html"
-    rc = counselclear.main(
-        ["intake", str(FIXTURES_LEGAL), "-o", str(out), "--i-am-authorized"]
-    )
+    rc = counselclear.main(["intake", str(FIXTURES_LEGAL), "-o", str(out), "--i-am-authorized"])
     assert rc == 1  # the fixture corpus has findings
     html = out.read_text(encoding="utf-8")
     assert "Jane Associate" not in html  # identity not revealed by default
@@ -87,10 +83,20 @@ def test_intake_writes_report_and_redacts_identities_by_default(tmp_path):
 def test_intake_reveal_identities_and_json_out(tmp_path):
     out = tmp_path / "intake.html"
     data = tmp_path / "intake.json"
-    rc = counselclear.main([
-        "intake", str(FIXTURES_LEGAL), "-o", str(out), "--json-out", str(data),
-        "--i-am-authorized", "--reveal-identities", "--matter", "M-1",
-    ])
+    rc = counselclear.main(
+        [
+            "intake",
+            str(FIXTURES_LEGAL),
+            "-o",
+            str(out),
+            "--json-out",
+            str(data),
+            "--i-am-authorized",
+            "--reveal-identities",
+            "--matter",
+            "M-1",
+        ]
+    )
     assert rc == 1
     html = out.read_text(encoding="utf-8")
     assert "Jane Associate" in html

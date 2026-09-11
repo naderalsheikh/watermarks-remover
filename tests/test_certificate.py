@@ -328,7 +328,10 @@ def test_certificate_shows_operator_kept_limitation(env):
     mid = _matter(c)
     doc = _upload(c, mid, "spa.docx")
     job = _sanitize(
-        c, mid, doc, policy_id="production",
+        c,
+        mid,
+        doc,
+        policy_id="production",
         finding_decisions={"comments_and_notes": "keep", "tracked_changes": "keep"},
     )
     assert job["status"] == "done", job["error"]
@@ -503,7 +506,9 @@ def test_certificate_marks_all_unspecified_bases_as_not_a_determination(env):
     mid = _matter(c)
     doc = _upload(c, mid, "spa.docx")
     job = _sanitize(
-        c, mid, doc,
+        c,
+        mid,
+        doc,
         policy_id="production",
         finding_decisions={"comments_and_notes": "keep", "tracked_changes": "keep"},
     )
@@ -539,7 +544,9 @@ def test_certificate_legal_basis_note_is_html_escaped(env):
     mid = _matter(c)
     doc = _upload(c, mid, "spa.docx")
     job = _sanitize(
-        c, mid, doc,
+        c,
+        mid,
+        doc,
         policy_id="production",
         finding_decisions={"comments_and_notes": "keep", "tracked_changes": "approve"},
         legal_justifications={
@@ -589,9 +596,7 @@ def test_certificate_legal_basis_release_route_payload_matches_the_web_ui(env):
                 "comments_and_notes": "keep",
                 "tracked_changes": "approve",
             },
-            "legal_justifications": {
-                "comments_and_notes": {"basis": "court_order", "note": ""}
-            },
+            "legal_justifications": {"comments_and_notes": {"basis": "court_order", "note": ""}},
         },
     )
     assert r.status_code == 200, r.text
@@ -618,7 +623,9 @@ def test_certificate_legal_basis_reaches_the_bundle_embedded_certificate(env):
     mid = _matter(c)
     doc = _upload(c, mid, "spa.docx")
     job = _sanitize(
-        c, mid, doc,
+        c,
+        mid,
+        doc,
         policy_id="production",
         finding_decisions={"comments_and_notes": "keep", "tracked_changes": "approve"},
         legal_justifications={

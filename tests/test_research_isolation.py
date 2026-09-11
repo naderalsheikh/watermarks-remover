@@ -54,9 +54,7 @@ SPINE_SUFFIXES = (".py", ".ts", ".tsx")
 
 # Module basenames under research/harnesses/, which is the only directory
 # there holding importable Python.
-HARNESS_MODULES = sorted(
-    p.stem for p in (RESEARCH / "harnesses").glob("*.py")
-)
+HARNESS_MODULES = sorted(p.stem for p in (RESEARCH / "harnesses").glob("*.py"))
 
 # Named in research/README.md as the quarantined upstreams.
 QUARANTINED_PROJECTS = ("ctrlregen", "markllm", "markdiffusion", "synthid")
@@ -167,7 +165,8 @@ def test_no_upstream_source_is_vendored():
     vendored = [
         str(p.relative_to(REPO))
         for p in RESEARCH.rglob("*")
-        if p.is_dir() and p.name in ("noai-watermark", "MarkLLM", "MarkDiffusion", "reverse-SynthID")
+        if p.is_dir()
+        and p.name in ("noai-watermark", "MarkLLM", "MarkDiffusion", "reverse-SynthID")
     ]
     assert vendored == [], f"upstream source vendored under research/: {vendored}"
 

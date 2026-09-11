@@ -36,9 +36,7 @@ PW = "pw12345"
 
 
 def _ts(days_ago: int, hours: int = 0) -> str:
-    return (datetime.now(UTC) - timedelta(days=days_ago, hours=hours)).isoformat(
-        timespec="seconds"
-    )
+    return (datetime.now(UTC) - timedelta(days=days_ago, hours=hours)).isoformat(timespec="seconds")
 
 
 def _seed_matter(s, mid: str, name: str, *, created_days_ago: int = 0, docs=(), user=OPERATOR):
@@ -356,7 +354,8 @@ def test_dashboard_recent_activity_from_api_events(env):
     mid = c.post("/v1/matters", json={"name": "Project Dandelion"}).json()["id"]
     with open(FIXTURES / "spa.docx", "rb") as f:
         doc = c.post(
-            f"/v1/matters/{mid}/documents", files={"file": ("spa.docx", f, "application/octet-stream")}
+            f"/v1/matters/{mid}/documents",
+            files={"file": ("spa.docx", f, "application/octet-stream")},
         ).json()
     r = c.post(
         f"/v1/matters/{mid}/documents/{doc['id']}/sanitize-jobs",
@@ -390,25 +389,47 @@ def test_dashboard_recent_rows_carry_payload_ids_for_deep_links(env):
         _seed_matter(s, "m1", "Merger")
         # newest first
         _seed_audit(
-            s, "e1", "m1", 5, "bundle.download", _ts(0),
+            s,
+            "e1",
+            "m1",
+            5,
+            "bundle.download",
+            _ts(0),
             payload={"job_id": "j9", "include_original": True},
         )
         _seed_audit(
-            s, "e2", "m1", 4, "release.terminal", _ts(1),
+            s,
+            "e2",
+            "m1",
+            4,
+            "release.terminal",
+            _ts(1),
             payload={"release_id": "r1", "job_id": "j8", "status": "done"},
         )
         _seed_audit(
-            s, "e3", "m1", 3, "job.sanitize", _ts(2),
+            s,
+            "e3",
+            "m1",
+            3,
+            "job.sanitize",
+            _ts(2),
             payload={"job_id": "j7", "document_id": "d3", "policy_id": "production"},
         )
         _seed_audit(
-            s, "e4", "m1", 2, "document.upload", _ts(3),
+            s,
+            "e4",
+            "m1",
+            2,
+            "document.upload",
+            _ts(3),
             payload={"document_id": "d3", "sha256": "ab" * 32, "bytes": 12},
         )
         _seed_audit(s, "e5", "m1", 1, "matter.create", _ts(4), payload={"name": "Merger"})
         # malformed/foreign-typed values must degrade to a matter link,
         # never surface as e.g. a job_id: null href
-        _seed_audit(s, "e6", "m1", 0, "job.sanitize", _ts(5), payload={"job_id": 7, "document_id": ""})
+        _seed_audit(
+            s, "e6", "m1", 0, "job.sanitize", _ts(5), payload={"job_id": 7, "document_id": ""}
+        )
         s.commit()
 
     recent = c.get("/v1/dashboard").json()["recent"]
@@ -449,7 +470,8 @@ def test_dashboard_unreviewed_findings_from_real_production_run(env):
     mid = c.post("/v1/matters", json={"name": "End to End"}).json()["id"]
     with open(FIXTURES / "spa.docx", "rb") as f:
         doc = c.post(
-            f"/v1/matters/{mid}/documents", files={"file": ("spa.docx", f, "application/octet-stream")}
+            f"/v1/matters/{mid}/documents",
+            files={"file": ("spa.docx", f, "application/octet-stream")},
         ).json()
     # Since the release gate (2026-09-02) an unreviewed keep cannot be
     # produced by any default policy -- production with no decisions is
@@ -471,8 +493,7 @@ def test_dashboard_unreviewed_findings_from_real_production_run(env):
         result = dict(job.result_json)
         manifest = dict(result["manifest"])
         manifest["actions"] = [
-            f"comments_and_notes:keep: kept: {NO_DECISION_MARKER} for this "
-            "approve-default finding"
+            f"comments_and_notes:keep: kept: {NO_DECISION_MARKER} for this approve-default finding"
         ]
         result["manifest"] = manifest
         job.result_json = result

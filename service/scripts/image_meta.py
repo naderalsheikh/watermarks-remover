@@ -40,6 +40,8 @@ def _quarantined_script(name: str) -> Path:
     if p.is_file():
         return p
     return SCRIPTS_DIR / name
+
+
 # WATERMARKS_SYNTHID_SCORER_URL is set, run_synthid_score calls the sidecar
 # instead of a local reverse-SynthID checkout — this keeps the published core
 # image free of the non-commercial upstream code. Read per call so tests can

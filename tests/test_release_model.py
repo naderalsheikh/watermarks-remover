@@ -60,7 +60,9 @@ def _matter(c) -> str:
 
 def _upload(c, mid: str, name: str) -> str:
     data = (FIXTURES / name).read_bytes()
-    r = c.post(f"/v1/matters/{mid}/documents", files={"file": (name, data, "application/octet-stream")})
+    r = c.post(
+        f"/v1/matters/{mid}/documents", files={"file": (name, data, "application/octet-stream")}
+    )
     assert r.status_code == 200, r.text
     return r.json()["id"]
 
@@ -248,7 +250,10 @@ def test_batch_release_mixed_outcome(env):
     _wait_batch_done(c, mid, batch_id)
 
     with sf() as s:
-        rows = {row.document_id: row for row in s.query(Release).filter(Release.batch_id == batch_id).all()}
+        rows = {
+            row.document_id: row
+            for row in s.query(Release).filter(Release.batch_id == batch_id).all()
+        }
         assert rows[good_id].status == "done"
         assert rows[bad_id].status == "refused"
         assert rows[good_id].finished_utc is not None
@@ -268,7 +273,11 @@ def test_batch_release_rejects_non_bulk_safe_profile(env):
     doc_id = _upload(c, mid, "spa.docx")
     r = c.post(
         f"/v1/matters/{mid}/releases",
-        json={"document_ids": [doc_id], "profile_id": "ediscovery_production", "recipient_type": "court"},
+        json={
+            "document_ids": [doc_id],
+            "profile_id": "ediscovery_production",
+            "recipient_type": "court",
+        },
     )
     assert r.status_code == 400
 
@@ -278,7 +287,11 @@ def test_batch_release_rejects_empty_document_ids(env):
     mid = _matter(c)
     r = c.post(
         f"/v1/matters/{mid}/releases",
-        json={"document_ids": [], "profile_id": "counterparty_deal_room", "recipient_type": "client"},
+        json={
+            "document_ids": [],
+            "profile_id": "counterparty_deal_room",
+            "recipient_type": "client",
+        },
     )
     assert r.status_code == 400
 
@@ -293,14 +306,20 @@ def test_release_events_live_in_the_same_matter_audit_chain(env):
     release_id = _create_release(c, mid, doc_id).json()["release"]["id"]
 
     with sf() as s:
-        events = s.query(AuditEvent).filter(AuditEvent.matter_id == mid).order_by(AuditEvent.seq).all()
+        events = (
+            s.query(AuditEvent).filter(AuditEvent.matter_id == mid).order_by(AuditEvent.seq).all()
+        )
         actions = [e.action for e in events]
         assert "release.created" in actions
         assert "release.terminal" in actions
         assert "job.sanitize" in actions
         # The business event brackets the execution event, never the
         # reverse: created before the job ran, terminal after it finished.
-        assert actions.index("release.created") < actions.index("job.sanitize") < actions.index("release.terminal")
+        assert (
+            actions.index("release.created")
+            < actions.index("job.sanitize")
+            < actions.index("release.terminal")
+        )
         # One gapless, hash-chained sequence -- no parallel chain for
         # Release's own events (document upload is also audited, so this
         # doesn't necessarily start at seq 1).
@@ -344,7 +363,10 @@ def test_job_payload_release_id_is_null_for_legacy_and_inspect_jobs(env):
     mid = _matter(c)
     doc_id = _upload(c, mid, "spa.docx")
 
-    r = c.post(f"/v1/matters/{mid}/documents/{doc_id}/sanitize-jobs", json={"policy_id": "external_sharing"})
+    r = c.post(
+        f"/v1/matters/{mid}/documents/{doc_id}/sanitize-jobs",
+        json={"policy_id": "external_sharing"},
+    )
     legacy_job = r.json()
     assert legacy_job["release_id"] is None
     assert legacy_job["profile_id"] is None
@@ -368,7 +390,11 @@ def test_batch_detail_results_carry_release_id_per_document(env):
     bad_id = _upload(c, mid, "macro.docm")
     r = c.post(
         f"/v1/matters/{mid}/releases",
-        json={"document_ids": [good_id, bad_id], "profile_id": "counterparty_deal_room", "recipient_type": "client"},
+        json={
+            "document_ids": [good_id, bad_id],
+            "profile_id": "counterparty_deal_room",
+            "recipient_type": "client",
+        },
     )
     batch_id = r.json()["batch"]["id"]
     _wait_batch_done(c, mid, batch_id)
@@ -408,7 +434,11 @@ def test_batch_release_created_events_fire_per_release_not_once_per_batch(env):
     doc_ids = [_upload(c, mid, "spa.docx"), _upload(c, mid, "spa.txt")]
     r = c.post(
         f"/v1/matters/{mid}/releases",
-        json={"document_ids": doc_ids, "profile_id": "counterparty_deal_room", "recipient_type": "client"},
+        json={
+            "document_ids": doc_ids,
+            "profile_id": "counterparty_deal_room",
+            "recipient_type": "client",
+        },
     )
     batch_id = r.json()["batch"]["id"]
     _wait_batch_done(c, mid, batch_id)
@@ -441,21 +471,37 @@ def test_cancel_batch_syncs_cancelled_childs_release_to_failed(env):
     with sf() as s:
         s.add(
             Batch(
-                id="cb1", matter_id=mid, kind="sanitize", policy_id="external_sharing",
-                requested_by="operator", total=1,
+                id="cb1",
+                matter_id=mid,
+                kind="sanitize",
+                policy_id="external_sharing",
+                requested_by="operator",
+                total=1,
             )
         )
         s.add(
             Job(
-                id="cbj1", matter_id=mid, document_id=doc_id, kind="sanitize", batch_id="cb1",
-                policy_id="external_sharing", status="queued",
+                id="cbj1",
+                matter_id=mid,
+                document_id=doc_id,
+                kind="sanitize",
+                batch_id="cb1",
+                policy_id="external_sharing",
+                status="queued",
             )
         )
         s.add(
             Release(
-                id="cbr1", matter_id=mid, document_id=doc_id, batch_id="cb1", job_id="cbj1",
-                policy_id="external_sharing", profile_id="counterparty_deal_room",
-                recipient_type="other", requested_by="operator", status="queued",
+                id="cbr1",
+                matter_id=mid,
+                document_id=doc_id,
+                batch_id="cb1",
+                job_id="cbj1",
+                policy_id="external_sharing",
+                profile_id="counterparty_deal_room",
+                recipient_type="other",
+                requested_by="operator",
+                status="queued",
             )
         )
         s.commit()
@@ -483,8 +529,13 @@ def test_release_packet_json_carries_release_context(env):
     mid = _matter(c)
     doc_id = _upload(c, mid, "spa.docx")
     body = _create_release(
-        c, mid, doc_id, recipient_type="client", recipient_name="Acme Corp",
-        purpose="quarterly filing", intended_external=False,
+        c,
+        mid,
+        doc_id,
+        recipient_type="client",
+        recipient_name="Acme Corp",
+        purpose="quarterly filing",
+        intended_external=False,
     ).json()
     release, job = body["release"], body["job"]
 
@@ -555,7 +606,10 @@ def test_release_packet_json_release_is_null_for_legacy_job(env):
     c, _sf, _cfg = env
     mid = _matter(c)
     doc_id = _upload(c, mid, "spa.docx")
-    r = c.post(f"/v1/matters/{mid}/documents/{doc_id}/sanitize-jobs", json={"policy_id": "external_sharing"})
+    r = c.post(
+        f"/v1/matters/{mid}/documents/{doc_id}/sanitize-jobs",
+        json={"policy_id": "external_sharing"},
+    )
     job_id = r.json()["id"]
     bundle = c.get(f"/v1/matters/{mid}/jobs/{job_id}/bundle")
     packet = json.loads(zipfile.ZipFile(io.BytesIO(bundle.content)).read("release_packet.json"))
@@ -621,15 +675,26 @@ def test_reconcile_stale_releases_syncs_release_whose_job_already_finished(env):
     with sf() as s:
         s.add(
             Job(
-                id="rj1", matter_id=mid, document_id=doc_id, kind="sanitize",
-                policy_id="external_sharing", status="done", finished_utc="2026-08-27T00:00:05+00:00",
+                id="rj1",
+                matter_id=mid,
+                document_id=doc_id,
+                kind="sanitize",
+                policy_id="external_sharing",
+                status="done",
+                finished_utc="2026-08-27T00:00:05+00:00",
             )
         )
         s.add(
             Release(
-                id="rr1", matter_id=mid, document_id=doc_id, job_id="rj1",
-                policy_id="external_sharing", profile_id="counterparty_deal_room",
-                recipient_type="other", requested_by="operator", status="queued",
+                id="rr1",
+                matter_id=mid,
+                document_id=doc_id,
+                job_id="rj1",
+                policy_id="external_sharing",
+                profile_id="counterparty_deal_room",
+                recipient_type="other",
+                requested_by="operator",
+                status="queued",
             )
         )
         s.commit()

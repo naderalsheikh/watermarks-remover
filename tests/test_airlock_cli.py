@@ -100,7 +100,12 @@ class FakeClient:
 
     def upload_document(self, matter_id: str, path: Path) -> dict:
         self.calls.append("upload_document")
-        return {"id": "doc1", "filename": path.name, "sha256": "0" * 64, "bytes": path.stat().st_size}
+        return {
+            "id": "doc1",
+            "filename": path.name,
+            "sha256": "0" * 64,
+            "bytes": path.stat().st_size,
+        }
 
     def release(
         self,
@@ -129,14 +134,24 @@ class FakeClient:
         else:
             job = {"id": "job1", "status": self.job_status, "error": self.job_error}
         release_result = _fake_release_result(
-            release_id="rel1", job_id="job1", document_id=doc_id, matter_id=matter_id,
-            status=job["status"], policy_id="external_sharing", profile_id=profile_id,
-            recipient_type=recipient_type, recipient_name=recipient_name, purpose=purpose,
-            intended_external=intended_external, reason=self.job_error or reason,
+            release_id="rel1",
+            job_id="job1",
+            document_id=doc_id,
+            matter_id=matter_id,
+            status=job["status"],
+            policy_id="external_sharing",
+            profile_id=profile_id,
+            recipient_type=recipient_type,
+            recipient_name=recipient_name,
+            purpose=purpose,
+            intended_external=intended_external,
+            reason=self.job_error or reason,
         )
         return {
             "release": {
-                "id": "rel1", "profile_id": profile_id, "recipient_type": recipient_type,
+                "id": "rel1",
+                "profile_id": profile_id,
+                "recipient_type": recipient_type,
                 "intended_external": intended_external,
             },
             "job": job,
@@ -146,7 +161,9 @@ class FakeClient:
     def wait_for_terminal(self, matter_id: str, job_id: str, *, timeout_s: float) -> dict:
         self.calls.append("wait_for_terminal")
         if self.job_status == "__timeout__":
-            raise airlock.AirlockError(f"job {job_id} did not reach a terminal state within {timeout_s:.0f}s")
+            raise airlock.AirlockError(
+                f"job {job_id} did not reach a terminal state within {timeout_s:.0f}s"
+            )
         return {"id": job_id, "status": self.job_status, "error": self.job_error}
 
     def get_release_packet_zip(self, matter_id: str, job_id: str) -> bytes | None:
@@ -163,7 +180,9 @@ class FakeClient:
             "verification": {"pass": True, "checks": []},
         }
         release_packet = {
-            "spec_version": "1.0", "job_id": job_id, "matter_id": matter_id,
+            "spec_version": "1.0",
+            "job_id": job_id,
+            "matter_id": matter_id,
             "policy": {"id": "external_sharing", "version": 1, "digest": None},
             "anchor": {"type": "none", "digest": None, "reference": None},
         }
@@ -221,7 +240,12 @@ class FakeBatchClient:
             raise airlock.AirlockError(f"upload failed for {path.name}: simulated network error")
         doc_id = f"doc-{path.name}"
         self._doc_to_filename[doc_id] = path.name
-        return {"id": doc_id, "filename": path.name, "sha256": "0" * 64, "bytes": path.stat().st_size}
+        return {
+            "id": doc_id,
+            "filename": path.name,
+            "sha256": "0" * 64,
+            "bytes": path.stat().st_size,
+        }
 
     def release(
         self,
@@ -251,15 +275,25 @@ class FakeBatchClient:
         else:
             job = {"id": job_id, "status": status, "error": error}
         release_result = _fake_release_result(
-            release_id=f"rel-{self._job_counter}", job_id=job_id, document_id=doc_id, matter_id=matter_id,
-            status=job["status"], policy_id="external_sharing", profile_id=profile_id,
-            recipient_type=recipient_type, recipient_name=recipient_name, purpose=purpose,
-            intended_external=intended_external, reason=error or reason,
+            release_id=f"rel-{self._job_counter}",
+            job_id=job_id,
+            document_id=doc_id,
+            matter_id=matter_id,
+            status=job["status"],
+            policy_id="external_sharing",
+            profile_id=profile_id,
+            recipient_type=recipient_type,
+            recipient_name=recipient_name,
+            purpose=purpose,
+            intended_external=intended_external,
+            reason=error or reason,
         )
         return {
             "release": {
-                "id": f"rel-{self._job_counter}", "profile_id": profile_id,
-                "recipient_type": recipient_type, "intended_external": intended_external,
+                "id": f"rel-{self._job_counter}",
+                "profile_id": profile_id,
+                "recipient_type": recipient_type,
+                "intended_external": intended_external,
             },
             "job": job,
             "release_result": release_result,
@@ -270,7 +304,9 @@ class FakeBatchClient:
         filename = self._job_to_filename[job_id]
         status = self.statuses_by_filename[filename]
         if status == "__timeout__":
-            raise airlock.AirlockError(f"job {job_id} did not reach a terminal state within {timeout_s:.0f}s")
+            raise airlock.AirlockError(
+                f"job {job_id} did not reach a terminal state within {timeout_s:.0f}s"
+            )
         return {"id": job_id, "status": status, "error": self.errors_by_filename.get(filename, "")}
 
     def get_release_packet_zip(self, matter_id: str, job_id: str) -> bytes | None:
@@ -283,7 +319,9 @@ class FakeBatchClient:
             "verification": {"pass": True, "checks": []},
         }
         release_packet = {
-            "spec_version": "1.0", "job_id": job_id, "matter_id": matter_id,
+            "spec_version": "1.0",
+            "job_id": job_id,
+            "matter_id": matter_id,
             "policy": {"id": "external_sharing", "version": 1, "digest": None},
             "anchor": {"type": "none", "digest": None, "reference": None},
         }
@@ -343,8 +381,14 @@ def test_run_airlock_success_writes_derivative_manifest_certificate_and_summary(
     assert summary["profile_id"] == "counterparty_deal_room"
     assert summary["recipient_type"] == "opposing_counsel"
     assert set(summary["files_written"]) == {
-        "release_result.json", "doc.sanitized.docx", "manifest.json", "report.json",
-        "certificate.html", "release_packet.json", "README.txt", "AIRLOCK_RESULT.json",
+        "release_result.json",
+        "doc.sanitized.docx",
+        "manifest.json",
+        "report.json",
+        "certificate.html",
+        "release_packet.json",
+        "README.txt",
+        "AIRLOCK_RESULT.json",
     }
     # The no-decision limitation (now sourced from release_result, not a
     # hand-parsed manifest) must surface, not get silently absorbed into
@@ -356,7 +400,10 @@ def test_run_airlock_success_writes_derivative_manifest_certificate_and_summary(
     # certificate together -- not three separate requests for the same
     # content (get_certificate_html is refused/failed-only, see below).
     assert client.calls == [
-        "upload_document", "release", "wait_for_terminal", "get_release_packet_zip",
+        "upload_document",
+        "release",
+        "wait_for_terminal",
+        "get_release_packet_zip",
     ]
 
 
@@ -492,9 +539,17 @@ def test_run_airlock_batch_mixed_success_and_refused(tmp_path):
     )
     out = tmp_path / "out"
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, profile_id="counterparty_deal_room",
-        recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
-        reason="test", output_dir=out, timeout_s=5,
+        client,
+        matter_id="m1",
+        files=files,
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="",
+        purpose="",
+        intended_external=True,
+        reason="test",
+        output_dir=out,
+        timeout_s=5,
     )
     assert [item.status for item in batch.items] == ["done", "refused"]
     assert batch.items[0].output_dir == "001-good"
@@ -528,9 +583,17 @@ def test_run_airlock_batch_failed_job_is_recorded_not_raised(tmp_path):
         errors_by_filename={"crash.docx": "worker exited rc=1: boom"},
     )
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, profile_id="public_filing_anonymized",
-        recipient_type="client", recipient_name="", purpose="", intended_external=True,
-        reason="test", output_dir=tmp_path / "out", timeout_s=5,
+        client,
+        matter_id="m1",
+        files=files,
+        profile_id="public_filing_anonymized",
+        recipient_type="client",
+        recipient_name="",
+        purpose="",
+        intended_external=True,
+        reason="test",
+        output_dir=tmp_path / "out",
+        timeout_s=5,
     )
     assert batch.items[0].status == "failed"
     assert "worker exited rc=1: boom" in batch.items[0].limitations[0]
@@ -540,9 +603,17 @@ def test_run_airlock_batch_timeout_recorded_as_error_not_aborted(tmp_path):
     files = [_named_file(tmp_path, "slow.docx"), _named_file(tmp_path, "good.docx")]
     client = FakeBatchClient(statuses_by_filename={"slow.docx": "__timeout__", "good.docx": "done"})
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, profile_id="counterparty_deal_room",
-        recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
-        reason="test", output_dir=tmp_path / "out", timeout_s=5,
+        client,
+        matter_id="m1",
+        files=files,
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="",
+        purpose="",
+        intended_external=True,
+        reason="test",
+        output_dir=tmp_path / "out",
+        timeout_s=5,
     )
     # The timeout on file 1 must not abort processing of file 2.
     assert batch.items[0].status == "error"
@@ -557,9 +628,17 @@ def test_run_airlock_batch_hard_upload_failure_recorded_as_error(tmp_path):
         upload_failures={"broken.docx"},
     )
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, profile_id="counterparty_deal_room",
-        recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
-        reason="test", output_dir=tmp_path / "out", timeout_s=5,
+        client,
+        matter_id="m1",
+        files=files,
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="",
+        purpose="",
+        intended_external=True,
+        reason="test",
+        output_dir=tmp_path / "out",
+        timeout_s=5,
     )
     assert batch.items[0].status == "error"
     assert "upload failed" in batch.items[0].error
@@ -588,16 +667,28 @@ def test_run_airlock_batch_full_partial_mixed_outcome(tmp_path):
     )
     out = tmp_path / "out"
     batch = airlock.run_airlock_batch(
-        client, matter_id="m1", files=files, profile_id="counterparty_deal_room",
-        recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
-        reason="test", output_dir=out, timeout_s=5,
+        client,
+        matter_id="m1",
+        files=files,
+        profile_id="counterparty_deal_room",
+        recipient_type="opposing_counsel",
+        recipient_name="",
+        purpose="",
+        intended_external=True,
+        reason="test",
+        output_dir=out,
+        timeout_s=5,
     )
     assert [item.status for item in batch.items] == ["done", "refused", "failed", "error", "error"]
     assert batch.counts == {"done": 1, "refused": 1, "failed": 1, "error": 2}
     assert len(batch.items) == 5
     # every item still gets its own numbered output dir, even the two errors
     assert [item.output_dir for item in batch.items] == [
-        "001-a_done", "002-b_refused", "003-c_failed", "004-d_timeout", "005-e_error",
+        "001-a_done",
+        "002-b_refused",
+        "003-c_failed",
+        "004-d_timeout",
+        "005-e_error",
     ]
 
 
@@ -606,9 +697,17 @@ def test_run_airlock_batch_rejects_unsupported_profile_before_any_file(tmp_path)
     client = FakeBatchClient(statuses_by_filename={"x.docx": "done"})
     with pytest.raises(airlock.AirlockError, match="not supported"):
         airlock.run_airlock_batch(
-            client, matter_id="m1", files=files, profile_id="ediscovery_production",
-            recipient_type="court", recipient_name="", purpose="", intended_external=True,
-            reason="test", output_dir=tmp_path / "out", timeout_s=5,
+            client,
+            matter_id="m1",
+            files=files,
+            profile_id="ediscovery_production",
+            recipient_type="court",
+            recipient_name="",
+            purpose="",
+            intended_external=True,
+            reason="test",
+            output_dir=tmp_path / "out",
+            timeout_s=5,
         )
     assert client.calls == []
 
@@ -617,9 +716,17 @@ def test_run_airlock_batch_rejects_empty_file_list(tmp_path):
     client = FakeBatchClient(statuses_by_filename={})
     with pytest.raises(airlock.AirlockError, match="no input files"):
         airlock.run_airlock_batch(
-            client, matter_id="m1", files=[], profile_id="counterparty_deal_room",
-            recipient_type="opposing_counsel", recipient_name="", purpose="", intended_external=True,
-            reason="test", output_dir=tmp_path / "out", timeout_s=5,
+            client,
+            matter_id="m1",
+            files=[],
+            profile_id="counterparty_deal_room",
+            recipient_type="opposing_counsel",
+            recipient_name="",
+            purpose="",
+            intended_external=True,
+            reason="test",
+            output_dir=tmp_path / "out",
+            timeout_s=5,
         )
 
 
@@ -628,49 +735,97 @@ def test_run_airlock_batch_rejects_empty_file_list(tmp_path):
 
 def test_main_rejects_file_and_folder_together(tmp_path, capsys):
     with pytest.raises(SystemExit):
-        airlock.main([
-            "--matter-id", "m1", "--file", str(tmp_path), "--folder", str(tmp_path),
-            "--recipient-type", "opposing_counsel",
-            "--output-dir", str(tmp_path / "out"), "--password", "x",
-        ])
+        airlock.main(
+            [
+                "--matter-id",
+                "m1",
+                "--file",
+                str(tmp_path),
+                "--folder",
+                str(tmp_path),
+                "--recipient-type",
+                "opposing_counsel",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--password",
+                "x",
+            ]
+        )
 
 
 def test_main_requires_recipient_type(tmp_path, capsys):
     with pytest.raises(SystemExit):
-        airlock.main([
-            "--matter-id", "m1", "--file", str(_named_file(tmp_path, "x.docx")),
-            "--output-dir", str(tmp_path / "out"), "--password", "x",
-        ])
+        airlock.main(
+            [
+                "--matter-id",
+                "m1",
+                "--file",
+                str(_named_file(tmp_path, "x.docx")),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--password",
+                "x",
+            ]
+        )
     assert "recipient-type" in capsys.readouterr().err
 
 
 def test_main_rejects_unknown_recipient_type(tmp_path, capsys):
     with pytest.raises(SystemExit):
-        airlock.main([
-            "--matter-id", "m1", "--file", str(_named_file(tmp_path, "x.docx")),
-            "--recipient-type", "not_a_real_type",
-            "--output-dir", str(tmp_path / "out"), "--password", "x",
-        ])
+        airlock.main(
+            [
+                "--matter-id",
+                "m1",
+                "--file",
+                str(_named_file(tmp_path, "x.docx")),
+                "--recipient-type",
+                "not_a_real_type",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--password",
+                "x",
+            ]
+        )
 
 
 def test_main_no_longer_accepts_policy(tmp_path, capsys):
     """Clean cutover, not a deprecated alias (approved scope): --policy is
     simply not a recognized argument anymore."""
     with pytest.raises(SystemExit):
-        airlock.main([
-            "--matter-id", "m1", "--file", str(_named_file(tmp_path, "x.docx")),
-            "--recipient-type", "opposing_counsel", "--policy", "external_sharing",
-            "--output-dir", str(tmp_path / "out"), "--password", "x",
-        ])
+        airlock.main(
+            [
+                "--matter-id",
+                "m1",
+                "--file",
+                str(_named_file(tmp_path, "x.docx")),
+                "--recipient-type",
+                "opposing_counsel",
+                "--policy",
+                "external_sharing",
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--password",
+                "x",
+            ]
+        )
     assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_main_folder_mode_errors_cleanly_when_folder_missing(tmp_path, capsys):
-    rc = airlock.main([
-        "--matter-id", "m1", "--folder", str(tmp_path / "nope"),
-        "--recipient-type", "opposing_counsel",
-        "--output-dir", str(tmp_path / "out"), "--password", "x",
-    ])
+    rc = airlock.main(
+        [
+            "--matter-id",
+            "m1",
+            "--folder",
+            str(tmp_path / "nope"),
+            "--recipient-type",
+            "opposing_counsel",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--password",
+            "x",
+        ]
+    )
     assert rc == 1
     assert "not found" in capsys.readouterr().err
 
@@ -678,22 +833,41 @@ def test_main_folder_mode_errors_cleanly_when_folder_missing(tmp_path, capsys):
 def test_main_folder_mode_errors_cleanly_when_folder_empty(tmp_path, capsys):
     empty = tmp_path / "empty"
     empty.mkdir()
-    rc = airlock.main([
-        "--matter-id", "m1", "--folder", str(empty),
-        "--recipient-type", "opposing_counsel",
-        "--output-dir", str(tmp_path / "out"), "--password", "x",
-    ])
+    rc = airlock.main(
+        [
+            "--matter-id",
+            "m1",
+            "--folder",
+            str(empty),
+            "--recipient-type",
+            "opposing_counsel",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--password",
+            "x",
+        ]
+    )
     assert rc == 1
     assert "no regular files" in capsys.readouterr().err
 
 
 def test_main_files_mode_errors_cleanly_when_a_file_is_missing(tmp_path, capsys):
     present = _named_file(tmp_path, "present.docx")
-    rc = airlock.main([
-        "--matter-id", "m1", "--files", str(present), str(tmp_path / "absent.docx"),
-        "--recipient-type", "opposing_counsel",
-        "--output-dir", str(tmp_path / "out"), "--password", "x",
-    ])
+    rc = airlock.main(
+        [
+            "--matter-id",
+            "m1",
+            "--files",
+            str(present),
+            str(tmp_path / "absent.docx"),
+            "--recipient-type",
+            "opposing_counsel",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--password",
+            "x",
+        ]
+    )
     assert rc == 1
     assert "absent.docx" in capsys.readouterr().err
 
@@ -720,7 +894,13 @@ def test_parse_legal_basis_flags_empty_when_nothing_supplied():
 
 
 def test_parse_legal_basis_flags_rejects_bad_input(tmp_path, capsys):
-    for bad in ("nosign", "bogus=privilege", "comments_and_notes=privileged", "=privilege", "a=b=c2"):
+    for bad in (
+        "nosign",
+        "bogus=privilege",
+        "comments_and_notes=privileged",
+        "=privilege",
+        "a=b=c2",
+    ):
         with pytest.raises(airlock.AirlockError):
             airlock.parse_legal_basis_flags([bad], "")
     # duplicate subtype
@@ -735,25 +915,41 @@ def test_parse_legal_basis_flags_rejects_bad_input(tmp_path, capsys):
 
 def test_main_rejects_bad_legal_basis_before_any_network_call(tmp_path, capsys):
     p = _real_file(tmp_path)
-    rc = airlock.main([
-        "--password", "pw",  # past the password gate; the basis error must surface before any network call
-        "--matter-id", "m1",
-        "--file", str(p),
-        "--recipient-type", "court",
-        "--output-dir", str(tmp_path / "out"),
-        "--legal-basis", "comments_and_notes=not_a_basis",
-    ])
+    rc = airlock.main(
+        [
+            "--password",
+            "pw",  # past the password gate; the basis error must surface before any network call
+            "--matter-id",
+            "m1",
+            "--file",
+            str(p),
+            "--recipient-type",
+            "court",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--legal-basis",
+            "comments_and_notes=not_a_basis",
+        ]
+    )
     assert rc == 1
     assert "not a known basis" in capsys.readouterr().err
     # batch mode shares the same parse path
-    rc = airlock.main([
-        "--password", "pw",
-        "--matter-id", "m1",
-        "--files", str(p),
-        "--recipient-type", "court",
-        "--output-dir", str(tmp_path / "out"),
-        "--legal-basis", "bogus_subtype=privilege",
-    ])
+    rc = airlock.main(
+        [
+            "--password",
+            "pw",
+            "--matter-id",
+            "m1",
+            "--files",
+            str(p),
+            "--recipient-type",
+            "court",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--legal-basis",
+            "bogus_subtype=privilege",
+        ]
+    )
     assert rc == 1
     assert "not a known subtype" in capsys.readouterr().err
 
@@ -835,9 +1031,17 @@ def test_airlock_cli_never_imports_the_engine_or_app_internals():
     src = (TOOLS / "counselclear_airlock.py").read_text()
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     for banned in (
-        "engine_api", "clean_to_bundle", "inspect_bytes", "import policies",
-        "import sqlalchemy", "from sqlalchemy", "import fastapi", "from fastapi",
-        "from app.", "import app.", "from app import",
+        "engine_api",
+        "clean_to_bundle",
+        "inspect_bytes",
+        "import policies",
+        "import sqlalchemy",
+        "from sqlalchemy",
+        "import fastapi",
+        "from fastapi",
+        "from app.",
+        "import app.",
+        "from app import",
         "import requests",
     ):
         assert banned not in code, f"counselclear_airlock.py must not reference {banned}"
@@ -961,17 +1165,28 @@ def test_airlock_cli_batch_end_to_end_against_a_real_server_mixed_folder(tmp_pat
     (folder / "b_macro.docm").write_bytes((FIXTURES / "macro.docm").read_bytes())
 
     out = tmp_path / "out"
-    rc = airlock.main([
-        "--base-url", live_server,
-        "--password", "airlockpw123",
-        "--matter-id", matter["id"],
-        "--folder", str(folder),
-        "--profile", "counterparty_deal_room",
-        "--recipient-type", "opposing_counsel",
-        "--reason", "batch integration test",
-        "--output-dir", str(out),
-        "--timeout-s", "30",
-    ])
+    rc = airlock.main(
+        [
+            "--base-url",
+            live_server,
+            "--password",
+            "airlockpw123",
+            "--matter-id",
+            matter["id"],
+            "--folder",
+            str(folder),
+            "--profile",
+            "counterparty_deal_room",
+            "--recipient-type",
+            "opposing_counsel",
+            "--reason",
+            "batch integration test",
+            "--output-dir",
+            str(out),
+            "--timeout-s",
+            "30",
+        ]
+    )
 
     # Mixed outcome (one done, one refused) -> exit code 2, same convention
     # as a single refused/failed job in single-file mode.
@@ -1026,24 +1241,38 @@ def test_airlock_cli_end_to_end_legal_basis_reaches_certificate_html(tmp_path, l
     src = tmp_path / "hidden.xlsx"
     src.write_bytes((FIXTURES / "hidden.xlsx").read_bytes())
     out = tmp_path / "out"
-    rc = airlock.main([
-        "--base-url", live_server,
-        "--password", "airlockpw123",
-        "--matter-id", matter["id"],
-        "--file", str(src),
-        "--profile", "counterparty_deal_room",
-        "--recipient-type", "opposing_counsel",
-        # The release gate: hidden.xlsx's hidden sheets are flag-only under
-        # counterparty_deal_room, so the CLI must name them to proceed.
-        # This is the flag's whole reason for existing -- without it the CLI
-        # has no path to release a document carrying flagged content at all.
-        "--acknowledge", "hidden_structure",
-        "--legal-basis", "hidden_structure=privilege",
-        "--legal-basis-note", "attorney notes embedded per draft protocol",
-        "--reason", "legal basis e2e",
-        "--output-dir", str(out),
-        "--timeout-s", "30",
-    ])
+    rc = airlock.main(
+        [
+            "--base-url",
+            live_server,
+            "--password",
+            "airlockpw123",
+            "--matter-id",
+            matter["id"],
+            "--file",
+            str(src),
+            "--profile",
+            "counterparty_deal_room",
+            "--recipient-type",
+            "opposing_counsel",
+            # The release gate: hidden.xlsx's hidden sheets are flag-only under
+            # counterparty_deal_room, so the CLI must name them to proceed.
+            # This is the flag's whole reason for existing -- without it the CLI
+            # has no path to release a document carrying flagged content at all.
+            "--acknowledge",
+            "hidden_structure",
+            "--legal-basis",
+            "hidden_structure=privilege",
+            "--legal-basis-note",
+            "attorney notes embedded per draft protocol",
+            "--reason",
+            "legal basis e2e",
+            "--output-dir",
+            str(out),
+            "--timeout-s",
+            "30",
+        ]
+    )
     assert rc == 0, "acknowledged hidden.xlsx must complete (flag record, not refusal)"
 
     cert = (out / "certificate.html").read_text()
@@ -1059,10 +1288,7 @@ def test_airlock_cli_end_to_end_legal_basis_reaches_certificate_html(tmp_path, l
     # The packet's machine-readable side carries it too (release_packet.json
     # travels in the same zip the CLI extracted).
     packet = json.loads((out / "release_packet.json").read_text())
-    records = [
-        e for e in packet["legal_justifications"]
-        if e["subtype"] == "hidden_structure"
-    ]
+    records = [e for e in packet["legal_justifications"] if e["subtype"] == "hidden_structure"]
     assert records, "legal_justifications missing from release_packet.json"
     assert records[0]["legal_justification"]["basis"] == "privilege"
     assert records[0]["legal_justification"]["note"] == "attorney notes embedded per draft protocol"
@@ -1104,14 +1330,21 @@ def test_no_blanket_acknowledge_all_flag(tmp_path):
     src.write_bytes(b"hi\n")
     for banned in ("--acknowledge-all", "--acknowledge-any"):
         with pytest.raises(SystemExit) as excinfo:
-            airlock.main([
-                "--matter-id", "m1",
-                "--file", str(src),
-                "--recipient-type", "opposing_counsel",
-                "--output-dir", str(tmp_path / "out"),
-                "--password", "pw",
-                banned,
-            ])
+            airlock.main(
+                [
+                    "--matter-id",
+                    "m1",
+                    "--file",
+                    str(src),
+                    "--recipient-type",
+                    "opposing_counsel",
+                    "--output-dir",
+                    str(tmp_path / "out"),
+                    "--password",
+                    "pw",
+                    banned,
+                ]
+            )
         assert excinfo.value.code == 2, f"{banned} must be an argparse error, not accepted"
 
 

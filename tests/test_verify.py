@@ -77,9 +77,10 @@ def test_added_part_fails_inventory():
     import zipfile
 
     buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(data)) as zin, zipfile.ZipFile(
-        buf, "w", zipfile.ZIP_DEFLATED
-    ) as zout:
+    with (
+        zipfile.ZipFile(io.BytesIO(data)) as zin,
+        zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
         for info in zin.infolist():
             zout.writestr(info, zin.read(info.filename))
         zout.writestr("word/surprise.xml", "<x/>")
@@ -133,13 +134,15 @@ def test_part_inventory_allowlist_is_case_insensitive_and_covers_identity_parts(
     # Real comment-identity parts container_meta drops alongside comments.xml
     # under external_sharing — mixed-case (threadedComments) and without the
     # literal substring "comments" at all (people.xml, commentAuthors.xml).
-    original = _zip({
-        "word/document.xml": "<a/>",
-        "word/comments.xml": "<c/>",
-        "word/people.xml": "<p/>",
-        "xl/threadedComments/threadedComment1.xml": "<t/>",
-        "ppt/commentAuthors.xml": "<ca/>",
-    })
+    original = _zip(
+        {
+            "word/document.xml": "<a/>",
+            "word/comments.xml": "<c/>",
+            "word/people.xml": "<p/>",
+            "xl/threadedComments/threadedComment1.xml": "<t/>",
+            "ppt/commentAuthors.xml": "<ca/>",
+        }
+    )
     derivative = _zip({"word/document.xml": "<a/>"})
 
     plan = ActionPlan(
@@ -251,9 +254,17 @@ def test_cli_exit_codes(tmp_path):
     deriv = Path(result["derivative"])
 
     proc = subprocess.run(
-        [sys.executable, str(SCRIPTS / "verify_file.py"), str(src), str(deriv),
-         "--policy", "external_sharing"],
-        capture_output=True, text=True, check=False,
+        [
+            sys.executable,
+            str(SCRIPTS / "verify_file.py"),
+            str(src),
+            str(deriv),
+            "--policy",
+            "external_sharing",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert proc.returncode == 0
     payload = json.loads(proc.stdout)
@@ -262,29 +273,41 @@ def test_cli_exit_codes(tmp_path):
     bad = tmp_path / "bad.txt"
     bad.write_bytes(b"totally unrelated bytes\n")
     proc2 = subprocess.run(
-        [sys.executable, str(SCRIPTS / "verify_file.py"), str(src), str(bad),
-         "--policy", "privacy_only"],
-        capture_output=True, text=True, check=False,
+        [
+            sys.executable,
+            str(SCRIPTS / "verify_file.py"),
+            str(src),
+            str(bad),
+            "--policy",
+            "privacy_only",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert proc2.returncode == 1
 
     missing = tmp_path / "missing.bin"
     proc3 = subprocess.run(
         [sys.executable, str(SCRIPTS / "verify_file.py"), str(missing), str(deriv)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert proc3.returncode == 2
 
 
 # --- Layer A body / non-body split -------------------------------------------
 
+
 def _docx_with_zwsp(*, header: bool = False, body: bool = False) -> bytes:
     """spa.docx plus a zero-width space in the chosen part(s)."""
     src = (FIXTURES / "spa.docx").read_bytes()
     buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(src)) as zin, zipfile.ZipFile(
-        buf, "w", zipfile.ZIP_DEFLATED
-    ) as zout:
+    with (
+        zipfile.ZipFile(io.BytesIO(src)) as zin,
+        zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
         for info in zin.infolist():
             if info.filename == "word/header1.xml":
                 continue
@@ -389,9 +412,10 @@ def test_accept_all_deleted_text_oracle_catches_leaked_deleted_content():
 
     plan, cleaned = _plan_and_apply(data, "spa.docx", "external_sharing")
     buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(cleaned)) as zin, zipfile.ZipFile(
-        buf, "w", zipfile.ZIP_DEFLATED
-    ) as zout:
+    with (
+        zipfile.ZipFile(io.BytesIO(cleaned)) as zin,
+        zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
         for info in zin.infolist():
             zout.writestr(info, zin.read(info.filename))
         zout.writestr(

@@ -70,8 +70,7 @@ def test_dockerignore_does_not_exclude_the_licence():
     ]
     assert "*" in lines, "expected a deny-by-default context"
     assert "!LICENSE" in lines, (
-        "LICENSE is excluded from the build context, so COPY LICENSE would "
-        "fail the image build"
+        "LICENSE is excluded from the build context, so COPY LICENSE would fail the image build"
     )
 
 

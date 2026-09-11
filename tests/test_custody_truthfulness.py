@@ -104,7 +104,7 @@ def _hidden_text_docx() -> bytes:
     limitation-free certificate for a knowingly retained finding."""
     body = (
         "<w:p><w:r><w:t>Visible contract text.</w:t></w:r></w:p>"
-        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>concealed clause</w:t></w:r></w:p>'
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>concealed clause</w:t></w:r></w:p>"
     )
     return _docx({"word/document.xml": _document(body)})
 
@@ -181,9 +181,7 @@ def test_flagged_retained_finding_is_recorded_as_retained():
     data = _hidden_text_docx()
     from engine_api import inspect_bytes
 
-    plan = plan_actions(
-        inspect_bytes(data, "h.docx"), "external_sharing", {"hidden_text": "keep"}
-    )
+    plan = plan_actions(inspect_bytes(data, "h.docx"), "external_sharing", {"hidden_text": "keep"})
     _cleaned, records = apply_actions(data, plan)
     flagged = [r for r in records if r.action == "flag"]
     assert flagged, "hidden text should be flagged by external_sharing"
@@ -243,7 +241,9 @@ def test_legacy_v1_manifest_keeps_marker_derivation():
     one, so those fall back to the original marker matching."""
     from app.main import NO_DECISION_MARKER
 
-    manifest = {"action_records": [{"subtype": "comments_and_notes", "action": "keep", "detail": "x"}]}
+    manifest = {
+        "action_records": [{"subtype": "comments_and_notes", "action": "keep", "detail": "x"}]
+    }
     actions = [f"comments_and_notes:keep: kept: {NO_DECISION_MARKER} for this finding"]
     limits = _retention_limitations(manifest, actions)
     assert len(limits) == 1 and NO_DECISION_MARKER in limits[0]
@@ -890,7 +890,7 @@ def test_acknowledged_finding_is_still_a_disclosed_limitation(client):
 
 
 def test_release_refused_by_the_gate_still_produces_a_result_artifact(client):
-    """"Packet or refusal" has to hold for a gate refusal too: the release
+    """ "Packet or refusal" has to hold for a gate refusal too: the release
     is refused, and the refusal is a machine-checkable record naming what
     blocked it -- not a silent failure the operator has to interpret."""
     mid = client.post("/v1/matters", json={"name": "Gate refusal"}).json()["id"]
@@ -933,7 +933,7 @@ def _styles(inner: str) -> bytes:
 def _vanish_docx(styles: str | None = None, body: str | None = None) -> bytes:
     body = body or (
         "<w:p><w:r><w:t>Agreement body.</w:t></w:r></w:p>"
-        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>PRIVILEGED WORK PRODUCT</w:t></w:r></w:p>'
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>PRIVILEGED WORK PRODUCT</w:t></w:r></w:p>"
     )
     parts = {"word/document.xml": _document(body)}
     if styles:
@@ -967,12 +967,8 @@ def test_explicit_vanish_off_is_visible_text_and_must_survive():
     """`<w:vanish w:val="0"/>` is an explicit OFF -- documents write it to
     cancel a hidden style on one run. Treating it as hidden would delete
     text the reader can see, the worst failure this pass can have."""
-    body = (
-        '<w:p><w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t>VISIBLE RUN</w:t></w:r></w:p>'
-    )
-    cleaned, _ = container_meta.clean_docx(
-        _vanish_docx(body=body), strip_hidden_text=True
-    )
+    body = '<w:p><w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t>VISIBLE RUN</w:t></w:r></w:p>'
+    cleaned, _ = container_meta.clean_docx(_vanish_docx(body=body), strip_hidden_text=True)
     assert "VISIBLE RUN" in _body_of(cleaned)
 
 
@@ -980,12 +976,9 @@ def test_hidden_paragraph_mark_does_not_delete_paragraph_content():
     """w:vanish inside w:pPr/w:rPr hides the pilcrow, joining the paragraph
     to the next one visually. Its runs stay visible."""
     body = (
-        "<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>"
-        "<w:r><w:t>PARAGRAPH TEXT</w:t></w:r></w:p>"
+        "<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr><w:r><w:t>PARAGRAPH TEXT</w:t></w:r></w:p>"
     )
-    cleaned, _ = container_meta.clean_docx(
-        _vanish_docx(body=body), strip_hidden_text=True
-    )
+    cleaned, _ = container_meta.clean_docx(_vanish_docx(body=body), strip_hidden_text=True)
     assert "PARAGRAPH TEXT" in _body_of(cleaned)
 
 
@@ -1051,7 +1044,7 @@ def test_malformed_styles_do_not_disable_direct_stripping():
     into none at all: direct-formatting vanish is still removed."""
     parts = {
         "word/document.xml": _document(
-            '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>STILL REMOVED</w:t></w:r></w:p>'
+            "<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>STILL REMOVED</w:t></w:r></w:p>"
         ),
         "word/styles.xml": b"<w:styles",
     }
@@ -1067,7 +1060,7 @@ def test_extractor_and_remover_share_one_definition_of_hidden():
         styles='<w:style w:styleId="Hid"><w:rPr><w:vanish/></w:rPr></w:style>',
         body='<w:p><w:pPr><w:pStyle w:val="Hid"/></w:pPr>'
         "<w:r><w:t>BY STYLE</w:t></w:r></w:p>"
-        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>BY DIRECT</w:t></w:r></w:p>'
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>BY DIRECT</w:t></w:r></w:p>"
         "<w:p><w:r><w:t>Visible.</w:t></w:r></w:p>",
     )
     assert sorted(container_meta.extract_docx_hidden_text(blob)) == ["BY DIRECT", "BY STYLE"]
@@ -1133,7 +1126,7 @@ def test_verify_fails_when_hidden_text_is_surfaced_instead_of_removed():
 
     split = (
         "<w:p><w:r><w:t>Body.</w:t></w:r></w:p>"
-        '<w:p><w:r><w:rPr><w:vanish/></w:rPr>'
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr>"
         "<w:t>PRIVILEGED </w:t><w:t>WORK PRODUCT</w:t></w:r></w:p>"
     )
     original = _vanish_docx(body=split)
@@ -1165,7 +1158,7 @@ def test_verify_does_not_false_positive_on_dual_use_fragments():
 
     original = _vanish_docx(
         body="<w:p><w:r><w:t>CONFIDENTIAL</w:t></w:r></w:p>"
-        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>CONFIDENTIAL</w:t></w:r></w:p>'
+        "<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>CONFIDENTIAL</w:t></w:r></w:p>"
     )
     plan = plan_actions(inspect_bytes(original, "d.docx"), "external_sharing")
     cleaned, _ = container_meta.clean_docx(original, strip_hidden_text=True)
@@ -1180,27 +1173,25 @@ def _glossary_docx() -> bytes:
     list, but ``word/glossary/header1.xml`` is not — the remover skips it,
     and (before the Task 3 fix) the verify oracle walked the same narrow
     list, so the skip was invisible to the check that exists to catch it."""
-    glossary_ns = (
-        'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
-    )
+    glossary_ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
     return _docx(
         {
             "word/document.xml": _document(
                 "<w:p><w:r><w:t>Visible body.</w:t></w:r></w:p>"
-                '<w:p><w:r><w:rPr><w:vanish/></w:rPr>'
+                "<w:p><w:r><w:rPr><w:vanish/></w:rPr>"
                 "<w:t>BODY SECRET</w:t></w:r></w:p>"
             ),
             "word/glossary/document.xml": (
                 f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
                 f"<w:glossaryDocument {glossary_ns}>"
-                "<w:docParts><w:docPart><w:docPartGallery w:val=\"Cover Pages\"/>"
+                '<w:docParts><w:docPart><w:docPartGallery w:val="Cover Pages"/>'
                 "<w:docPartObj/></w:docPart></w:docParts></w:glossaryDocument>"
             ).encode(),
             "word/glossary/header1.xml": (
                 f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-                f'<w:hdr {glossary_ns}>'
+                f"<w:hdr {glossary_ns}>"
                 "<w:p><w:r><w:t>Glossary header.</w:t></w:r></w:p>"
-                '<w:p><w:r><w:rPr><w:vanish/></w:rPr>'
+                "<w:p><w:r><w:rPr><w:vanish/></w:rPr>"
                 "<w:t>GLOSSARY SECRET</w:t></w:r></w:p></w:hdr>"
             ).encode(),
         }
