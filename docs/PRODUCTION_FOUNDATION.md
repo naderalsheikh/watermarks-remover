@@ -58,7 +58,9 @@ work.
 Local logical storage keys and extracted packet member names now use `/` on
 every OS. Encrypted reads preserve previously readable Windows native-key
 envelopes using the same stored reference; they do not reseal or rewrite existing
-objects. ZIP member names and signed packet bytes are not normalized. Test
+objects. ZIP membership uses the original archive names even when the host ZIP
+library normalizes them; alternate spellings cannot alias a declared member,
+and duplicate file entries are rejected. Signed packet bytes are unchanged. Test
 fixtures retain exact committed bytes across checkout platforms. Windows suite
 results cover functional behavior, not ACL protection or native sandboxing;
 those are explicit requirements for the Desktop packaging workstream.

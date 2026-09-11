@@ -127,7 +127,11 @@ def _write_zip(tmp_path: Path, files: dict[str, bytes], name: str = "packet.zip"
     out = tmp_path / name
     with zipfile.ZipFile(out, "w") as zf:
         for arcname, data in files.items():
-            zf.writestr(arcname, data)
+            # Preserve intentionally malformed names on every host; the
+            # ZipInfo constructor normalizes backslashes on Windows.
+            member = zipfile.ZipInfo()
+            member.filename = member.orig_filename = arcname
+            zf.writestr(member, data)
     return out
 
 
@@ -193,13 +197,22 @@ def test_windows_directory_members_preserve_signed_packet_verification(tmp_path,
     assert directory_report == zip_report
 
 
-def test_zip_backslash_member_is_not_reinterpreted_as_a_declared_path(tmp_path):
+def test_zip_backslash_member_is_not_reinterpreted_as_a_declared_path(tmp_path, monkeypatch):
     """Filesystem portability must not alias a ZIP's literal member names
     or loosen closed membership to accept an undeclared alternate spelling.
     """
     files = _packet_files()
     files[r"derivative\out.docx"] = files.pop("derivative/out.docx")
     zip_path = _write_zip(tmp_path, files)
+    native_init = zipfile.ZipInfo.__init__
+
+    def windows_init(self, *args, **kwargs):
+        native_init(self, *args, **kwargs)
+        self.filename = self.filename.replace("\\", "/")
+
+    # Exercise Windows's normalized filename while retaining orig_filename
+    # on every host; the archive on disk still contains the literal name.
+    monkeypatch.setattr(zipfile.ZipInfo, "__init__", windows_init)
     assert verifier._load_packet_files(zip_path) == files
     report = verifier.verify_release_packet(zip_path)
     assert not report.valid
@@ -207,6 +220,90 @@ def test_zip_backslash_member_is_not_reinterpreted_as_a_declared_path(tmp_path):
     assert (
         next(fc for fc in report.file_checks if fc.name == "packet membership").status == "mismatch"
     )
+
+
+def test_zip_normalized_name_collision_does_not_replace_declared_bytes(tmp_path, monkeypatch):
+    files = _packet_files()
+    files[r"derivative\out.docx"] = b"undeclared alternate member"
+    zip_path = _write_zip(tmp_path, files)
+    native_init = zipfile.ZipInfo.__init__
+
+    def windows_init(self, *args, **kwargs):
+        native_init(self, *args, **kwargs)
+        self.filename = self.filename.replace("\\", "/")
+
+    monkeypatch.setattr(zipfile.ZipInfo, "__init__", windows_init)
+    assert verifier._load_packet_files(zip_path) == files
+    report = verifier.verify_release_packet(zip_path)
+    assert not report.valid
+    assert next(fc for fc in report.file_checks if fc.name == "derivative").status == "match"
+    assert (
+        next(fc for fc in report.file_checks if fc.name == "packet membership").status == "mismatch"
+    )
+
+
+def test_zip_nul_suffix_cannot_hide_a_file_as_a_directory(tmp_path):
+    import pytest
+
+    files = _packet_files()
+    files["derivative/out.docx\0/"] = b"tampered derivative"
+    zip_path = _write_zip(tmp_path, files)
+    with zipfile.ZipFile(zip_path) as zf:
+        disguised = zf.infolist()[-1]
+        assert disguised.orig_filename == "derivative/out.docx\0/"
+        assert disguised.filename == "derivative/out.docx"
+        zf.extractall(tmp_path / "extracted")
+    assert (tmp_path / "extracted/derivative/out.docx").read_bytes() == b"tampered derivative"
+    with pytest.raises(verifier.PacketLoadError, match="NUL in member name"):
+        verifier._load_packet_files(zip_path)
+    report = verifier.verify_release_packet(zip_path)
+    assert not report.valid
+    assert any("NUL in member name" in error for error in report.errors)
+
+
+def test_zip_unicode_path_override_cannot_replace_a_declared_file(tmp_path):
+    import struct
+    import zlib
+
+    import pytest
+
+    files = _packet_files()
+    zip_path = tmp_path / "packet.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name, data in files.items():
+            member = zipfile.ZipInfo(name)
+            if name == "release_packet.json":
+                # A valid Info-ZIP Unicode Path extra field changes the
+                # extraction path without changing the raw ZIP member name.
+                payload = struct.pack("<BL", 1, zlib.crc32(name.encode()))
+                payload += b"derivative/out.docx"
+                member.extra = struct.pack("<HH", 0x7075, len(payload)) + payload
+            zf.writestr(member, data)
+    with zipfile.ZipFile(zip_path) as zf:
+        redirected = zf.infolist()[-1]
+        assert redirected.orig_filename == "release_packet.json"
+        assert redirected.filename == "derivative/out.docx"
+        zf.extractall(tmp_path / "extracted")
+    assert (tmp_path / "extracted/derivative/out.docx").read_bytes() == files["release_packet.json"]
+    with pytest.raises(verifier.PacketLoadError, match="conflicting decoded member name"):
+        verifier._load_packet_files(zip_path)
+    report = verifier.verify_release_packet(zip_path)
+    assert not report.valid
+    assert any("conflicting decoded member name" in error for error in report.errors)
+
+
+def test_zip_duplicate_member_is_rejected(tmp_path):
+    import pytest
+
+    files = _packet_files()
+    zip_path = _write_zip(tmp_path, files)
+    with (
+        zipfile.ZipFile(zip_path, "a") as zf,
+        pytest.warns(UserWarning, match="Duplicate name"),
+    ):
+        zf.writestr("manifest.json", files["manifest.json"])
+    with pytest.raises(verifier.PacketLoadError, match="duplicate member"):
+        verifier._load_packet_files(zip_path)
 
 
 # --- derivative layout: nested / flat / ambiguous ------------------------------

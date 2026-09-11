@@ -418,4 +418,8 @@ def test_upload_writes_encrypted_envelope_through_the_app(tmp_path, monkeypatch)
     on_disk = originals[0]
     assert not on_disk.read_bytes().startswith(b"PK")  # not the plaintext docx
     assert on_disk.read_bytes().startswith(b"CCENC")
-    assert keyfile.exists() and stat.S_IMODE(keyfile.stat().st_mode) == 0o600
+    assert keyfile.exists()
+    if os.name != "nt":
+        # POSIX permission bits do not qualify Windows ACL privacy; the
+        # encrypted-envelope and key-existence checks run on both systems.
+        assert stat.S_IMODE(keyfile.stat().st_mode) == 0o600
