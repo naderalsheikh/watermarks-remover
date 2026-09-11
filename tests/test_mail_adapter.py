@@ -462,18 +462,36 @@ def test_declared_versus_detected_format_dispositions(name, content_type, conten
         assert proc.calls == []
 
 
-def test_password_protected_office_is_unsupported():
+def _encrypted_office_package() -> bytes:
+    # The OOXML encrypted-package member names the engine's detector keys on.
+    # This proves the classification/policy path, not parsing of a real
+    # password-protected document.
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("EncryptedPackage", b"\x00" * 32)
         zf.writestr("EncryptionInfo", b"\x00" * 16)
-    raw = standard_message(attachments=(AttachmentSpec("secret.docx", buf.getvalue(), DOCX_CT),))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("mode", ["hold", "pass_through"])
+def test_password_protected_office_blocks_in_both_modes(mode):
+    package = _encrypted_office_package()
+    raw = standard_message(
+        attachments=(docx_attachment(), AttachmentSpec("secret.docx", package, DOCX_CT))
+    )
     adp, proc = adapter()
-    result = adp.process(request(raw))
-    assert result.decision == "hold"
-    assert result.attachments[0].disposition == "unsupported"
-    assert result.attachments[0].reason == "password_protected_office"
-    assert proc.calls == []
+    result = adp.process(request(raw, unsupported_parts=mode))
+    assert result.decision == "hold", result.reasons
+    assert result.reasons == ("password_protected:3",)
+    assert result.retryable is False
+    assert result.outbound is None
+    protected = result.attachments[1]
+    assert protected.disposition == "password_protected"
+    assert protected.reason == "password_protected_office"
+    # The ordinary DOCX beside it was processed; the message still does not
+    # release, because a partially rewritten message is never releasable.
+    assert result.attachments[0].disposition == "replaced"
+    assert [c.part_id for c in proc.calls] == ["2"]
 
 
 def test_attached_message_is_unsupported():
@@ -888,6 +906,133 @@ def test_output_limit_applies_on_every_release_path(attachments, marker, pass_th
     assert released.outbound.rewritten is bool(marker)
     assert len(released.outbound.raw) == released.evidence["output_bytes"]
     assert proc.calls == []
+
+
+# --- re-review regressions (Codex, 2026-09-11): body-text qualification -------
+
+
+def _zip_with_docx() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Agreement.docx", synthetic_docx("inside an archive"))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("content_type", "content", "reason"),
+    [
+        ("text/plain", _zip_with_docx(), "declared_text_bytes_zip"),
+        ("text/plain; charset=utf-16", _zip_with_docx(), "declared_text_bytes_zip"),
+        ("text/html", synthetic_pdf(), "declared_text_bytes_pdf"),
+        ("text/plain", synthetic_docx("as text"), "declared_text_bytes_docx"),
+        ("text/plain", b"\x00" * 64, "declared_text_control_characters"),
+        ("text/plain; charset=us-ascii", b"caf\xe9 \x80\xff", "declared_text_not_ascii"),
+        ("text/plain; charset=utf-8", b"\xff\xfe\xfa", "declared_text_not_utf_8"),
+        ("text/plain; charset=x-no-such-charset", b"hello", "declared_text_charset_unknown"),
+        ("text/x-vcard", b"BEGIN:VCARD\r\nEND:VCARD\r\n", "declared_text_subtype_x-vcard"),
+        ("text/plain", b"MZ" + b"\x90" * 62, "declared_text_bytes_pe"),
+        ("text/plain", FAKE_PNG, "declared_text_bytes_png"),
+    ],
+    ids=[
+        "zip-as-plain",
+        "zip-as-utf16",
+        "pdf-as-html",
+        "docx-as-plain",
+        "nul-bytes",
+        "8bit-as-ascii",
+        "invalid-utf8",
+        "unknown-charset",
+        "other-text-subtype",
+        "pe-as-plain",
+        "png-as-plain",
+    ],
+)
+def test_text_body_exemption_requires_readable_text(content_type, content, reason):
+    raw = raw_part_message(
+        [("Content-Type", content_type), ("Content-Disposition", "inline")], content
+    )
+    adp, proc = adapter()
+    for mode in ("hold", "pass_through"):
+        result = adp.process(request(raw, unsupported_parts=mode))
+        assert result.decision == "hold", (mode, result.reasons)
+        assert result.outbound is None
+        assert proc.calls == []
+        outcome = result.attachments[0]
+        assert outcome.disposition == "ambiguous"
+        assert outcome.reason == reason
+        role = next(leaf for leaf in result.evidence["leaves"] if leaf["part_id"] == "2")
+        assert role["role"] == "attachment"
+
+
+def test_same_archive_bytes_hold_as_attachment_and_as_inline_text():
+    archive = _zip_with_docx()
+    as_attachment = standard_message(
+        attachments=(AttachmentSpec("bundle.zip", archive, "application/zip"),)
+    )
+    as_text = raw_part_message(
+        [("Content-Type", "text/plain"), ("Content-Disposition", "inline")], archive
+    )
+    adp, proc = adapter()
+    held_file = adp.process(request(as_attachment))
+    held_text = adp.process(request(as_text))
+    assert held_file.decision == held_text.decision == "hold"
+    assert held_file.attachments[-1].disposition == "unsupported"
+    assert held_text.attachments[0].disposition == "ambiguous"
+    assert proc.calls == []
+    # An archive declared as an archive is a file the tenant may choose to
+    # pass through; an archive declared as body text never is.
+    assert (
+        adp.process(request(as_attachment, unsupported_parts="pass_through")).decision == "release"
+    )
+    assert adp.process(request(as_text, unsupported_parts="pass_through")).decision == "hold"
+
+
+@pytest.mark.parametrize(
+    ("content_type", "text", "encoding"),
+    [
+        ("text/plain", "Plain ASCII body.\r\n\tIndented, with a form feed \x0c here.", "ascii"),
+        ("text/plain; charset=utf-8", "Entwurf – Vertrag über Aktien. 契約書 ✓", "utf-8"),
+        ("text/plain; charset=utf-16", "UTF-16 text whose encoded bytes contain NULs", "utf-16"),
+        ("text/html; charset=iso-8859-1", "<p>Café à la carte</p>", "iso-8859-1"),
+        ("text/html; charset=windows-1252", "<p>“Smart quotes” and – dashes</p>", "cp1252"),
+        ("text/html", "<p>No charset declared, UTF-8 bytes: üöä</p>", "utf-8"),
+        ("text/calendar; method=REQUEST", "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", "utf-8"),
+        ("text/plain; charset=shift_jis", "日本語のテキスト", "shift_jis"),
+    ],
+    ids=[
+        "ascii",
+        "utf8",
+        "utf16",
+        "latin1-html",
+        "cp1252-html",
+        "html-no-charset",
+        "calendar",
+        "shift-jis",
+    ],
+)
+def test_legitimate_text_bodies_are_preserved(content_type, text, encoding):
+    content = text.encode(encoding)
+    raw = raw_part_message(
+        [("Content-Type", content_type), ("Content-Disposition", "inline")], content
+    )
+    adp, proc = adapter()
+    result = adp.process(request(raw))
+    assert result.decision == "release", result.reasons
+    assert result.attachments == ()
+    assert proc.calls == []
+    assert leaves(result.outbound.raw)[1].get_payload(decode=True) == content
+    role = next(leaf for leaf in result.evidence["leaves"] if leaf["part_id"] == "2")
+    assert role["role"] == "body" and role["why"] == "text_body"
+
+
+def test_text_body_with_docx_attachment_still_releases_after_replacement():
+    raw = standard_message(subject="Entwurf – Vertrag", text="Bitte beachten Sie den Anhang – üöä.")
+    adp, proc = adapter()
+    result = adp.process(request(raw))
+    assert result.decision == "release", result.reasons
+    assert len(proc.calls) == 1
+    roles = {leaf["part_id"]: leaf["role"] for leaf in result.evidence["leaves"]}
+    assert roles["1.1"] == "body" and roles["1.2.1"] == "body" and roles["1.2.2"] == "inline_image"
 
 
 # --- determinism and harness -------------------------------------------------

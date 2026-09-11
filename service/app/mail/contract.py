@@ -41,6 +41,7 @@ Disposition = Literal[
     "inconsistent",
     "unsupported",
     "ambiguous",
+    "password_protected",
     "oversize",
     "undecodable",
 ]
@@ -174,8 +175,8 @@ class AdapterRequest:
     does not handle (archives, images, legacy binary Office, and so on).
     ``hold`` is the mandatory-cleaning default: the message waits for an
     operator. ``pass_through`` leaves such parts untouched and still replaces
-    the supported ones. Ambiguous, oversize, or undecodable parts are never
-    passed through.
+    the supported ones. Ambiguous, password-protected, oversize, or
+    undecodable parts are never passed through.
 
     ``outbound_marker`` is the header the *transport* wants stamped on a
     released message (the routing exception in Microsoft's add-on topology).

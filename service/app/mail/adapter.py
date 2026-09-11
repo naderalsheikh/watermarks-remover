@@ -9,9 +9,11 @@ Decision rules (mandatory-cleaning semantics, the only mode M1 implements):
   and unrelated headers. ``pass_through`` additionally lets parts the engine
   does not handle at all travel untouched.
 - ``hold`` when something needs an operator or a retry: the processor was
-  unavailable or failed, a part is unsupported/ambiguous/oversize, the
-  message is signed or encrypted, or the rewritten message grew past the
-  limit. ``retryable`` is ``True`` only for processor unavailability/failure.
+  unavailable or failed, a part is unsupported/ambiguous/oversize or a
+  password-protected Office package, the message is signed or encrypted, or
+  the outbound message exceeds the limit. ``retryable`` is ``True`` only for
+  processor unavailability/failure. ``pass_through`` exempts ``unsupported``
+  parts only; ambiguous and password-protected parts always block.
 - ``refuse`` for definitive failures: untrusted submission, malformed MIME,
   structural bounds exceeded, a policy refusal, a processor result that
   contradicts the request, an undecodable part, or a rewritten message that
@@ -148,6 +150,81 @@ class _Classified:
     reason: str
     data: bytes | None = None
     detected: str = ""
+    # True when classification already found the sender's declaration
+    # contradicting the bytes (a "text" part that is not text). Such a part
+    # is ambiguous and never passes through, whatever the policy exception.
+    conflict: bool = False
+
+
+# Body text is exactly these subtypes. Other text/* parts without a filename
+# (enriched, x-vcard, csv, ...) are deliberately candidates, not bodies.
+BODY_TEXT_SUBTYPES = frozenset({"plain", "html", "calendar"})
+
+# Control characters that readable text may contain. Anything else in a
+# decoded text body (NUL above all) means the part is not text.
+_TEXT_CONTROLS_ALLOWED = frozenset("\t\n\r\x0c")
+
+# Magic prefixes that name a binary container without any engine help. Used
+# only to label why a "text" part is not text; the decode check below is
+# what actually rejects them.
+_BINARY_SIGNATURES = (
+    (b"PK\x03\x04", "zip"),
+    (b"PK\x05\x06", "zip"),
+    (b"PK\x07\x08", "zip"),
+    (b"\x1f\x8b", "gzip"),
+    (b"BZh", "bzip2"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"Rar!\x1a\x07", "rar"),
+    (b"%PDF", "pdf"),
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "cfbf"),
+    (b"\x7fELF", "elf"),
+    (b"MZ", "pe"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+)
+
+
+def _binary_signature(data: bytes) -> str | None:
+    for magic, label in _BINARY_SIGNATURES:
+        if data.startswith(magic):
+            return label
+    return None
+
+
+def _text_body_problem(leaf: Leaf, data: bytes, detected: str) -> str | None:
+    """Why a filename-less ``text/*`` part does not qualify as body text.
+
+    ``None`` means it does: a body subtype, bytes that decode strictly in the
+    declared charset (UTF-8 when none is declared), and no control characters
+    beyond tab, newline, carriage return and form feed. Decoding first is
+    what keeps legitimate multibyte text (UTF-16, for instance) eligible even
+    though its encoded bytes contain zeros.
+    """
+    import codecs
+
+    if detected in DOCUMENT_LIKE_FORMATS:
+        return f"bytes_{detected}"
+    signature = _binary_signature(data)
+    if signature:
+        return f"bytes_{signature}"
+    subtype = leaf.part.get_content_subtype()
+    if subtype not in BODY_TEXT_SUBTYPES:
+        return f"subtype_{subtype}"
+    charset = leaf.part.get_content_charset() or "utf-8"
+    try:
+        codec = codecs.lookup(charset)
+    except LookupError:
+        return "charset_unknown"
+    try:
+        text = data.decode(codec.name, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return f"not_{codec.name.replace('-', '_')}"
+    if any((ch < " " or ch == "\x7f") and ch not in _TEXT_CONTROLS_ALLOWED for ch in text):
+        return "control_characters"
+    return None
 
 
 def _declared_formats(leaf: Leaf) -> dict[str, str]:
@@ -225,13 +302,16 @@ class MailAdapter:
     def _classify(self, leaf: Leaf) -> _Classified:
         """Decide a leaf's role from its bytes, not from what the sender said.
 
-        Only two kinds of part are left untouched: readable body text
-        (``text/*`` without a filename whose bytes are not a document
-        container) and inline raster images (``image/*`` not sent as an
-        attachment, whose bytes sniff as a raster format, and whose filename,
-        if any, does not claim a document type). A Content-ID, an ``inline``
-        disposition, or a missing filename never exempts a part by itself:
-        those are sender-controlled and cost nothing to fabricate.
+        Only two kinds of part are left untouched: body text (``text/plain``,
+        ``text/html`` or ``text/calendar`` without a filename, whose bytes
+        decode strictly in the declared charset and contain no control
+        characters beyond tab/newline/return/form feed; see
+        :func:`_text_body_problem`) and inline raster images (``image/*`` not
+        sent as an attachment, whose bytes sniff as a raster format, and whose
+        filename, if any, does not claim a document type). A Content-ID, an
+        ``inline`` disposition, a missing filename, or a ``text/*`` label
+        never exempts a part by itself: those are sender-controlled and cost
+        nothing to fabricate.
         """
         if leaf.content_type.startswith("message/"):
             return _Classified(leaf, "attached_message", "attached_message")
@@ -245,9 +325,13 @@ class MailAdapter:
         detected = self._sniff(data) if data else "unknown"
 
         if maintype == _TEXT_MAINTYPE and not leaf.filename_declared:
-            if detected in DOCUMENT_LIKE_FORMATS:
+            # The body exemption is qualified positively: the bytes must be
+            # readable text in the declared encoding. "The document sniffer
+            # did not recognise it" is not evidence of text.
+            problem = _text_body_problem(leaf, data, detected)
+            if problem:
                 return _Classified(
-                    leaf, "attachment", f"declared_text_bytes_{detected}", data, detected
+                    leaf, "attachment", f"declared_text_{problem}", data, detected, conflict=True
                 )
             return _Classified(leaf, "body", "text_body", data, detected)
 
@@ -489,7 +573,14 @@ class MailAdapter:
         declared = _declared_formats(leaf)
         base = replace(base, detected_format=detected)
         if detected == "encrypted_office":
-            return replace(base, reason="password_protected_office"), None
+            # Its own disposition, not "unsupported": the pass-through
+            # exception is for files the engine does not handle, never for a
+            # document whose contents cannot be inspected at all.
+            return replace(
+                base, disposition="password_protected", reason="password_protected_office"
+            ), None
+        if candidate.conflict:
+            return replace(base, disposition="ambiguous", reason=candidate.reason), None
         conflict = _declaration_conflict(declared, detected)
         if conflict:
             return replace(base, disposition="ambiguous", reason=conflict), None

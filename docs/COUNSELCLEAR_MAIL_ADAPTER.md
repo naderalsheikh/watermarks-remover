@@ -20,7 +20,7 @@ routing, message authentication, native isolation, or production readiness.
 | Deterministic test double (labelled; refused in production mode) | `service/app/mail/synthetic.py` |
 | Synthetic message/document builders | `service/app/mail/fixtures.py` |
 | Runnable harness | `service/app/mail/demo.py` |
-| Tests with the test double (77) / with the real engine (9) | `tests/test_mail_adapter.py`, `tests/test_mail_adapter_engine.py` |
+| Tests with the test double (99) / with the real engine (9) | `tests/test_mail_adapter.py`, `tests/test_mail_adapter_engine.py` |
 
 Run from a fresh checkout:
 
@@ -72,7 +72,7 @@ released with some attachments replaced and others pending.
 | Decision | Meaning | `retryable` |
 |---|---|---|
 | `release` | every selected attachment replaced by a checked result; rewritten bytes re-parsed and verified; envelope unchanged | – |
-| `hold` | operator or retry needed: processor unavailable/failed; unsupported, ambiguous or oversize part; signed/encrypted message; output over the size limit | `True` only for processor unavailable/failed |
+| `hold` | operator or retry needed: processor unavailable/failed; unsupported, ambiguous, password-protected or oversize part; signed/encrypted message; output over the size limit | `True` only for processor unavailable/failed |
 | `refuse` | definitive: untrusted submission, malformed MIME, structural bound exceeded, policy refusal, processor evidence contradicting the request, undecodable part, re-verification failure | `False` |
 
 ### Which parts are selected
@@ -82,8 +82,15 @@ is decoded and sniffed with the engine's own detectors
 (`container_meta.detect_container_format` with no extension, and
 `image_meta.detect_format`). Exactly two kinds of part are left untouched:
 
-- **body text**: `text/*` with no filename whose bytes are not a document
-  container;
+- **body text**, qualified positively rather than by elimination:
+  `text/plain`, `text/html` or `text/calendar` with no filename, whose bytes
+  carry no document or archive signature, decode *strictly* in the declared
+  charset (UTF-8 when none is declared), and contain no control characters
+  other than tab, newline, carriage return and form feed. Decoding happens
+  before the control check, so UTF-16 and other multibyte text whose
+  encoded bytes contain zeros still qualifies. "The document detector
+  returned `unknown`" is not evidence of text; a ZIP or 64 NUL bytes
+  labelled `text/plain` is a candidate, not a body.
 - **inline raster image**: `image/*` not sent with `Content-Disposition:
   attachment`, whose bytes sniff as PNG/JPEG/WebP/AVIF/HEIC/BMP/GIF/TIFF, and
   whose filename, if any, does not claim a document extension. A
@@ -91,10 +98,14 @@ is decoded and sniffed with the engine's own detectors
 
 Everything else is an attachment candidate: any part with an `attachment`
 disposition, any part with a filename, any non-text/non-image part, an
-`image/*` part whose bytes are not a raster image, a `text/*` part whose
-bytes are a document container, and attached messages. A `Content-ID`, an
-`inline` disposition, or a missing filename never exempts a part: those are
-sender-controlled and cost nothing to fabricate.
+`image/*` part whose bytes are not a raster image, a `text/*` part that
+fails the body qualification (including other text subtypes such as
+`text/x-vcard` or `text/csv` without a filename, which are deliberately
+candidates), and attached messages. A `Content-ID`, an `inline`
+disposition, a missing filename, or a `text/*` label never exempts a part:
+those are sender-controlled and cost nothing to fabricate. A `text/*` part
+that fails qualification is `ambiguous` (the declaration contradicts the
+bytes), so it holds under every policy mode.
 
 For each candidate the sender's assertions are checked *independently*
 against the sniffed bytes: the filename extension, the media type (or its
@@ -114,9 +125,13 @@ and it stays the default after central administration exists: an
 administrative screen is not a reason to relax mandatory cleaning. Any
 pass-through is an explicitly authorised, versioned tenant policy exception,
 attributable in the evidence, and its outcome (`unsupported`) never implies
-the part was cleaned. Ambiguous parts, password-protected Office packages,
-signed/encrypted messages, oversize parts and undecodable parts never pass
-through.
+the part was cleaned. The exception applies to the `unsupported` disposition
+only. Password-protected Office packages carry their own disposition,
+`password_protected`, precisely so the exception cannot reach them: a
+document whose contents cannot be inspected is not "a file the engine does
+not handle". Ambiguous parts, password-protected packages, signed/encrypted
+messages, oversize parts and undecodable parts never pass through in either
+mode.
 
 Bounds (defaults in `AdapterLimits`): message 50 MiB, output 50 MiB, 200 MIME
 parts, nesting depth 10, 25 attachments, 25 MiB per attachment. Exceeding
@@ -454,6 +469,13 @@ mail; delegate and shared-mailbox sends; connector rollback.
   exempt: it becomes an `unsupported` candidate and holds under the default
   policy. That is the conservative side of the trade; a tenant that sees it
   often decides through policy, not by widening the exemption.
+- The body-text qualification is conservative in the same way: a body whose
+  charset Python's codec registry does not know, that does not decode
+  strictly in its declared charset, that contains C0 controls other than
+  tab/LF/CR/FF, or that uses a text subtype outside plain/html/calendar is
+  held as `ambiguous`. Sloppy but harmless clients may trip this; the fix is
+  a deliberate widening with a control test, not a fallback to "unknown
+  means text".
 - Signed and encrypted messages are held whole. Rewriting a
   `multipart/signed` body would invalidate the signature; the correct
   disposition is a policy question.
