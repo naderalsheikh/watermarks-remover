@@ -489,9 +489,12 @@ class BatchDispatcher:
             .where(Batch.id == batch_id, Batch.finished_utc.is_(None))
             .values(finished_utc=_now())
         ).rowcount
-        s.commit()
         if not claimed:
+            s.commit()
             return
+        # Publish finished_utc with batch.completed in append_event's commit.
+        # An earlier commit lets polling return before the audit exists and
+        # makes a failed append permanent: later checks cannot reclaim it.
         batch = s.get(Batch, batch_id)
         counts = {"done": 0, "refused": 0, "failed": 0}
         for status, n in (

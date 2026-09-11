@@ -633,6 +633,66 @@ def test_unexpected_dispatcher_exception_fails_the_child_and_completes_the_batch
     assert completed[0]["payload"]["failed"] == 1
 
 
+@pytest.mark.parametrize("first_append_fails", [False, True])
+def test_batch_completion_publishes_its_audit_atomically(env, monkeypatch, first_append_fails):
+    import sqlite3
+
+    from app import dispatcher
+
+    real_append = dispatcher.append_event
+    append_entered = threading.Event()
+    release_append = threading.Event()
+    append_exited = threading.Event()
+    calls = []
+
+    def gated_append(s, **kwargs):
+        if kwargs["action"] == "batch.completed":
+            calls.append(kwargs["payload"]["batch_id"])
+            if len(calls) == 1:
+                append_entered.set()
+                try:
+                    assert release_append.wait(60), "test never released completion audit"
+                    if first_append_fails:
+                        raise RuntimeError("simulated completion audit failure")
+                    return real_append(s, **kwargs)
+                finally:
+                    append_exited.set()
+        return real_append(s, **kwargs)
+
+    monkeypatch.setattr(dispatcher, "append_event", gated_append)
+    c, _, cfg = env
+    mid = _matter(c)
+    doc = _upload(c, mid, "spa.txt")
+    response = _create_batch(c, mid, [doc], "inspect")
+    assert response.status_code == 200, response.text
+    bid = response.json()["id"]
+    try:
+        assert append_entered.wait(60), "batch never reached its completion audit"
+        # App sessions use BEGIN IMMEDIATE, which would wait for the writer.
+        # A WAL reader observes the committed state while publication is held.
+        with sqlite3.connect(cfg.db_path) as reader:
+            finished = reader.execute(
+                "SELECT finished_utc FROM batches WHERE id = ?", (bid,)
+            ).fetchone()[0]
+            audit_count = reader.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE matter_id = ? AND action = ?",
+                (mid, "batch.completed"),
+            ).fetchone()[0]
+        assert finished is None, "batch completion became visible before its audit event"
+        assert audit_count == 0
+    finally:
+        release_append.set()
+        assert append_exited.wait(60), "completion audit did not leave the test barrier"
+
+    final = _wait_batch_done(c, mid, bid)
+    assert final["summary"]["done"] == 1
+    completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
+    assert len(completed) == 1
+    assert completed[0]["payload"]["batch_id"] == bid
+    assert completed[0]["payload"]["done"] == 1
+    assert len(calls) == (2 if first_append_fails else 1)
+
+
 def test_dispatcher_finalization_exception_does_not_wedge_batch(env, monkeypatch):
     """A child can reach a terminal status before audit/release finalization.
     If that finalizer raises, the batch must still complete; otherwise
