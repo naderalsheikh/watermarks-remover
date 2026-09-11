@@ -34,10 +34,11 @@ from . import oidc as oidc_mod
 # inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
 # isolated worker processes (see app.runner). A test enforces the ban.
 from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, perms_of, revoke
-from .audit import _terminal_hash_facts, append_event, event_hash, verify_chain
+from .audit import append_event, event_hash, lock_matter, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
 from .dispatcher import BatchDispatcher, sync_release
+from .job_lifecycle import complete_batch, finish_release
 from .malware import get_scanner
 from .migrate import upgrade_head
 from .models import (
@@ -53,7 +54,6 @@ from .models import (
     _uuid,
 )
 from .oidc import OidcError
-from .runner import run_job, sync_job
 from .security import (
     ATTEST_STRENGTHS,
     LOCAL_SUBJECT,
@@ -1522,7 +1522,12 @@ def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
     affected_batch_ids = [
         row[0]
         for row in s.query(Job.batch_id)
-        .filter(Job.status == "running", Job.batch_id.isnot(None))
+        .filter(
+            Job.status == "running",
+            Job.batch_id.isnot(None),
+            Job.lease_token.is_(None),
+            Job.requested_by.is_(None),
+        )
         .distinct()
         .all()
     ]
@@ -1535,7 +1540,11 @@ def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
     affected_job_ids = [
         row[0]
         for row in s.query(Job.id)
-        .filter((Job.status == "running") | ((Job.status == "queued") & (Job.batch_id.is_(None))))
+        .filter(
+            Job.lease_token.is_(None),
+            Job.requested_by.is_(None),
+            (Job.status == "running") | ((Job.status == "queued") & (Job.batch_id.is_(None))),
+        )
         .all()
     ]
     result = s.execute(
@@ -2305,19 +2314,31 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         s.commit()
         return job
 
-    def _execute_job(job_id: str, kind: str) -> None:
-        """Run the queued job in an isolated worker process (PR 17).
+    def _execute_job(job_id: str, kind: str, actor_id: str) -> int | None:
+        """Compatibility wait over durable background admission/execution.
 
-        The worker performs all status transitions; sync_job() is the
-        crash/timeout backstop that guarantees a terminal status.
-        Timeout budget derives from engine Caps per kind (PR 18).
+        Disconnect/restart leaves the admitted job with the dispatcher.
         """
-        s = session_factory()
-        try:
-            res = run_job(cfg, s, job_id, kind=kind, storage=storage)
-            sync_job(s, job_id, res)
-        finally:
-            s.close()
+        dispatcher.wake()
+        deadline = time.monotonic() + cfg.worker_timeout_s + 60
+        while time.monotonic() < deadline:
+            with session_factory() as waiting:
+                job = waiting.get(Job, job_id)
+                if job is None:
+                    raise HTTPException(404, "job not found")
+                if job.status in ("done", "refused", "failed"):
+                    release = waiting.query(Release).filter(Release.job_id == job_id).one_or_none()
+                    return (
+                        _release_event_seq(waiting, job.matter_id, release.id, "release.terminal")
+                        if release is not None
+                        else None
+                    )
+            time.sleep(0.05)
+        raise HTTPException(
+            503,
+            detail={"message": "job remains queued or running", "job_id": job_id},
+            headers={"Retry-After": "2"},
+        )
 
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/inspect-jobs")
     def inspect_job(
@@ -2328,23 +2349,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     ):
         _require(matter_id, "inspect", s, user)
         doc = _document(matter_id, doc_id, s)
-        job = _create_job(matter_id, doc.id, "inspect", s)
-        _execute_job(job.id, kind="inspect")
+        job = _create_job(matter_id, doc.id, "inspect", s, requested_by=user)
+        _execute_job(job.id, kind="inspect", actor_id=user)
         s.expire_all()
         finished = _job(matter_id, job.id, s)
-        findings = (finished.result_json or {}).get("findings") or []
-        append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="job.inspect",
-            payload={
-                "job_id": job.id,
-                "document_id": doc.id,
-                "status": finished.status,
-                "findings_count": len(findings),
-            },
-        )
         return _job_dict(finished)
 
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs")
@@ -2386,6 +2394,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             }
             attest_claims = claims
         job = Job(
+            requested_by=user,
             matter_id=matter_id,
             document_id=doc.id,
             kind="sanitize",
@@ -2416,43 +2425,22 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 s.rollback()
                 raise HTTPException(403, "attestation token already used") from e
         if layer_b is not None and attest_claims is not None:
-            # Consume only once the job + attestation_uses rows are staged
-            # in this (not-yet-committed) transaction: a rollback above must
-            # not have already burned the token in-memory with no durable
-            # record to show for it.
-            consume_attestation(attest_claims)
+            # Persist authorization with admission; update the in-memory
+            # replay cache only after this whole transaction commits.
             append_event(
                 s,
                 matter_id=matter_id,
                 actor_id=user,
                 action="attest.used",
+                commit=False,
                 payload={"jti": jti, "job_id": job.id, "strength": layer_b["strength"]},
             )
         s.commit()
-        _execute_job(job.id, kind="sanitize")
+        if attest_claims is not None:
+            consume_attestation(attest_claims)
+        _execute_job(job.id, kind="sanitize", actor_id=user)
         s.expire_all()
         finished = _job(matter_id, job.id, s)
-        result = finished.result_json or {}
-        actions = (result.get("manifest") or {}).get("actions") or []
-        no_decision_count = sum(1 for a in actions if NO_DECISION_MARKER in a)
-        append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="job.sanitize",
-            payload={
-                "job_id": job.id,
-                "document_id": doc.id,
-                "policy_id": body.policy_id,
-                "status": finished.status,
-                "verification_pass": result.get("verification_pass"),
-                "no_decision_count": no_decision_count,
-                # MUST-1: chain-commit the artifact hashes the release
-                # packet will later declare, so a tampered manifest can't
-                # re-hash "clean" (see _terminal_hash_facts).
-                **_terminal_hash_facts(finished),
-            },
-        )
         return _job_dict(finished)
 
     def _resolve_release_profile(profile_id: str) -> dict:
@@ -2714,6 +2702,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             attest_claims = claims
 
         job = Job(
+            requested_by=user,
             matter_id=matter_id,
             document_id=doc.id,
             kind="sanitize",
@@ -2734,12 +2723,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 s.rollback()
                 raise HTTPException(403, "attestation token already used") from e
         if layer_b is not None and attest_claims is not None:
-            consume_attestation(attest_claims)
             append_event(
                 s,
                 matter_id=matter_id,
                 actor_id=user,
                 action="attest.used",
+                commit=False,
                 payload={"jti": jti, "job_id": job.id, "strength": layer_b["strength"]},
             )
 
@@ -2764,6 +2753,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             matter_id=matter_id,
             actor_id=user,
             action="release.created",
+            commit=False,
             payload={
                 "release_id": release.id,
                 "document_id": doc.id,
@@ -2784,46 +2774,15 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
         )
         s.commit()
+        if attest_claims is not None:
+            consume_attestation(attest_claims)
 
-        _execute_job(job.id, kind="sanitize")
+        terminal_seq = _execute_job(job.id, kind="sanitize", actor_id=user)
         s.expire_all()
         finished = _job(matter_id, job.id, s)
-        result = finished.result_json or {}
-        actions = (result.get("manifest") or {}).get("actions") or []
-        no_decision_count = sum(1 for a in actions if NO_DECISION_MARKER in a)
-        append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="job.sanitize",
-            payload={
-                "job_id": job.id,
-                "document_id": doc.id,
-                "policy_id": policy_id,
-                "status": finished.status,
-                "verification_pass": result.get("verification_pass"),
-                "no_decision_count": no_decision_count,
-                # MUST-1: same chain commitment as the raw sanitize route
-                # and batch children -- one shape everywhere (see
-                # _terminal_hash_facts).
-                **_terminal_hash_facts(finished),
-            },
-        )
-
-        release.status = finished.status
-        release.finished_utc = finished.finished_utc
-        terminal_event = append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="release.terminal",
-            payload={"release_id": release.id, "job_id": job.id, "status": finished.status},
-        )
-        s.commit()
-
         audit_refs = {
             "release_created_seq": created_event.seq,
-            "release_terminal_seq": terminal_event.seq,
+            "release_terminal_seq": terminal_seq,
         }
         release_result = _build_release_result(
             s, matter=matter, release=release, job=finished, doc=doc, audit_refs=audit_refs
@@ -3084,6 +3043,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         for doc_id in body.document_ids:
             s.add(
                 Job(
+                    requested_by=user,
                     matter_id=matter_id,
                     document_id=doc_id,
                     kind=body.kind,
@@ -3164,11 +3124,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             matter_id=matter_id,
             actor_id=user,
             action="batch.created",
+            commit=False,
             payload={"batch_id": batch.id, "kind": "sanitize", "total": batch.total},
         )
         releases: list[Release] = []
         for doc_id in body.document_ids:
             job = Job(
+                requested_by=user,
                 matter_id=matter_id,
                 document_id=doc_id,
                 kind="sanitize",
@@ -3199,6 +3161,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 matter_id=matter_id,
                 actor_id=user,
                 action="release.created",
+                commit=False,
                 payload={
                     "release_id": release.id,
                     "document_id": doc_id,
@@ -3249,76 +3212,45 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # Same permission the batch was created under -- whoever could
         # start this kind of run may also stop its not-yet-started part.
         _require(matter_id, batch.kind, s, user)
-        # Collected up front, before the bulk UPDATE, same reasoning as
-        # _sweep_orphaned_jobs above: the UPDATE itself can't hand back
-        # which rows it touched the way an ORM save would, and each
-        # cancelled job's sibling Release (if any) needs syncing too.
-        cancelled_ids = [
-            row[0]
-            for row in s.query(Job.id)
-            .filter(Job.batch_id == batch_id, Job.status == "queued")
-            .all()
-        ]
-        cancelled = 0
-        if cancelled_ids:
-            # The status guard is the whole point: between the SELECT above
-            # and this UPDATE the dispatcher may claim one of these rows
-            # (queued -> running) -- flipping a row it now owns would fail a
-            # job that is actively running, and make the reported counts
-            # lie about what actually happened. rowcount, not
-            # len(cancelled_ids), is therefore the truthful "how many did
-            # we cancel" -- anything the guard filtered out was never
-            # cancelled by this call.
-            cancelled = s.execute(
+        # Keep cancellation, its terminal release records and all audit
+        # events together. Use the same matter -> job lock order as workers.
+        lock_matter(s, matter_id)
+        cancelled_ids = list(
+            s.scalars(
                 update(Job)
-                .where(Job.id.in_(cancelled_ids), Job.status == "queued")
+                .where(Job.batch_id == batch_id, Job.status == "queued")
                 .values(status="failed", error="cancelled by operator", finished_utc=_now())
-            ).rowcount
-        if cancelled:
+                .returning(Job.id)
+            )
+        )
+        if cancelled_ids:
             append_event(
                 s,
                 matter_id=matter_id,
                 actor_id=user,
                 action="batch.cancelled",
-                payload={"batch_id": batch_id, "cancelled": cancelled},
+                payload={"batch_id": batch_id, "cancelled": len(cancelled_ids)},
+                commit=False,
             )
+            for job_id in cancelled_ids:
+                job = s.get(Job, job_id, populate_existing=True)
+                append_event(
+                    s,
+                    matter_id=matter_id,
+                    actor_id=user,
+                    action=f"job.{job.kind}",
+                    payload={
+                        "job_id": job.id,
+                        "document_id": job.document_id,
+                        "batch_id": batch_id,
+                        "status": "failed",
+                        "reason": "cancelled",
+                    },
+                    commit=False,
+                )
+                finish_release(s, job, commit=False)
+        complete_batch(s, batch_id, commit=False)
         s.commit()
-        # Only the rows the guarded UPDATE actually flipped, not every id
-        # the pre-SELECT saw: a row claimed mid-race is "running" and is
-        # the dispatcher's to finish -- syncing it here would write a
-        # stale status into its sibling Release. The error literal must
-        # stay in lockstep with the UPDATE above; it re-identifies the
-        # just-failed rows because the UPDATE can't hand back their ids.
-        actually_cancelled = [
-            row[0]
-            for row in s.query(Job.id)
-            .filter(
-                Job.id.in_(cancelled_ids),
-                Job.status == "failed",
-                Job.error == "cancelled by operator",
-            )
-            .all()
-        ]
-        if actually_cancelled:
-            # release_id/profile_id bugfix: a cancelled child's sibling
-            # Release (if any) is stuck "queued" forever, with no
-            # release.terminal event, unless synced here explicitly --
-            # cancel_batch bypasses the dispatcher's own normal per-job
-            # completion path entirely.
-            s.expire_all()
-            for job_id in actually_cancelled:
-                sync_release(s, s.get(Job, job_id))
-            s.commit()
-        # Cancelling every still-queued child can itself be what finishes
-        # the batch (nothing was ever claimed by the dispatcher to trigger
-        # its own completion check) -- most visibly when the whole batch
-        # is cancelled before the dispatcher claims anything at all.
-        dispatcher.check_batch_completion(s, batch_id)
-        # check_batch_completion writes finished_utc via a raw UPDATE,
-        # bypassing this session's identity map -- without a refresh the
-        # `batch` object below (loaded before the check ran) would still
-        # show finished_utc=None in the response even after a completing
-        # cancel (expire_on_commit=False, see db.make_session_factory).
         s.refresh(batch)
         return _batch_dict(batch, s)
 

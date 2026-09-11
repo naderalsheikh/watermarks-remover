@@ -637,7 +637,7 @@ def test_unexpected_dispatcher_exception_fails_the_child_and_completes_the_batch
 def test_batch_completion_publishes_its_audit_atomically(env, monkeypatch, first_append_fails):
     import sqlite3
 
-    from app import dispatcher
+    from app import job_lifecycle as dispatcher
 
     real_append = dispatcher.append_event
     append_entered = threading.Event()
@@ -693,120 +693,72 @@ def test_batch_completion_publishes_its_audit_atomically(env, monkeypatch, first
     assert len(calls) == (2 if first_append_fails else 1)
 
 
-def test_dispatcher_finalization_exception_does_not_wedge_batch(env, monkeypatch):
-    """A child can reach a terminal status before audit/release finalization.
-    If that finalizer raises, the batch must still complete; otherwise
-    polling clients wait forever even though there is no running work left.
-    """
+def test_terminal_append_failure_recovers_without_rerunning_the_engine(env, monkeypatch):
+    """A persisted exit survives finalization failure; no unaudited terminal result escapes."""
+    from app import dispatcher, job_lifecycle
 
-    def _boom(self, s, job, batch):
-        raise RuntimeError("simulated audit finalization failure")
+    real_append, real_worker = job_lifecycle.append_event, dispatcher.run_job
+    attempts, runs = [], []
 
-    monkeypatch.setattr("app.dispatcher.BatchDispatcher._append_child_audit", _boom)
-    c, _, _ = env
+    def failing_append(session, **kwargs):
+        if kwargs["action"] == "job.inspect":
+            attempts.append(1)
+            if len(attempts) <= 3:
+                raise RuntimeError("simulated audit outage")
+        return real_append(session, **kwargs)
+
+    def worker(*args, **kwargs):
+        runs.append(1)
+        return real_worker(*args, **kwargs)
+
+    monkeypatch.setattr(job_lifecycle, "append_event", failing_append)
+    monkeypatch.setattr(dispatcher, "run_job", worker)
+    c, _, cfg = env
+    cfg.job_lease_s = 3
+    # The application owns an equivalent Config instance.
+    c.app.state.batch_dispatcher._cfg.job_lease_s = 3
     mid = _matter(c)
-    d = _upload(c, mid, "spa.txt")
-
-    r = _create_batch(c, mid, [d], "inspect")
-    assert r.status_code == 200, r.text
-    final = _wait_batch_done(c, mid, r.json()["id"])
-    assert final["finished_utc"] is not None
+    doc = _upload(c, mid, "spa.txt")
+    response = _create_batch(c, mid, [doc], "inspect")
+    assert response.status_code == 200, response.text
+    final = _wait_batch_done(c, mid, response.json()["id"])
     assert final["summary"]["done"] == 1
-    completed = [e for e in _audit_actions(c, mid) if e["action"] == "batch.completed"]
-    assert len(completed) == 1
-    assert completed[0]["payload"]["done"] == 1
-
-
-def test_finalization_exception_still_leaves_child_audit_event(env, monkeypatch):
-    """A terminal batch child that loses its audit event loses the custody
-    record of an act that demonstrably happened (its result_json is already
-    committed) -- evidence integrity, not a cosmetic gap. If the append
-    fails on every attempt, the fix degrades instead of going silent: the
-    same job.inspect action, rebuilt from the facts the dispatcher still
-    knows, with an explicit finalization_degraded marker and the reason.
-    The event still goes through append_event, so the chain stays intact.
-    """
-
-    def _boom(self, s, job, batch):
-        raise RuntimeError("simulated persistent audit finalization failure")
-
-    monkeypatch.setattr("app.dispatcher.BatchDispatcher._append_child_audit", _boom)
-    c, _, _ = env
-    mid = _matter(c)
-    d = _upload(c, mid, "spa.txt")
-
-    r = _create_batch(c, mid, [d], "inspect")
-    assert r.status_code == 200, r.text
-    final = _wait_batch_done(c, mid, r.json()["id"])
-    job_id = final["results"][0]["job_id"]
-    assert final["summary"]["done"] == 1  # degraded finalization still completes the batch
-
-    inspect_events = [e for e in _audit_actions(c, mid) if e["action"] == "job.inspect"]
-    # With this monkeypatch the normal append can never succeed -- the
-    # degraded fallback is the event the fix must have written for THIS
-    # job (keyed on job_id, not list position, so a second child could
-    # never be miscounted).
-    matching = [e for e in inspect_events if e["payload"]["job_id"] == job_id]
-    assert matching, "child job's audit event vanished when finalization kept failing"
-    degraded = matching[0]["payload"]
-    assert degraded["finalization_degraded"] is True
-    assert degraded["status"] == "done"
-    assert degraded["document_id"] == d
-    assert degraded["batch_id"] == r.json()["id"]
-    assert degraded["verification_pass"] is None
-    assert "simulated persistent audit finalization failure" in degraded["degraded_reason"]
-    # The degraded event must carry the same principal the normal event
-    # would have (batch.requested_by -- "operator" for this local-password
-    # test client): a matter id is not an actor, and a machine-actor here
-    # would make its custody semantics differ from every other event for
-    # the same act.
-    assert matching[0]["actor_id"] == "operator"
-    # Degraded is still a chain event: it must not have broken verification.
+    assert len(runs) == 1
+    assert len(attempts) == 4
+    events = _audit_actions(c, mid)
+    assert sum(e["action"] == "job.inspect" for e in events) == 1
+    assert sum(e["action"] == "batch.completed" for e in events) == 1
     assert c.get(f"/v1/matters/{mid}/audit").json()["chain_ok"] is True
 
 
 def test_finalization_retry_succeeds_leaves_normal_audit_event(env, monkeypatch):
-    """A transient finalization failure (first attempt raises, retry
-    succeeds) must yield the normal, non-degraded job.inspect event -- the
-    retry exists so the degraded fallback is reached only by a persistent
-    failure, not any single hiccup. Counter-based _boom: raises exactly
-    once, then delegates to the real implementation.
-    """
-    from app.dispatcher import BatchDispatcher
+    from app import job_lifecycle
 
-    real = BatchDispatcher._append_child_audit
-    calls = {"n": 0}
+    real = job_lifecycle.append_event
+    calls = []
 
-    def _flaky(self, s, job, batch):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("simulated transient audit finalization failure")
-        return real(self, s, job, batch)
+    def flaky(session, **kwargs):
+        if kwargs["action"] == "job.inspect":
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("simulated transient audit failure")
+        return real(session, **kwargs)
 
-    monkeypatch.setattr("app.dispatcher.BatchDispatcher._append_child_audit", _flaky)
+    monkeypatch.setattr(job_lifecycle, "append_event", flaky)
     c, _, _ = env
     mid = _matter(c)
-    d = _upload(c, mid, "spa.txt")
-
-    r = _create_batch(c, mid, [d], "inspect")
-    assert r.status_code == 200, r.text
-    final = _wait_batch_done(c, mid, r.json()["id"])
-    job_id = final["results"][0]["job_id"]
+    doc = _upload(c, mid, "spa.txt")
+    response = _create_batch(c, mid, [doc], "inspect")
+    assert response.status_code == 200, response.text
+    final = _wait_batch_done(c, mid, response.json()["id"])
     assert final["summary"]["done"] == 1
-
-    matching = [
-        e
-        for e in _audit_actions(c, mid)
-        if e["action"] == "job.inspect" and e["payload"]["job_id"] == job_id
-    ]
-    assert matching, "child job never got its audit event after a transient finalization failure"
-    payload = matching[0]["payload"]
-    # First attempt raised, retry succeeded -- the event is the normal one.
-    assert calls["n"] == 2
-    assert "finalization_degraded" not in payload
-    assert payload["status"] == "done"
-    assert payload["document_id"] == d
-    assert payload["findings_count"] == 1  # spa.txt's single finding, via the real engine
+    rows = [e for e in _audit_actions(c, mid) if e["action"] == "job.inspect"]
+    assert len(rows) == 1
+    assert len(calls) == 2
+    assert rows[0]["payload"]["status"] == "done"
+    assert rows[0]["payload"]["document_id"] == doc
+    assert rows[0]["payload"]["findings_count"] == 1
+    assert "finalization_degraded" not in rows[0]["payload"]
 
 
 # --- ported from the retired tests/test_bulk_jobs.py (PR 31 commit 3) -----------

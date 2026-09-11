@@ -45,23 +45,19 @@ browser ────────────────────────
   (subprocess mode) but not a separate container — see §3 for what it
   would take to get real per-job container/gVisor isolation, and why that
   is a different topology from "N containerized cc-api replicas."
-- Multiple API replicas are supported **only** with Postgres
-  (`COUNSELCLEAR_DATABASE_URL`); SQLite is single-writer by design.
-- The login throttle and ClamAV-definition cache are per-process; behind
-  replicas, enforce connection-level rate limits at the proxy too.
-- **Async batch dispatch (PR 31) is concurrency-bounded per process, not
-  cluster-wide.** `POST .../batches` durably queues child Job rows and
-  each `cc-api` process runs its own in-process `BatchDispatcher`
-  (`COUNSELCLEAR_BATCH_MAX_CONCURRENT`, default 4) against them. The
-  per-job *claim* is a real conditional `UPDATE ... WHERE status='queued'`,
-  so two dispatchers — in one process or across replicas sharing Postgres
-  — can never both execute the same job; that correctness guarantee holds
-  under N replicas. The *concurrency cap* does not: with N replicas the
-  effective global ceiling is `N × COUNSELCLEAR_BATCH_MAX_CONCURRENT`, not
-  the configured value, since no dispatcher knows about any other. There
-  is no cross-process lease yet. If you run multiple replicas, size
-  `COUNSELCLEAR_BATCH_MAX_CONCURRENT` down accordingly, or restrict batch
-  submission to a single replica, until a shared lease is added.
+- The durable job queue uses database claims, shared capacity, renewable
+  leases and attempt fencing. Single requests and batch children use the same
+  queue. A request disconnect does not cancel admitted work; expired owners
+  are recovered, and job/release/batch terminal records commit with their
+  audit events. See [job recovery operations](COUNSELCLEAR_JOB_RECOVERY.md).
+- Queue concurrency and transaction behavior have dedicated SQLite and real
+  PostgreSQL tests, including independent processes. This does not qualify an
+  entire multi-replica deployment: every executor still needs the same durable
+  data-root paths for attempt files and bundles. Apply migrations once before
+  starting workers. Keep the shipped one-API topology until shared-volume,
+  ingress/identity and restore behavior are qualified for the target environment.
+- The login throttle and ClamAV-definition cache remain per-process. A
+  multi-replica deployment also needs proxy-level connection throttling.
 
 ## 2. Images: pin everything
 

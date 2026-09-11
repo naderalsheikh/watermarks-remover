@@ -89,13 +89,17 @@ def _encrypted_custody_flow(tmp_path, monkeypatch, mode, image=""):
             stored_job = session.get(Job, job["id"])
             assert storage_from_config(cfg).read(stored_doc.storage_path) == original
             assert Path(stored_doc.storage_path).read_bytes() != original
-            expected_bundle = root / "matters" / matter / "jobs" / job["id"] / "output" / "bundle"
-            assert Path(stored_job.bundle_dir) == expected_bundle
+            attempt_root = root / "matters" / matter / "jobs" / job["id"] / "attempts"
+            expected_bundle = Path(stored_job.bundle_dir)
+            relative = expected_bundle.relative_to(attempt_root)
+            assert len(relative.parts) == 3
+            assert relative.parts[0].startswith(f"{stored_job.attempt_number}-")
+            assert relative.parts[1:] == ("output", "bundle")
             assert not (expected_bundle / "original").exists()
         engine.dispose()
         jobs_dir = root / "matters" / matter / "jobs"
         for job_id in (inspect["id"], job["id"]):
-            assert not (jobs_dir / job_id / "input").exists()
+            assert not list((jobs_dir / job_id).rglob("input"))
         # A raw original must not remain in any worker output after dispatch.
         assert all(path.read_bytes() != original for path in jobs_dir.rglob("*") if path.is_file())
 

@@ -135,18 +135,18 @@ def test_append_event_retries_after_seq_collision(tmp_path, monkeypatch):
         s.commit()
 
     # Patch only now: the seed commit above must go through untouched.
-    real_commit = Session.commit
+    real_flush = Session.flush
     state = {"fail_next": True}
 
-    def racing_commit(self):
-        if state["fail_next"]:
+    def racing_flush(self, objects=None):
+        if state["fail_next"] and any(isinstance(obj, AuditEvent) for obj in self.new):
             from sqlalchemy.exc import IntegrityError
 
             state["fail_next"] = False
             raise IntegrityError("INSERT", {}, Exception("duplicate key"))
-        return real_commit(self)
+        return real_flush(self, objects)
 
-    monkeypatch.setattr(Session, "commit", racing_commit)
+    monkeypatch.setattr(Session, "flush", racing_flush)
 
     with factory() as s:
         ev = append_event(s, matter_id="m", actor_id="operator", action="upload", payload={"n": 1})
@@ -176,10 +176,14 @@ def test_append_event_gives_up_after_bounded_retries(tmp_path, monkeypatch):
         s.add(Matter(id="m", name="m"))
         s.commit()
 
-    def always_collide(self):
-        raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+    real_flush = Session.flush
 
-    monkeypatch.setattr(Session, "commit", always_collide)
+    def always_collide(self, objects=None):
+        if any(isinstance(obj, AuditEvent) for obj in self.new):
+            raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+        return real_flush(self, objects)
+
+    monkeypatch.setattr(Session, "flush", always_collide)
 
     with factory() as s, pytest.raises(RuntimeError, match="kept colliding"):
         append_event(s, matter_id="m", actor_id="operator", action="upload", payload={})

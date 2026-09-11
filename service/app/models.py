@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -127,6 +127,14 @@ class Batch(Base):
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
+class JobQueue(Base):
+    """One database-wide capacity reservation shared by all dispatchers."""
+
+    __tablename__ = "job_queue"
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    capacity: Mapped[int] = mapped_column()
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
@@ -171,6 +179,15 @@ class Job(Base):
     worker_image: Mapped[str] = mapped_column(String(200), default="")
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # NULL actor identifies historical admission, which had no durable owner.
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    attempt_number: Mapped[int] = mapped_column(default=0)
+    # Parent-observed worker exit, persisted before terminal publication. A
+    # recovery attempt can revalidate these private files without rerunning.
+    execution_receipt: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
 
 
 class Release(Base):

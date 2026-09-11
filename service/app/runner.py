@@ -288,6 +288,12 @@ def run_job(
         )
 
     root = job_root(cfg, job.matter_id, job.id)
+    claim = s.info.get("job_claim")
+    if claim is not None:
+        from .job_queue import require_lease
+
+        require_lease(s, job, claim)
+        root = root / "attempts" / f"{claim.attempt}-{claim.token}"
     input_dir, output_dir = root / "input", root / "output"
     staged_input = input_dir / doc.filename
 
@@ -517,7 +523,7 @@ def _validated_result(output_dir: Path, job: Job, doc: Document | None) -> tuple
     return payload, ""
 
 
-def sync_job(s: Session, job_id: str, res: RunnerResult) -> None:
+def sync_job(s: Session, job_id: str, res: RunnerResult, *, commit: bool = True) -> None:
     """Reconcile after a worker exit. The worker itself never touches the
     database — this reads back ``result.json`` (the worker's only output
     channel) and is the sole writer of the Job row. A worker that crashed
@@ -553,4 +559,7 @@ def sync_job(s: Session, job_id: str, res: RunnerResult) -> None:
         job.result_json = None
         job.bundle_dir = ""
     job.finished_utc = _now()
-    s.commit()
+    if commit:
+        s.commit()
+    else:
+        s.flush()

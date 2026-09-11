@@ -458,7 +458,10 @@ def test_batch_release_created_events_fire_per_release_not_once_per_batch(env):
 # --- bugfix: cancel_batch must sync a cancelled child's Release too ---------------
 
 
-def test_cancel_batch_syncs_cancelled_childs_release_to_failed(env):
+@pytest.mark.parametrize(
+    "failed_action", [None, "job.sanitize", "release.terminal", "batch.completed"]
+)
+def test_cancel_batch_syncs_cancelled_childs_release_to_failed(env, failed_action):
     """cancel_batch bulk-updates still-queued children directly, bypassing
     the dispatcher's normal per-job completion path (BatchDispatcher.
     sync_release) -- its sibling Release used to be left stuck "queued"
@@ -505,6 +508,27 @@ def test_cancel_batch_syncs_cancelled_childs_release_to_failed(env):
             )
         )
         s.commit()
+
+    if failed_action:
+        from sqlalchemy import event
+
+        def fail(_mapper, _connection, target):
+            if target.action == failed_action:
+                raise RuntimeError("synthetic cancellation failure")
+
+        with sf() as s:
+            before = s.query(AuditEvent).count()
+        event.listen(AuditEvent, "before_insert", fail)
+        try:
+            with pytest.raises(RuntimeError, match="synthetic cancellation"):
+                c.post(f"/v1/matters/{mid}/batches/cb1/cancel")
+        finally:
+            event.remove(AuditEvent, "before_insert", fail)
+        with sf() as s:
+            assert s.get(Job, "cbj1").status == "queued"
+            assert s.get(Release, "cbr1").status == "queued"
+            assert s.get(Batch, "cb1").finished_utc is None
+            assert s.query(AuditEvent).count() == before
 
     r = c.post(f"/v1/matters/{mid}/batches/cb1/cancel")
     assert r.status_code == 200, r.text
@@ -725,3 +749,40 @@ def test_reconcile_stale_releases_is_a_noop_when_nothing_stale(env):
 
     with sf() as s:
         assert _reconcile_stale_releases(s) == 0
+
+
+def test_batch_release_admission_rolls_back_all_children_and_events(env):
+    from sqlalchemy import event
+
+    c, sf, _cfg = env
+    mid = _matter(c)
+    docs = [_upload(c, mid, name) for name in ("spa.docx", "macro.docm")]
+    with sf() as s:
+        before = s.query(AuditEvent).count()
+    created = []
+
+    def fail_second_release(_mapper, _connection, target):
+        if target.action == "release.created":
+            created.append(target.id)
+            if len(created) == 2:
+                raise RuntimeError("synthetic admission storage failure")
+
+    event.listen(AuditEvent, "before_insert", fail_second_release)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic admission"):
+            c.post(
+                f"/v1/matters/{mid}/releases",
+                json={
+                    "document_ids": docs,
+                    "profile_id": "counterparty_deal_room",
+                    "recipient_type": "client",
+                },
+            )
+    finally:
+        event.remove(AuditEvent, "before_insert", fail_second_release)
+    assert len(created) == 2
+    with sf() as s:
+        assert s.query(Batch).count() == 0
+        assert s.query(Job).count() == 0
+        assert s.query(Release).count() == 0
+        assert s.query(AuditEvent).count() == before

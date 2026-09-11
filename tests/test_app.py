@@ -784,19 +784,16 @@ def test_tampered_manifest_fails_chain_check_but_not_internal_checks(client, tmp
     the --audit-csv check catches what the internal checks cannot."""
     doc, job = _run_done_sanitize(client)
 
-    # The bundle layout is a stable product fact (runner.py's job dirs):
-    # data/matters/{matter}/jobs/{job}/output/bundle/manifest.json.
-    manifest_path = (
-        tmp_path
-        / "data"
-        / "matters"
-        / doc["_matter"]
-        / "jobs"
-        / job["id"]
-        / "output"
-        / "bundle"
-        / "manifest.json"
-    )
+    from app.config import Config
+    from app.db import make_engine, make_session_factory
+    from app.models import Job
+
+    engine = make_engine(Config(tmp_path / "data"))
+    try:
+        with make_session_factory(engine)() as session:
+            manifest_path = Path(session.get(Job, job["id"]).bundle_dir) / "manifest.json"
+    finally:
+        engine.dispose()
     assert manifest_path.is_file(), f"expected bundle at {manifest_path}"
     original = manifest_path.read_bytes()
     tampered = bytearray(original)
@@ -1929,3 +1926,48 @@ def test_docker_cmd_stays_network_none_without_layer_b(tmp_path, monkeypatch):
     )
     assert cmd[cmd.index("--network") + 1] == "none"
     assert "--layer-b" not in cmd
+
+
+@pytest.mark.parametrize(
+    "route,failed_action", [("sanitize-jobs", "attest.used"), ("releases", "release.created")]
+)
+def test_failed_admission_does_not_publish_job_or_consume_attestation(
+    wm_client, route, failed_action
+):
+    from app import security
+    from app.models import AttestationUse, AuditEvent, Job, Release
+    from sqlalchemy import event
+
+    doc = _upload(wm_client, "spa.docx")
+    mid = doc["_matter"]
+    issued = wm_client.post(
+        "/v1/attestations",
+        json={"matter_id": mid, "document_id": doc["id"], "strength": "preserve"},
+    ).json()
+    body = {"layer_b": {"strength": "preserve", "token": issued["token"]}}
+    if route == "releases":
+        body.update(profile_id="counterparty_deal_room", recipient_type="client")
+    sessions = wm_client.app.state.batch_dispatcher._session_factory
+    with sessions() as s:
+        before = s.query(AuditEvent).count()
+
+    def fail(_mapper, _connection, target):
+        if target.action == failed_action:
+            raise RuntimeError("synthetic admission failure")
+
+    event.listen(AuditEvent, "before_insert", fail)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic admission"):
+            wm_client.post(f"/v1/matters/{mid}/documents/{doc['id']}/{route}", json=body)
+    finally:
+        event.remove(AuditEvent, "before_insert", fail)
+    with sessions() as s:
+        assert s.query(Job).count() == 0
+        assert s.query(Release).count() == 0
+        assert s.query(AttestationUse).count() == 0
+        assert s.query(AuditEvent).count() == before
+    assert issued["jti"] not in security._consumed_jtis
+    retried = wm_client.post(f"/v1/matters/{mid}/documents/{doc['id']}/{route}", json=body)
+    assert retried.status_code == 200, retried.text
+    with sessions() as s:
+        assert s.query(Job).count() == s.query(AttestationUse).count() == 1
