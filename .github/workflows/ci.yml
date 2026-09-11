@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feat/custody-record-truthfulness, build/production-foundation]
+    branches: [main, feat/custody-record-truthfulness]
   pull_request:
   workflow_call:
 
@@ -30,8 +30,28 @@ jobs:
       - name: Install test deps
         run: python -m pip install -r requirements-dev.txt
 
+      - name: Install document tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libimage-exiftool-perl qpdf
+
+      - name: Install document tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install exiftool qpdf
+
+      - name: Install document tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install exiftool qpdf --yes --no-progress
+
+      - name: Verify native tools
+        run: |
+          exiftool -ver
+          qpdf --version
+
       - name: Test
-        run: python -m pytest -q
+        run: python -m pytest -v --tb=short
 
       - name: Validate OpenAPI spec
         if: matrix.os == 'ubuntu-latest'

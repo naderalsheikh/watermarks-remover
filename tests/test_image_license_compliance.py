@@ -25,6 +25,7 @@ it, and the Dockerfile copies it.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -103,7 +104,7 @@ def test_notices_file_is_not_stale():
     import subprocess
 
     result = subprocess.run(
-        [str(REPO / ".venv" / "bin" / "python"), str(GENERATOR), "--check"],
+        [sys.executable, str(GENERATOR), "--check"],
         capture_output=True,
         text=True,
         cwd=REPO,

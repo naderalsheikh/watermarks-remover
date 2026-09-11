@@ -24,19 +24,20 @@ from app.worker import _run_job
 
 
 @pytest.fixture()
-def completed_worker(tmp_path):
+def completed_worker(tmp_path, request):
     cfg = Config(tmp_path)
     upgrade_head(cfg.db_url())
     engine = make_engine(cfg)
     with make_session_factory(engine)() as session:
         data = b"A document with a zero\xe2\x80\x8bwidth marker.\n"
+        filename = getattr(request, "param", "input.txt")
         session.add(Matter(id="m", name="Matter"))
         session.flush()
         session.add(
             Document(
                 id="d",
                 matter_id="m",
-                filename="input.txt",
+                filename=filename,
                 sha256=hashlib.sha256(data).hexdigest(),
                 bytes=len(data),
                 storage_path="",
@@ -52,7 +53,7 @@ def completed_worker(tmp_path):
         )
         session.add(job)
         session.commit()
-        source = tmp_path / "input.txt"
+        source = tmp_path / filename
         source.write_bytes(data)
         output = runner.job_root(cfg, "m", "j") / "output"
         assert (
@@ -113,6 +114,48 @@ def test_worker_path_is_mapped_to_trusted_host_bundle(completed_worker, spelling
     job = _reconcile(completed_worker)
     assert job.status == "done", job.error
     assert job.bundle_dir == str(output / "bundle")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a literal backslash is a POSIX filename character")
+@pytest.mark.parametrize("completed_worker", [r"notes\draft.txt"], indirect=True)
+def test_literal_posix_backslash_filename_keeps_custody_identity(completed_worker):
+    _, _, output, _ = completed_worker
+    job = _reconcile(completed_worker)
+    assert job.status == "done", job.error
+    assert job.result_json["manifest"]["original"]["filename"] == r"notes\draft.txt"
+    assert job.result_json["derivative"] == r"notes\draft.external.txt"
+    assert (output / "bundle" / "derivative" / job.result_json["derivative"]).is_file()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../outside.txt",
+        r"..\outside.txt",
+        r"notes\..\outside.txt",
+        r"notes\.\outside.txt",
+        r"C:\outside.txt",
+        "C:outside.txt",
+        r"\outside.txt",
+        r"\\server\share\outside.txt",
+        "file.txt:stream",
+        r"notes\.. \outside.txt",
+        r"notes\...\outside.txt",
+        "notes\\\\outside.txt",
+        "notes\\",
+        ".",
+        "..",
+        "/outside.txt",
+        "nul\x00.txt",
+    ],
+)
+def test_worker_basename_rejects_native_and_windows_path_escapes(name):
+    assert runner._confined_basename(name) is False
+
+
+def test_worker_basename_follows_native_backslash_semantics():
+    assert runner._confined_basename(r"notes\draft.txt") is (os.name != "nt")
+    assert runner._confined_basename("memo.final.txt") is True
 
 
 @pytest.mark.parametrize(

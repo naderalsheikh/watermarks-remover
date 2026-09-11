@@ -730,7 +730,11 @@ def _diff_context(text: str, offset: int, width: int = 24) -> str:
     hi = min(len(text), offset + width // 2 + 1)
     snippet = text[lo:hi]
     marked = (
-        text[lo:offset] + "[" + (text[offset] if offset < len(text) else "") + "]" + text[offset + 1 : hi]
+        text[lo:offset]
+        + "["
+        + (text[offset] if offset < len(text) else "")
+        + "]"
+        + text[offset + 1 : hi]
     )
     return repr(marked if len(marked) <= width + 4 else snippet)[: width * 3]
 

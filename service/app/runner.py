@@ -39,7 +39,7 @@ import stat
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from sqlalchemy.orm import Session
 
@@ -64,6 +64,24 @@ class RunnerResult:
 
 def job_root(cfg: Config, matter_id: str, job_id: str) -> Path:
     return cfg.data_root / "matters" / matter_id / "jobs" / job_id
+
+
+def _confined_basename(name: object) -> bool:
+    """Accept a native filename without permitting either platform's escapes.
+
+    A backslash can be literal user content on POSIX (including in existing
+    document names). Preserve that contract only when its Windows path
+    interpretation is also relative and has no traversal/alias components.
+    Windows itself still requires a single native basename.
+    """
+    if not isinstance(name, str) or not name or "\x00" in name or ":" in name:
+        return False
+    if Path(name).name != name or "/" in name:
+        return False
+    windows = PureWindowsPath(name)
+    if windows.drive or windows.root:
+        return False
+    return all(part and not part.endswith((".", " ")) for part in name.split("\\"))
 
 
 def build_subprocess_cmd(
@@ -294,12 +312,7 @@ def run_job(
         output_dir.mkdir(parents=True, exist_ok=True)
         _output_directory(input_dir)
         _output_directory(output_dir)
-        if (
-            not doc.filename
-            or doc.filename in {".", ".."}
-            or "/" in doc.filename
-            or "\\" in doc.filename
-        ):
+        if not _confined_basename(doc.filename):
             raise ValueError("stored document filename is not a basename")
         original = storage.read(doc.storage_path)
         if len(original) != doc.bytes or hashlib.sha256(original).hexdigest() != doc.sha256:
@@ -458,7 +471,7 @@ def _validated_bundle(output_dir: Path, payload: dict, job: Job, doc: Document) 
     ):
         raise ValueError("worker manifest does not match the job's original or policy")
     name = result.get("derivative")
-    if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name or "\\" in name:
+    if not _confined_basename(name):
         raise ValueError("worker reported an invalid derivative name")
     if derivative.get("filename") != name:
         raise ValueError("worker derivative name differs from manifest")

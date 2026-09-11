@@ -72,7 +72,8 @@ CI installs the complete shipped Python runtime through `requirements-dev.txt`
 and uses Python 3.14, matching the product image. It runs the Python suite on
 Linux, Windows, and macOS, lint/format checks, dependency audits, web tests/lint/
 static export, and the actual worker image workflow. The web job uses Node 24 and
-the lockfile. The frontend dependency patches address the advisories reported by
+the lockfile. Host test jobs install ExifTool and qpdf so required PDF/JPEG paths
+exercise their real tools instead of an unsupported fallback. The frontend dependency patches address the advisories reported by
 the September 11 clean install; the deployed static export does not run a Next.js
 server, but development/build dependencies must still be maintained.
 
