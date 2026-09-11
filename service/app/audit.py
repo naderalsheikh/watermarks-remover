@@ -76,6 +76,13 @@ def append_event(
     attempt's insert, leaving earlier pending objects intact for the next
     attempt (or the final commit) to still pick up.
     """
+    if s.get_bind().dialect.name == "sqlite":
+        # Request reads already acquire SQLite's BEGIN IMMEDIATE write lock.
+        # A fresh append must acquire that lock before the Python mutex too:
+        # otherwise it can hold the mutex while waiting for a transaction
+        # whose owner is itself waiting to append under the same mutex.
+        # Opening the connection neither commits nor discards caller writes.
+        s.connection()
     with _matter_lock(matter_id):
         for _attempt in range(_APPEND_ATTEMPTS):
             last_seq = s.execute(

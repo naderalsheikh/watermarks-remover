@@ -46,6 +46,9 @@ Existing terminal outcomes and already-issued artifacts are not rewritten by thi
 New batch completion timestamps and their `batch.completed` audit events commit
 together. A failed completion append leaves the batch eligible for retry;
 historical rows with missing events are not reconstructed by this change.
+SQLite audit appends acquire the database transaction before the in-process
+matter lock, preventing an inverse lock order between concurrent requests.
+Caller-staged writes still commit or roll back with their audit append.
 Original downloads continue through the existing explicit `download_original`
 permission and custody backend. This increment does not remove plaintext copies
 from historical bundles. Protection and retention for new and historical local
