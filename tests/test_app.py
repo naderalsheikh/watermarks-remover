@@ -1971,3 +1971,31 @@ def test_failed_admission_does_not_publish_job_or_consume_attestation(
     assert retried.status_code == 200, retried.text
     with sessions() as s:
         assert s.query(Job).count() == s.query(AttestationUse).count() == 1
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_requested_original_must_match_custody_before_packet_issuance(client, missing):
+    from app.models import AuditEvent, Document
+
+    doc, job = _run_done_sanitize(client)
+    mid = doc["_matter"]
+    assert (
+        client.put(
+            f"/v1/matters/{mid}/acl", json={"user_id": "operator", "perm": "download_original"}
+        ).status_code
+        == 200
+    )
+    sessions = client.app.state.batch_dispatcher._session_factory
+    with sessions() as s:
+        path = Path(s.get(Document, doc["id"]).storage_path)
+        events_before = s.query(AuditEvent).count()
+    path.chmod(0o644)
+    if missing:
+        path.unlink()
+    else:
+        path.write_bytes(b"Different bytes under the recorded original path")
+    response = client.get(f"/v1/matters/{mid}/jobs/{job['id']}/bundle?include_original=true")
+    assert response.status_code == 409, response.text
+    assert "could not be verified" in response.json()["detail"]
+    with sessions() as s:
+        assert s.query(AuditEvent).count() == events_before

@@ -360,7 +360,7 @@ export type ReleaseResult = {
 export type ReleaseCreateResponse = {
   release: Release;
   job: Job;
-  release_result: ReleaseResult;
+  release_result: ReleaseResult | null; // null while an asynchronous release is queued/running
 };
 
 // POST /v1/matters/{id}/releases — batch release: reuses BatchResponse's

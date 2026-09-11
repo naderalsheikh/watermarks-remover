@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, BigInteger, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,7 +52,7 @@ class Document(Base):
     filename: Mapped[str] = mapped_column(String(255))
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     bytes: Mapped[int] = mapped_column()
-    storage_path: Mapped[str] = mapped_column(String(1024))
+    storage_path: Mapped[str] = mapped_column(Text)
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
 
 
@@ -125,6 +125,19 @@ class Batch(Base):
     total: Mapped[int] = mapped_column()
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class Admission(Base):
+    __tablename__ = "admissions"
+
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), primary_key=True)
+    requested_by: Mapped[str] = mapped_column(String(64), primary_key=True)
+    operation: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    resource_kind: Mapped[str] = mapped_column(String(16))
+    resource_id: Mapped[str] = mapped_column(String(16))
+    created_utc: Mapped[str] = mapped_column(String(32), default=_now)
 
 
 class JobQueue(Base):

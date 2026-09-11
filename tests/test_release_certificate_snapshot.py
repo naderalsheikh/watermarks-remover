@@ -67,8 +67,7 @@ def test_snapshot_hash_survives_clock_reader_and_display_changes(
 ):
     if outcome == "failed":
         monkeypatch.setattr(
-            main,
-            "run_job",
+            "app.dispatcher.run_job",
             lambda *args, **kwargs: RunnerResult(
                 rc=1,
                 stderr_tail="simulated worker failure",

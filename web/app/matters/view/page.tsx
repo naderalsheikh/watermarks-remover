@@ -4,6 +4,7 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
+import { startJobPolling } from "@/lib/jobPolling";
 import { computeProductionReviewState } from "@/lib/productionReview";
 import { useApiData } from "@/lib/useApi";
 import { usePaginatedList } from "@/lib/usePaginatedList";
@@ -161,7 +162,7 @@ function ReleasePanel({
           ? (purpose.trim() ? `${purpose.trim()} · ` : "") +
             `Signature attestation: ${trimmedJustification}`
           : purpose;
-      await api.post<ReleaseCreateResponse>(`/v1/matters/${matterId}/documents/${docId}/releases`, {
+      await api.submit<ReleaseCreateResponse>(`/v1/matters/${matterId}/documents/${docId}/releases`, {
         profile_id: profileId,
         recipient_type: recipientType,
         recipient_name: recipientName,
@@ -455,6 +456,7 @@ function ReleasePanel({
           onClick={submit}
           disabled={
             submitting ||
+            docJobs.some(job => job.status === "queued" || job.status === "running") ||
             !profileId ||
             (needsFallbackGate && !noDecisionAck) ||
             (attest && !signatureJustification.trim()) ||
@@ -514,6 +516,7 @@ function DocumentRow({
     .filter((j) => j.document_id === doc.id)
     .sort((a, b) => b.created_utc.localeCompare(a.created_utc));
   const nextStep = documentNextStep(docJobs, releaseProfiles);
+  const documentBusy = docJobs.some(job => job.status === "queued" || job.status === "running");
   const resultLink = documentResultLink(docJobs);
 
   useEffect(() => {
@@ -524,7 +527,7 @@ function DocumentRow({
     setInspecting(true);
     setInspectError(null);
     try {
-      await api.post(`/v1/matters/${matterId}/documents/${doc.id}/inspect-jobs`);
+      await api.submit(`/v1/matters/${matterId}/documents/${doc.id}/inspect-jobs`);
       onJobStarted();
     } catch (err) {
       setInspectError(err instanceof Error ? err.message : "Inspect failed to start");
@@ -570,16 +573,16 @@ function DocumentRow({
               )}
               <button
                 onClick={inspect}
-                disabled={inspecting || !inspectGate.allowed}
+                disabled={inspecting || documentBusy || !inspectGate.allowed}
                 title={inspectGate.title}
                 className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
               >
-                {inspecting ? "Inspecting…" : "Inspect"}
+                {inspecting ? "Submitting…" : "Inspect"}
               </button>
               <button
                 onClick={() => setReleasing((v) => !v)}
-                disabled={!sanitizeGate.allowed}
-                title={sanitizeGate.title}
+                disabled={documentBusy || !sanitizeGate.allowed}
+                title={documentBusy ? "Work is already queued or running for this document." : sanitizeGate.title}
                 className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.03]"
               >
                 Prepare Release Packet
@@ -678,7 +681,7 @@ function BulkRunPanel({
       const batch =
         kind === "sanitize"
           ? (
-              await api.post<BatchReleaseResponse>(`/v1/matters/${matterId}/releases`, {
+              await api.submit<BatchReleaseResponse>(`/v1/matters/${matterId}/releases`, {
                 document_ids: docIds,
                 profile_id: profileId,
                 recipient_type: recipientType,
@@ -686,7 +689,7 @@ function BulkRunPanel({
                 reason: purpose,
               })
             ).batch
-          : await api.post<BatchResponse>(`/v1/matters/${matterId}/batches`, {
+          : await api.submit<BatchResponse>(`/v1/matters/${matterId}/batches`, {
               document_ids: docIds,
               kind,
             });
@@ -1070,6 +1073,19 @@ function MatterView({
         .then((r) => ({ items: r.jobs, total: r.total })),
     `jobs:${matterId}`,
   );
+  const [jobUpdateError, setJobUpdateError] = useState<string | null>(null);
+  const pendingJobIds = jobsQ.items.filter(job => job.status === "queued" || job.status === "running").map(job => job.id).sort().join(",");
+  const updateJobs = jobsQ.updateItems;
+  useEffect(() => {
+    if (!pendingJobIds || jobsQ.loading) return;
+    return startJobPolling(pendingJobIds.split(","),
+      (id, signal) => api.get<Job>(`/v1/matters/${matterId}/jobs/${id}`, { signal }),
+      (fresh, error) => {
+        const byId = new Map(fresh.map(job => [job.id, job]));
+        updateJobs(jobs => jobs.map(job => byId.get(job.id) ?? job));
+        setJobUpdateError(error);
+      });
+  }, [pendingJobIds, matterId, updateJobs, jobsQ.loading]);
   const policiesQ = useApiData(() => api.get<{ policies: Policy[] }>("/v1/policies"), "policies");
   // Release profiles (PR 40): the user-facing destination/use-case list
   // for both the single-document and bulk release actions. policyId
@@ -1218,6 +1234,7 @@ function MatterView({
           jobsTotal={jobsQ.total}
         />
       )}
+      {jobUpdateError && pendingJobIds && <p role="status" className="mb-4 text-sm text-muted">{jobUpdateError}</p>}
       {jobsQ.total > jobsQ.items.length && (
         <p className="mb-6 text-xs text-muted">
           <button

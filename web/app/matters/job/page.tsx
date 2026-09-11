@@ -562,11 +562,8 @@ function RerunPanel({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      // Synchronous like every other job-starting route in this app: the
-      // POST returns once the job has actually finished (service/app/
-      // main.py's _execute_job), so the response's job.id is the NEW
-      // terminal-or-not job row, not a queued promise.
-      const resp = await api.post<ReleaseCreateResponse>(
+      // Admission returns immediately; the new job page follows durable execution.
+      const resp = await api.submit<ReleaseCreateResponse>(
         `/v1/matters/${matterId}/documents/${job.document_id}/releases`,
         buildRerunPayload(state),
       );
@@ -731,13 +728,7 @@ function JobView({
   const perms = matterQ.data?.perms;
   const isPending = job?.status === "queued" || job?.status === "running";
   const isTerminalNoDerivative = job?.status === "refused" || job?.status === "failed";
-  // Job execution is synchronous within the request that starts it (see
-  // service/app/main.py's _execute_job), so "running" is rarely observed
-  // from the tab that clicked Inspect/Sanitize — it shows up when a
-  // second tab, or someone else's session, is looking at the same job
-  // mid-flight. Poll rather than leave that tab stuck on stale "running"
-  // until a manual reload, which is exactly the gap this page's own copy
-  // used to admit.
+  // Follow admitted work until a terminal result is available.
   useEffect(() => {
     if (!isPending) return;
     const id = setInterval(reload, 3000);

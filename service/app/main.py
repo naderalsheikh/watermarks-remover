@@ -15,15 +15,16 @@ import uuid
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Annotated
 
 import custody as custody_mod  # WORM storage only — never parses documents
 import schemas_meta  # published-schema registry: pins artifacts to contracts (PR 63)
 from common import MAX_INPUT_BYTES  # a size constant, not a parser
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 # Imported as a module (not by name): tests stub IdP calls on the module
@@ -34,6 +35,7 @@ from . import oidc as oidc_mod
 # inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
 # isolated worker processes (see app.runner). A test enforces the ban.
 from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, perms_of, revoke
+from .admission import lookup_admission, remember_admission
 from .audit import append_event, event_hash, lock_matter, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
@@ -70,8 +72,8 @@ from .security import (
     verify_attestation,
     verify_password,
 )
+from .storage import StorageError, original_key, storage_from_config
 from .storage import StorageError as StorageError_
-from .storage import original_key, storage_from_config
 from .tsa import anchor_enabled, request_anchor
 from .tsa import describe_posture as tsa_posture
 
@@ -2308,11 +2310,40 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     # --- jobs ---------------------------------------------------------------
 
-    def _create_job(matter_id: str, doc_id: str, kind: str, s: Session, **kw) -> Job:
-        job = Job(matter_id=matter_id, document_id=doc_id, kind=kind, **kw)
-        s.add(job)
+    def _admission(s, matter_id, user, operation, key, docs, body=None, policy_id=None):
+        return lookup_admission(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            operation=operation,
+            key=key,
+            payload={
+                "documents": [{"id": d.id, "sha256": d.sha256, "bytes": d.bytes} for d in docs],
+                "body": body.model_dump(mode="json") if body is not None else {},
+                "resolved_policy_id": policy_id,
+            },
+        )
+
+    def _respond_job(s, matter_id, job, prefer):
+        job_id, kind, actor = job.id, job.kind, job.requested_by
         s.commit()
-        return job
+        dispatcher.wake()
+        if _wants_async(prefer) and job.status not in ("done", "refused", "failed"):
+            return JSONResponse(
+                status_code=202,
+                content=_job_dict(job),
+                headers={
+                    "Location": f"/v1/matters/{matter_id}/jobs/{job_id}",
+                    "Preference-Applied": "respond-async",
+                    "Retry-After": "1",
+                },
+            )
+        _execute_job(job_id, kind=kind, actor_id=actor)
+        s.expire_all()
+        return _job_dict(_job(matter_id, job_id, s))
+
+    def _wants_async(prefer):
+        return "respond-async" in [p.strip().lower() for p in (prefer or "").split(",")]
 
     def _execute_job(job_id: str, kind: str, actor_id: str) -> int | None:
         """Compatibility wait over durable background admission/execution.
@@ -2322,17 +2353,28 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         dispatcher.wake()
         deadline = time.monotonic() + cfg.worker_timeout_s + 60
         while time.monotonic() < deadline:
-            with session_factory() as waiting:
-                job = waiting.get(Job, job_id)
-                if job is None:
-                    raise HTTPException(404, "job not found")
-                if job.status in ("done", "refused", "failed"):
-                    release = waiting.query(Release).filter(Release.job_id == job_id).one_or_none()
-                    return (
-                        _release_event_seq(waiting, job.matter_id, release.id, "release.terminal")
-                        if release is not None
-                        else None
-                    )
+            try:
+                with session_factory() as waiting:
+                    job = waiting.get(Job, job_id)
+                    if job is None:
+                        raise HTTPException(404, "job not found")
+                    if job.status in ("done", "refused", "failed"):
+                        release = (
+                            waiting.query(Release).filter(Release.job_id == job_id).one_or_none()
+                        )
+                        return (
+                            _release_event_seq(
+                                waiting, job.matter_id, release.id, "release.terminal"
+                            )
+                            if release is not None
+                            else None
+                        )
+            except OperationalError as exc:
+                # A busy SQLite writer is a transient status-read failure,
+                # not a failed job. End this read transaction and try again.
+                code = getattr(exc.orig, "sqlite_errorcode", 0) or 0
+                if code & 0xFF not in (5, 6):  # SQLITE_BUSY / SQLITE_LOCKED
+                    raise
             time.sleep(0.05)
         raise HTTPException(
             503,
@@ -2346,14 +2388,19 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         doc_id: str,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
+        prefer: Annotated[str | None, Header()] = None,
     ):
         _require(matter_id, "inspect", s, user)
         doc = _document(matter_id, doc_id, s)
-        job = _create_job(matter_id, doc.id, "inspect", s, requested_by=user)
-        _execute_job(job.id, kind="inspect", actor_id=user)
-        s.expire_all()
-        finished = _job(matter_id, job.id, s)
-        return _job_dict(finished)
+        existing, ticket = _admission(s, matter_id, user, "inspect", idempotency_key, [doc])
+        if existing is not None:
+            return _respond_job(s, matter_id, _job(matter_id, existing.resource_id, s), prefer)
+        job = Job(matter_id=matter_id, document_id=doc.id, kind="inspect", requested_by=user)
+        s.add(job)
+        s.flush()
+        remember_admission(s, ticket, resource_kind="job", resource_id=job.id)
+        return _respond_job(s, matter_id, job, prefer)
 
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs")
     def sanitize_job(
@@ -2362,10 +2409,17 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: SanitizeBody | None = None,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
+        prefer: Annotated[str | None, Header()] = None,
     ):
         _require(matter_id, "sanitize", s, user)
         doc = _document(matter_id, doc_id, s)
         body = body or SanitizeBody()
+        existing, ticket = _admission(
+            s, matter_id, user, "sanitize", idempotency_key, [doc], body, body.policy_id
+        )
+        if existing is not None:
+            return _respond_job(s, matter_id, _job(matter_id, existing.resource_id, s), prefer)
         layer_b: dict | None = None
         attest_claims: dict | None = None
         jti: str | None = None
@@ -2435,13 +2489,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 commit=False,
                 payload={"jti": jti, "job_id": job.id, "strength": layer_b["strength"]},
             )
+        remember_admission(s, ticket, resource_kind="job", resource_id=job.id)
         s.commit()
         if attest_claims is not None:
             consume_attestation(attest_claims)
-        _execute_job(job.id, kind="sanitize", actor_id=user)
-        s.expire_all()
-        finished = _job(matter_id, job.id, s)
-        return _job_dict(finished)
+        return _respond_job(s, matter_id, job, prefer)
 
     def _resolve_release_profile(profile_id: str) -> dict:
         profile = next((p for p in RELEASE_PROFILES if p["id"] == profile_id), None)
@@ -2638,6 +2690,43 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
         }
 
+    def _respond_release(s, matter, doc, release, prefer):
+        job_id = release.job_id
+        job = _job(matter.id, job_id, s)
+        s.commit()
+        dispatcher.wake()
+        if _wants_async(prefer) and job.status not in ("done", "refused", "failed"):
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "release": _release_dict(release),
+                    "job": _job_dict(job, release_id=release.id, profile_id=release.profile_id),
+                    "release_result": None,
+                },
+                headers={
+                    "Location": f"/v1/matters/{matter.id}/releases/{release.id}",
+                    "Preference-Applied": "respond-async",
+                    "Retry-After": "1",
+                },
+            )
+        _execute_job(job_id, kind=job.kind, actor_id=release.requested_by)
+        s.expire_all()
+        finished = _job(matter.id, job_id, s)
+        audit_refs = {
+            "release_created_seq": _release_event_seq(s, matter.id, release.id, "release.created"),
+            "release_terminal_seq": _release_event_seq(
+                s, matter.id, release.id, "release.terminal"
+            ),
+        }
+        result = _build_release_result(
+            s, matter=matter, release=release, job=finished, doc=doc, audit_refs=audit_refs
+        )
+        return {
+            "release": _release_dict(release),
+            "job": _job_dict(finished, release_id=release.id, profile_id=release.profile_id),
+            "release_result": result,
+        }
+
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/releases")
     def create_release(
         matter_id: str,
@@ -2645,6 +2734,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: ReleaseBody,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
+        prefer: Annotated[str | None, Header()] = None,
     ):
         """The Release-first entry point for a single document (PR 39):
         wraps the exact same job-creation/execution path sanitize_job
@@ -2662,6 +2753,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if body.recipient_type not in RECIPIENT_TYPES:
             raise HTTPException(400, f"unknown recipient_type: {body.recipient_type!r}")
         policy_id = profile["policy_id"]
+        existing, ticket = _admission(
+            s, matter_id, user, "release", idempotency_key, [doc], body, policy_id
+        )
+        if existing is not None:
+            return _respond_release(
+                s, matter, doc, _release(matter_id, existing.resource_id, s), prefer
+            )
 
         # SHOULD-4 (review 2026-08-30): a re-run must reference a real
         # Release row of the SAME document in the SAME matter -- the
@@ -2748,7 +2846,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         s.add(release)
         s.flush()  # assigns release.id
-        created_event = append_event(
+        append_event(
             s,
             matter_id=matter_id,
             actor_id=user,
@@ -2773,22 +2871,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 ),
             },
         )
+        remember_admission(s, ticket, resource_kind="release", resource_id=release.id)
         s.commit()
         if attest_claims is not None:
             consume_attestation(attest_claims)
 
-        terminal_seq = _execute_job(job.id, kind="sanitize", actor_id=user)
-        s.expire_all()
-        finished = _job(matter_id, job.id, s)
-        audit_refs = {
-            "release_created_seq": created_event.seq,
-            "release_terminal_seq": terminal_seq,
-        }
-        release_result = _build_release_result(
-            s, matter=matter, release=release, job=finished, doc=doc, audit_refs=audit_refs
-        )
-        job_out = _job_dict(finished, release_id=release.id, profile_id=release.profile_id)
-        return {"release": _release_dict(release), "job": job_out, "release_result": release_result}
+        return _respond_release(s, matter, doc, release, prefer)
 
     @app.post("/v1/matters/demo-seed")
     def demo_seed_matter(user: str = Depends(principal), s: Session = Depends(db_session)):
@@ -2985,6 +3073,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: BulkJobsBody,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
     ):
         """Creates a Batch and its queued child Job rows, returning as soon
         as they're durably recorded instead of blocking the request for the
@@ -3025,6 +3114,23 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if missing:
             raise HTTPException(400, f"not documents of this matter: {', '.join(missing)}")
 
+        docs = [_document(matter_id, doc_id, s) for doc_id in body.document_ids]
+        existing, ticket = _admission(
+            s,
+            matter_id,
+            user,
+            "batch",
+            idempotency_key,
+            docs,
+            body,
+            body.policy_id if body.kind == "sanitize" else None,
+        )
+        if existing is not None:
+            batch = s.get(Batch, existing.resource_id)
+            s.commit()
+            dispatcher.wake()
+            return _batch_dict(batch, s)
+
         batch = Batch(
             matter_id=matter_id,
             kind=body.kind,
@@ -3056,8 +3162,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             matter_id=matter_id,
             actor_id=user,
             action="batch.created",
+            commit=False,
             payload={"batch_id": batch.id, "kind": body.kind, "total": batch.total},
         )
+        remember_admission(s, ticket, resource_kind="batch", resource_id=batch.id)
         s.commit()
         dispatcher.wake()
         return _batch_dict(batch, s)
@@ -3068,6 +3176,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: BatchReleaseBody,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
     ):
         """Batch release (PR 39): reuses the existing async Batch resource
         (create_batch, above) completely unchanged underneath -- one
@@ -3108,6 +3217,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         missing = [i for i in body.document_ids if i not in found]
         if missing:
             raise HTTPException(400, f"not documents of this matter: {', '.join(missing)}")
+
+        docs = [_document(matter_id, doc_id, s) for doc_id in body.document_ids]
+        existing, ticket = _admission(
+            s, matter_id, user, "batch_release", idempotency_key, docs, body, policy_id
+        )
+        if existing is not None:
+            batch = s.get(Batch, existing.resource_id)
+            s.commit()
+            dispatcher.wake()
+            releases = s.query(Release).filter(Release.batch_id == batch.id).all()
+            return {
+                "batch": _batch_dict(batch, s),
+                "releases": [_release_dict(r) for r in releases],
+            }
 
         batch = Batch(
             matter_id=matter_id,
@@ -3174,6 +3297,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 },
             )
             releases.append(release)
+        remember_admission(s, ticket, resource_kind="batch", resource_id=batch.id)
         s.commit()
         dispatcher.wake()
         return {"batch": _batch_dict(batch, s), "releases": [_release_dict(r) for r in releases]}
@@ -3720,12 +3844,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         doc = _document(matter_id, job.document_id, s)
         if job.status != "done" or not job.bundle_dir:
             raise HTTPException(409, f"job is {job.status}; no bundle")
-        original_ref = None
+        original_bytes = None
         original_name = None
         if include_original:
             _require(matter_id, "download_original", s, user)
-            original_ref = doc.storage_path
             original_name = doc.filename
+            try:
+                original_bytes = storage.read_expected(
+                    doc.storage_path, sha256=doc.sha256, size=doc.bytes
+                )
+            except (StorageError, OSError) as exc:
+                raise HTTPException(
+                    409,
+                    "The recorded original could not be verified; no release packet was produced.",
+                ) from exc
 
         cert_html, policy_id, limitations = _build_certificate_html(
             s, matter=matter, job=job, doc=doc, generated_by=user
@@ -4035,8 +4167,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             zf.writestr("certificate.html", cert_bytes)
             zf.writestr("release_packet.json", release_packet_bytes)
             zf.writestr("README.txt", readme_bytes)
-            if original_ref and storage.exists(original_ref):
-                zf.writestr(f"original/{original_name}", storage.read(original_ref))
+            if original_bytes is not None:
+                zf.writestr(f"original/{original_name}", original_bytes)
         s.commit()
         download_name = f"{_safe_download_stem(doc.filename)}-release-packet-{job.id}.zip"
         return Response(
