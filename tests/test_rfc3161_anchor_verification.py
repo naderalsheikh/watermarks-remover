@@ -1105,7 +1105,7 @@ def test_rsa_pkcs1v15_verify_cross_checks_against_cryptography():
 def test_verifier_source_imports_no_asn1crypto_or_cryptography():
     """The stdlib-only discipline: the shipped verifier module must never
     import the test-only oracle libraries (or anything else new)."""
-    src = (TOOLS / "counselclear_verify_release_packet.py").read_text()
+    src = (TOOLS / "counselclear_verify_release_packet.py").read_text(encoding="utf-8")
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     for banned in (
         "asn1crypto",

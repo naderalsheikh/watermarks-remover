@@ -80,7 +80,7 @@ def test_commercial_image_copies_nothing_from_research():
     assert COMMERCIAL_DOCKERFILE.exists(), COMMERCIAL_DOCKERFILE
     offenders = [
         line.strip()
-        for line in COMMERCIAL_DOCKERFILE.read_text().splitlines()
+        for line in COMMERCIAL_DOCKERFILE.read_text(encoding="utf-8").splitlines()
         if re.match(r"\s*(COPY|ADD)\b", line, re.IGNORECASE)
         and re.search(r"\bresearch\b", line, re.IGNORECASE)
     ]
@@ -96,10 +96,14 @@ def test_commercial_image_build_context_excludes_research():
     route. `.dockerignore` is the backstop; the image is also built from
     the `service/` context (see Makefile), which does not contain
     research/ at all."""
-    ignore = (REPO / ".dockerignore").read_text() if (REPO / ".dockerignore").exists() else ""
+    ignore = (
+        (REPO / ".dockerignore").read_text(encoding="utf-8")
+        if (REPO / ".dockerignore").exists()
+        else ""
+    )
     copies_repo_root = any(
         re.match(r"\s*(COPY|ADD)\s+\.(\s|/)", line, re.IGNORECASE)
-        for line in COMMERCIAL_DOCKERFILE.read_text().splitlines()
+        for line in COMMERCIAL_DOCKERFILE.read_text(encoding="utf-8").splitlines()
     )
     if copies_repo_root:
         assert "research" in ignore, (
@@ -119,7 +123,7 @@ def test_spine_does_not_import_a_research_harness(module):
     offenders = [
         str(p.relative_to(REPO))
         for p in _sources(SHIPPED)
-        if p.suffix == ".py" and pattern.search(p.read_text(errors="ignore"))
+        if p.suffix == ".py" and pattern.search(p.read_text(errors="ignore", encoding="utf-8"))
     ]
     assert offenders == [], (
         f"the product spine imports the quarantined harness {module!r} "
@@ -140,7 +144,7 @@ def test_spine_does_not_reference_a_quarantined_project(project):
     offenders = [
         str(p.relative_to(REPO))
         for p in _sources(README_SPINE)
-        if re.search(project, p.read_text(errors="ignore"), re.IGNORECASE)
+        if re.search(project, p.read_text(errors="ignore", encoding="utf-8"), re.IGNORECASE)
     ]
     assert offenders == [], (
         f"the product spine references quarantined project {project!r} in "
@@ -152,7 +156,7 @@ def test_spine_does_not_reference_a_quarantined_project(project):
 def test_research_readme_carries_the_quarantine_notice():
     """The notice is what makes the directory's status legible to someone
     who arrives at a file rather than at the repo root."""
-    text = (RESEARCH / "README.md").read_text()
+    text = (RESEARCH / "README.md").read_text(encoding="utf-8")
     assert "NOT PART OF COUNSELCLEAR COMMERCIAL DISTRIBUTION" in text
     for project in ("CtrlRegen", "Reverse-SynthID"):
         assert project in text, f"{project} is unlisted in research/README.md"
@@ -180,7 +184,9 @@ def test_shipped_code_never_hardcodes_a_research_path():
     offenders = [
         str(p.relative_to(REPO))
         for p in _sources(SHIPPED)
-        if re.search(r"""['"]\s*(?:\.{1,2}/)*research/""", p.read_text(errors="ignore"))
+        if re.search(
+            r"""['"]\s*(?:\.{1,2}/)*research/""", p.read_text(errors="ignore", encoding="utf-8")
+        )
     ]
     assert offenders == [], (
         "shipped code hardcodes a path into research/, making the "

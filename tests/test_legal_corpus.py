@@ -74,9 +74,9 @@ def _assert_golden(name: str):
     GOLDEN.mkdir(exist_ok=True)
     out = GOLDEN / f"{name}.json"
     if os.environ.get("UPDATE_GOLDENS") == "1":
-        out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     assert out.exists(), f"missing golden {out}; run UPDATE_GOLDENS=1 pytest"
-    expected = json.loads(out.read_text())
+    expected = json.loads(out.read_text(encoding="utf-8"))
     assert payload == expected, f"inspect output drifted from golden {name}"
 
 

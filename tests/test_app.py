@@ -871,7 +871,7 @@ def test_job_bundle_signs_packet_and_offline_verifier_accepts(client, tmp_path):
     assert pk["algorithm"] == "ed25519"
     assert pk["key_id"] == sig["key_id"]
     key_file = tmp_path / "pub.pem"
-    key_file.write_text(pk["public_key_pem"])
+    key_file.write_text(pk["public_key_pem"], encoding="utf-8")
 
     # ...and the verifier confirms the signature over the real packet.
     zip_path = tmp_path / "packet.zip"
@@ -894,7 +894,7 @@ def test_bundle_packet_tampered_metadata_fails_offline_verification(client, tmp_
     bundle, packet = _bundle_packet(client, doc, job)
     pk = client.get("/v1/custody-public-key").json()
     key_file = tmp_path / "pub.pem"
-    key_file.write_text(pk["public_key_pem"])
+    key_file.write_text(pk["public_key_pem"], encoding="utf-8")
 
     # Rebuild the zip with the tampered release_packet.json: same bytes
     # everywhere except the one flipped metadata field.
@@ -1063,7 +1063,7 @@ def test_job_bundle_tsa_success_stamps_rfc3161_anchor(client, tmp_path, monkeypa
     # The exact dance a recipient performs: public key + TSA cert pin.
     pk = client.get("/v1/custody-public-key").json()
     key_file = tmp_path / "pub.pem"
-    key_file.write_text(pk["public_key_pem"])
+    key_file.write_text(pk["public_key_pem"], encoding="utf-8")
     tsa_file = tmp_path / "tsa.der"
     tsa_file.write_bytes(cert_der)
     zip_path = tmp_path / "packet.zip"
@@ -1101,7 +1101,7 @@ def test_job_bundle_tsa_failure_falls_back_to_operator_anchor(client, tmp_path, 
 
     pk = client.get("/v1/custody-public-key").json()
     key_file = tmp_path / "pub.pem"
-    key_file.write_text(pk["public_key_pem"])
+    key_file.write_text(pk["public_key_pem"], encoding="utf-8")
     zip_path = tmp_path / "packet.zip"
     zip_path.write_bytes(bundle.content)
 
@@ -1361,7 +1361,7 @@ def test_attested_release_is_distinguishable_in_every_artifact(client, tmp_path)
     # with the real offline verifier and the real public key.
     pk = client.get("/v1/custody-public-key").json()
     key_file = tmp_path / "pub.pem"
-    key_file.write_text(pk["public_key_pem"])
+    key_file.write_text(pk["public_key_pem"], encoding="utf-8")
     zip_path = tmp_path / "packet.zip"
     zip_path.write_bytes(bundle.content)
     verifier = _load_verifier()
@@ -1465,7 +1465,7 @@ def test_rerun_release_links_its_predecessor_everywhere(client):
         td_path = Path(td)
         pk = client.get("/v1/custody-public-key").json()
         key_file = td_path / "pub.pem"
-        key_file.write_text(pk["public_key_pem"])
+        key_file.write_text(pk["public_key_pem"], encoding="utf-8")
         zip_path = td_path / "packet.zip"
         zip_path.write_bytes(bundle.content)
         verifier = _load_verifier()

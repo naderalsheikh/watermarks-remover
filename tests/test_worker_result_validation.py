@@ -67,14 +67,14 @@ def completed_worker(tmp_path, request):
             )
             == 0
         )
-        payload = json.loads((output / "result.json").read_text())
+        payload = json.loads((output / "result.json").read_text(encoding="utf-8"))
         assert payload["status"] == "done", payload
         yield session, job, output, payload
     engine.dispose()
 
 
 def _save(output, payload):
-    (output / "result.json").write_text(json.dumps(payload))
+    (output / "result.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _make_test_file_writable(path):
@@ -231,7 +231,7 @@ def test_incomplete_or_conflicting_bundles_are_rejected(completed_worker, mutati
     bundle = output / "bundle"
     derivative = bundle / "derivative" / payload["result"]["derivative"]
     if mutation == "extra_derivative":
-        (derivative.parent / "unaccounted.txt").write_text("not in manifest")
+        (derivative.parent / "unaccounted.txt").write_text("not in manifest", encoding="utf-8")
     elif mutation == "missing_manifest":
         _make_test_file_writable(bundle / "manifest.json")
         (bundle / "manifest.json").unlink()
@@ -243,14 +243,16 @@ def test_incomplete_or_conflicting_bundles_are_rejected(completed_worker, mutati
     elif mutation == "original_hash":
         payload["result"]["manifest"]["original"]["sha256"] = "0" * 64
         (bundle / "manifest.json").chmod(0o600)
-        (bundle / "manifest.json").write_text(json.dumps(payload["result"]["manifest"]))
+        (bundle / "manifest.json").write_text(
+            json.dumps(payload["result"]["manifest"]), encoding="utf-8"
+        )
     elif mutation == "failed_verification":
         payload["result"]["verification_pass"] = False
     elif mutation == "derivative_traversal":
         payload["result"]["derivative"] = "../../other-matter-file"
     elif mutation == "plaintext_original":
         (bundle / "original").mkdir()
-        (bundle / "original" / "input.txt").write_text("retained plaintext")
+        (bundle / "original" / "input.txt").write_text("retained plaintext", encoding="utf-8")
     _save(output, payload)
     job = _reconcile(completed_worker)
     assert job.status == "failed", mutation

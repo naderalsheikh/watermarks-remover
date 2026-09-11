@@ -695,7 +695,9 @@ def test_release_result_verifies_standalone_with_no_certificate(tmp_path):
     certificate.html saved next to it -- still verifies, since the
     certificate is optional to include (fetched separately)."""
     result_path = tmp_path / "release_result.json"
-    result_path.write_text(json.dumps(_release_result(), indent=2, sort_keys=True))
+    result_path.write_text(
+        json.dumps(_release_result(), indent=2, sort_keys=True), encoding="utf-8"
+    )
     report = verifier.verify_release_result(result_path)
     assert report.valid, report.to_text()
     assert report.to_text().splitlines()[0] == "INTERNALLY CONSISTENT"
@@ -709,7 +711,7 @@ def test_release_result_verifies_with_sibling_certificate(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     (out / "release_result.json").write_text(
-        json.dumps(_release_result(cert_html=cert_html), indent=2, sort_keys=True)
+        json.dumps(_release_result(cert_html=cert_html), indent=2, sort_keys=True), encoding="utf-8"
     )
     (out / "certificate.html").write_bytes(cert_html)
     report = verifier.verify_release_result(out)
@@ -723,7 +725,7 @@ def test_release_result_tampered_sibling_certificate_fails(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     (out / "release_result.json").write_text(
-        json.dumps(_release_result(cert_html=cert_html), indent=2, sort_keys=True)
+        json.dumps(_release_result(cert_html=cert_html), indent=2, sort_keys=True), encoding="utf-8"
     )
     (out / "certificate.html").write_bytes(cert_html + b"tampered")
     report = verifier.verify_release_result(out)
@@ -736,7 +738,7 @@ def test_release_result_missing_required_field_fails_schema(tmp_path):
     result = _release_result()
     del result["reason"]
     result_path = tmp_path / "release_result.json"
-    result_path.write_text(json.dumps(result, indent=2, sort_keys=True))
+    result_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     report = verifier.verify_release_result(result_path)
     assert not report.valid
     assert not report.schema_ok
@@ -769,7 +771,7 @@ def test_main_auto_detects_release_result_vs_release_packet(tmp_path, capsys):
     result_dir = tmp_path / "refused"
     result_dir.mkdir()
     (result_dir / "release_result.json").write_text(
-        json.dumps(_release_result(), indent=2, sort_keys=True)
+        json.dumps(_release_result(), indent=2, sort_keys=True), encoding="utf-8"
     )
     rc = verifier.main([str(result_dir)])
     assert rc == 0
@@ -825,9 +827,11 @@ def test_verify_both_artifacts_agree_when_consistent(tmp_path):
         policy_id="external_sharing",
     )
     out = _write_dir(tmp_path, files)
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     result = _matching_result_for(packet, files)
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
 
     report = verifier.verify_release_packet_and_result(out)
     assert report.valid, report.to_text()
@@ -865,10 +869,12 @@ def test_verify_both_artifacts_fails_loudly_on_status_disagreement(tmp_path):
         policy_id="external_sharing",
     )
     out = _write_dir(tmp_path, files)
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     result = _matching_result_for(packet, files)
     result["status"] = "refused"  # disagrees with the packet's "done"
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
 
     report = verifier.verify_release_packet_and_result(out)
     assert not report.valid
@@ -891,10 +897,12 @@ def test_verify_both_artifacts_fails_loudly_on_release_id_disagreement(tmp_path)
         status="done",
     )
     out = _write_dir(tmp_path, files)
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     result = _matching_result_for(packet, files)
     result["release_id"] = "REL-DIFFERENT"
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
 
     report = verifier.verify_release_packet_and_result(out)
     assert not report.valid
@@ -911,10 +919,12 @@ def test_verify_both_artifacts_profile_id_unavailable_for_legacy_packet(tmp_path
     report on its own."""
     files = _packet_files(release_id="REL1", status="done")
     out = _write_dir(tmp_path, files)
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     assert "release" not in packet  # confirms the fixture really is legacy-shaped here
     result = _matching_result_for(packet, files)
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
 
     report = verifier.verify_release_packet_and_result(out)
     assert report.valid, report.to_text()
@@ -927,9 +937,11 @@ def test_verify_both_artifacts_profile_id_unavailable_for_legacy_packet(tmp_path
 def test_main_verifies_both_artifacts_when_both_present(tmp_path, capsys):
     files = _packet_files(release_id="REL1", status="done")
     out = _write_dir(tmp_path, files)
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     result = _matching_result_for(packet, files)
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
 
     rc = verifier.main([str(out)])
     assert rc == 0
@@ -1078,10 +1090,14 @@ def test_combined_directory_with_release_result_still_verifies(tmp_path):
     the same layout."""
     files = _packet_files(release_id="REL1", status="done")
     out = _write_dir(tmp_path, files)
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     result = _matching_result_for(packet, files)
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
-    (out / "AIRLOCK_RESULT.json").write_text(json.dumps({"status": "done"}, indent=2))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    (out / "AIRLOCK_RESULT.json").write_text(
+        json.dumps({"status": "done"}, indent=2), encoding="utf-8"
+    )
     report = verifier.verify_release_packet_and_result(out)
     assert report.valid, report.to_text()
     assert not any(fc.name == "packet membership" for fc in report.packet.file_checks)
@@ -1254,7 +1270,7 @@ def test_audit_refs_checked_even_when_event_not_found(tmp_path):
 
 
 def test_verifier_never_imports_the_engine_or_app_internals():
-    src = (TOOLS / "counselclear_verify_release_packet.py").read_text()
+    src = (TOOLS / "counselclear_verify_release_packet.py").read_text(encoding="utf-8")
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     for banned in (
         "engine_api",
@@ -1323,7 +1339,7 @@ def _chain_csv(events: list[dict], tmp_path: Path, name: str = "audit.csv") -> P
             ]
         )
     p = tmp_path / name
-    p.write_text(buf.getvalue())
+    p.write_text(buf.getvalue(), encoding="utf-8")
     return p
 
 
@@ -1442,12 +1458,12 @@ def test_audit_chain_detects_a_tampered_chain_row(tmp_path):
     chain = _chain_csv(events, tmp_path)
     # Corrupt the stored row_hash of the job.sanitize row without
     # recomputing anything: the verifier must recompute and mismatch.
-    lines = chain.read_text().splitlines()
+    lines = chain.read_text(encoding="utf-8").splitlines()
     seq_i = next(i for i, line in enumerate(lines) if "job.sanitize" in line)
     parts = lines[seq_i].split(",")
     parts[-1] = "f" * 64  # forged row_hash
     lines[seq_i] = ",".join(parts)
-    chain.write_text("\n".join(lines) + "\n")
+    chain.write_text("\n".join(lines) + "\n", encoding="utf-8")
     report = verifier.verify_release_packet(_write_zip(tmp_path, files), audit_csv=chain)
     assert not report.valid
     assert report.audit_chain is not None and not report.audit_chain.chain_ok
@@ -1699,7 +1715,7 @@ def test_public_key_cli_accepts_pem_and_hex_forms(tmp_path):
     pem_file = tmp_path / "pub.pem"
     pem_file.write_bytes(_public_key_pem(key))
     hex_file = tmp_path / "pub.hex"
-    hex_file.write_text(next(iter(keys.values())).hex())
+    hex_file.write_text(next(iter(keys.values())).hex(), encoding="utf-8")
 
     for kf in (pem_file, hex_file):
         loaded = verifier._load_public_keys([kf])
@@ -1742,7 +1758,7 @@ def test_load_public_keys_two_distinct_files_with_same_id_errors(tmp_path):
     pem_file = tmp_path / "pub.pem"
     pem_file.write_bytes(_public_key_pem(key))
     hex_file = tmp_path / "pub.hex"
-    hex_file.write_text(_pub_raw(key).hex())
+    hex_file.write_text(_pub_raw(key).hex(), encoding="utf-8")
 
     with pytest.raises(SystemExit, match="both resolve to key_id"):
         verifier._load_public_keys([pem_file, hex_file])
@@ -1966,14 +1982,16 @@ def test_combined_mode_checks_signature_ref_agreement(tmp_path):
     key = _ed25519()
     files, keys = _sign_packet_files(_packet_files(release_id="REL1", status="done"), key)
     out = _write_dir(tmp_path, files)
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     result = _matching_result_for(packet, files)
     result["signature_ref"] = {
         "algorithm": "ed25519",
         "key_id": packet["signature"]["key_id"],
         "signed_fields": "release_packet.v1.canonical",
     }
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
     report = verifier.verify_release_packet_and_result(out, public_keys=keys)
     assert report.valid, report.to_text()
     ref_check = next(
@@ -1985,7 +2003,9 @@ def test_combined_mode_checks_signature_ref_agreement(tmp_path):
 
     # Now the disagreement: a result from a DIFFERENT deployment (different key).
     result["signature_ref"]["key_id"] = "f" * 16
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
     report = verifier.verify_release_packet_and_result(out, public_keys=keys)
     assert not report.valid
     ref_check = next(
@@ -2003,9 +2023,11 @@ def test_combined_mode_signature_ref_unavailable_for_legacy_pair(tmp_path):
     key = _ed25519()
     files, keys = _sign_packet_files(_packet_files(release_id="REL1", status="done"), key)
     out = _write_dir(tmp_path, files)
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     result = _matching_result_for(packet, files)
-    (out / "release_result.json").write_text(json.dumps(result, indent=2, sort_keys=True))
+    (out / "release_result.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
+    )
 
     report = verifier.verify_release_packet_and_result(out, public_keys=keys)
     assert report.valid, report.to_text()

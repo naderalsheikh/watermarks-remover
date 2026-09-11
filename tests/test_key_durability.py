@@ -74,7 +74,7 @@ def packet(tmp_path, monkeypatch):
     out.mkdir()
     with zipfile.ZipFile(io.BytesIO(raw)) as zf:
         zf.extractall(out)
-    return out, json.loads((out / "release_packet.json").read_text())
+    return out, json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
 
 
 def _fingerprint(pkt) -> str:
@@ -95,7 +95,9 @@ def test_packet_still_validates_against_its_published_schema(packet):
 
     _dir, pkt = packet
     schema = json.loads(
-        (REPO / "service" / "scripts" / "schemas" / "release_packet.schema.json").read_text()
+        (REPO / "service" / "scripts" / "schemas" / "release_packet.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     jsonschema.validate(pkt, schema)
 
@@ -113,7 +115,9 @@ def test_anchor_excluding_signed_fields_is_schema_legal():
     )
 
     schema = json.loads(
-        (REPO / "service" / "scripts" / "schemas" / "release_packet.schema.json").read_text()
+        (REPO / "service" / "scripts" / "schemas" / "release_packet.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     allowed = schema["properties"]["signature"]["properties"]["signed_fields"]["enum"]
     assert PACKET_SIGNATURE_SIGNED_FIELDS in allowed

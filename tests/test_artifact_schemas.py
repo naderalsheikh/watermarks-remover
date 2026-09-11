@@ -40,7 +40,7 @@ PW = "schema-pw"
 
 
 def _schema(name: str) -> dict:
-    return json.loads((SCHEMA_DIR / name).read_text())
+    return json.loads((SCHEMA_DIR / name).read_text(encoding="utf-8"))
 
 
 @pytest.fixture()
@@ -106,7 +106,7 @@ def test_artifact_schemas_are_valid_draft_2020_12():
     ):
         Draft202012Validator.check_schema(_schema(name))
     Draft202012Validator.check_schema(
-        json.loads((ENGINE_SCHEMA_DIR / "finding.schema.json").read_text())
+        json.loads((ENGINE_SCHEMA_DIR / "finding.schema.json").read_text(encoding="utf-8"))
     )
 
 
@@ -129,7 +129,7 @@ def test_finding_schema_copies_accept_optional_legal_justification():
         SCHEMA_DIR / "finding.schema.json",
         ENGINE_SCHEMA_DIR / "finding.schema.json",
     ):
-        jsonschema.validate(finding, json.loads(schema_path.read_text()))
+        jsonschema.validate(finding, json.loads(schema_path.read_text(encoding="utf-8")))
 
 
 def test_emit_manifest_matches_published_schema():

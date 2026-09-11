@@ -180,4 +180,4 @@ def test_reinspect_of_cleaned_pdf_finds_no_identity(tmp_path):
     rep = inspect_container(dest).to_dict()
     info = rep["details"]["pdf_legal"]["info"]
     assert info["author"] is None
-    assert "Anthropic" not in dest.read_text(errors="ignore")
+    assert b"Anthropic" not in dest.read_bytes()

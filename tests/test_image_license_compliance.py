@@ -53,7 +53,7 @@ def test_build_context_licence_is_byte_identical_to_the_root_one():
 
 
 def test_dockerfile_copies_the_licence_into_the_image():
-    text = DOCKERFILE.read_text()
+    text = DOCKERFILE.read_text(encoding="utf-8")
     assert "COPY LICENSE /app/LICENSE" in text, (
         "the published image would contain substantial portions of this "
         "MIT-licensed Software with no copyright notice"
@@ -66,7 +66,7 @@ def test_dockerignore_does_not_exclude_the_licence():
     the COPY have to stay in step."""
     lines = [
         line.strip()
-        for line in DOCKERIGNORE.read_text().splitlines()
+        for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
     assert "*" in lines, "expected a deny-by-default context"
@@ -78,7 +78,7 @@ def test_dockerignore_does_not_exclude_the_licence():
 def test_licence_is_still_mit_with_a_copyright_line():
     """If the project ever relicenses, this test should fail and force the
     distribution obligations to be re-reasoned rather than inherited."""
-    text = ROOT_LICENSE.read_text()
+    text = ROOT_LICENSE.read_text(encoding="utf-8")
     assert "MIT License" in text
     assert "Copyright (c)" in text
     assert "substantial portions of the Software" in text
@@ -117,8 +117,8 @@ def test_every_pinned_dependency_appears_in_the_notices():
     import re
 
     pins = REPO / "service" / "requirements-app.txt"
-    text = NOTICES.read_text()
-    for raw in pins.read_text().splitlines():
+    text = NOTICES.read_text(encoding="utf-8")
+    for raw in pins.read_text(encoding="utf-8").splitlines():
         pin = raw.strip()
         if not pin or pin.startswith("#"):
             continue
@@ -131,7 +131,7 @@ def test_every_pinned_dependency_appears_in_the_notices():
 
 def test_apache_notice_text_is_propagated():
     """The one attribution duty a licence table alone cannot discharge."""
-    text = NOTICES.read_text()
+    text = NOTICES.read_text(encoding="utf-8")
     assert "Amazon.com, Inc. or its affiliates" in text
 
 
@@ -140,18 +140,18 @@ def test_copyleft_component_is_named_and_explained():
     the only component whose licence constrains how the image may be
     redistributed, and a recipient's right to replace it is the thing that
     makes shipping it compliant."""
-    text = NOTICES.read_text()
+    text = NOTICES.read_text(encoding="utf-8")
     assert "LGPL-3.0-only" in text
     assert "psycopg" in text
     assert "replace it" in text
 
 
 def test_notices_ship_inside_the_image():
-    docker = DOCKERFILE.read_text()
+    docker = DOCKERFILE.read_text(encoding="utf-8")
     assert "COPY THIRD-PARTY-NOTICES.md /app/THIRD-PARTY-NOTICES.md" in docker
     lines = [
         line.strip()
-        for line in DOCKERIGNORE.read_text().splitlines()
+        for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
     assert "!THIRD-PARTY-NOTICES.md" in lines

@@ -239,7 +239,7 @@ def test_worker_cli_is_pure_no_db_access(tmp_path):
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    result = (out / "result.json").read_text()
+    result = (out / "result.json").read_text(encoding="utf-8")
     assert '"status": "done"' in result
 
 

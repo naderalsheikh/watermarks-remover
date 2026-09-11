@@ -64,7 +64,7 @@ def test_intake_refuses_without_authorization_flag(tmp_path, capsys):
 
 def test_intake_refuses_non_directory(tmp_path, capsys):
     not_a_dir = tmp_path / "x.txt"
-    not_a_dir.write_text("hi")
+    not_a_dir.write_text("hi", encoding="utf-8")
     out = tmp_path / "intake.html"
     rc = counselclear.main(["intake", str(not_a_dir), "-o", str(out), "--i-am-authorized"])
     assert rc == 2

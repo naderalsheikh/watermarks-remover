@@ -163,8 +163,8 @@ def test_every_record_agrees_with_the_derivative(released):
     """Four artifacts describe one file. A recipient reading any of them must
     reach the same conclusion, or the record is worse than useless."""
     _c, _mid, _body, out = released
-    manifest = json.loads((out / "manifest.json").read_text())
-    packet = json.loads((out / "release_packet.json").read_text())
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     (deriv,) = list((out / "derivative").iterdir())
 
     import hashlib
@@ -190,7 +190,7 @@ def test_verification_proves_content_not_just_detector_silence(released):
     read the actual words, and are the difference between "a detector went
     quiet" and "the text is not in the file"."""
     _c, _mid, _body, out = released
-    manifest = json.loads((out / "manifest.json").read_text())
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     checks = {c["name"]: c for c in manifest["verification"]["checks"]}
     assert manifest["verification"]["pass"] is True
     assert checks["hidden_text_removed"]["pass"] is True

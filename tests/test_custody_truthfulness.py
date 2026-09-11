@@ -465,7 +465,7 @@ def test_manifest_schema_documents_the_new_contract():
     """Both new fields are part of the published contract, and the version
     moved with them -- a pin that did not move would let a v2 artifact
     claim it was built against v1."""
-    schema = json.loads((SCRIPTS / "schemas" / "manifest.schema.json").read_text())
+    schema = json.loads((SCRIPTS / "schemas" / "manifest.schema.json").read_text(encoding="utf-8"))
     assert schema["version"] >= 2
     assert "retained_finding" in schema["$defs"]["action_record"]["properties"]
     assert "dispositions" in schema["properties"]

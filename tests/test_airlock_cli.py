@@ -364,16 +364,19 @@ def test_run_airlock_success_writes_derivative_manifest_certificate_and_summary(
     assert result.profile_id == "counterparty_deal_room"
     assert result.recipient_type == "opposing_counsel"
     assert (out / "doc.sanitized.docx").read_bytes() == b"fake derivative bytes"
-    assert json.loads((out / "manifest.json").read_text())["derivative"]["sha256"] == "d" * 64
+    assert (
+        json.loads((out / "manifest.json").read_text(encoding="utf-8"))["derivative"]["sha256"]
+        == "d" * 64
+    )
     assert (out / "report.json").exists()
     assert (out / "certificate.html").read_bytes().startswith(b"<!doctype html>")
-    assert json.loads((out / "release_packet.json").read_text())["job_id"] == "job1"
+    assert json.loads((out / "release_packet.json").read_text(encoding="utf-8"))["job_id"] == "job1"
     # release_result.json is written for a done release too -- the
     # lightweight, always-present companion, not just for refused/failed.
-    release_result = json.loads((out / "release_result.json").read_text())
+    release_result = json.loads((out / "release_result.json").read_text(encoding="utf-8"))
     assert release_result["release_id"] == "rel1"
     assert release_result["status"] == "done"
-    summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
+    summary = json.loads((out / "AIRLOCK_RESULT.json").read_text(encoding="utf-8"))
     assert summary["status"] == "done"
     assert summary["job_id"] == "job1"
     assert summary["document_id"] == "doc1"
@@ -429,10 +432,10 @@ def test_run_airlock_refused_job_writes_certificate_and_summary_without_derivati
     assert (out / "certificate.html").exists()  # certificate always attempted
     # release_result.json is the ONLY structured artifact for a refused
     # release -- no derivative, no zip -- but it must still exist.
-    release_result = json.loads((out / "release_result.json").read_text())
+    release_result = json.loads((out / "release_result.json").read_text(encoding="utf-8"))
     assert release_result["status"] == "refused"
     assert release_result["reason"] == "plan refused: macro-enabled file"
-    summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
+    summary = json.loads((out / "AIRLOCK_RESULT.json").read_text(encoding="utf-8"))
     assert summary["status"] == "refused"
     assert summary["error"] == "plan refused: macro-enabled file"
     assert any("refused" in item for item in summary["limitations"])
@@ -459,9 +462,9 @@ def test_run_airlock_failed_job_writes_certificate_and_summary_without_derivativ
     )
     assert result.status == "failed"
     assert not (out / "manifest.json").exists()
-    release_result = json.loads((out / "release_result.json").read_text())
+    release_result = json.loads((out / "release_result.json").read_text(encoding="utf-8"))
     assert release_result["status"] == "failed"
-    summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
+    summary = json.loads((out / "AIRLOCK_RESULT.json").read_text(encoding="utf-8"))
     assert "worker exited rc=1: boom" in summary["limitations"][0]
     assert (out / "certificate.html").exists()
 
@@ -482,7 +485,7 @@ def test_run_airlock_intended_external_flag_flows_through_to_release_result(tmp_
         output_dir=out,
         timeout_s=5,
     )
-    release_result = json.loads((out / "release_result.json").read_text())
+    release_result = json.loads((out / "release_result.json").read_text(encoding="utf-8"))
     assert release_result["intended_external"] is False
     assert release_result["recipient_type"] == "internal_reviewer"
 
@@ -564,7 +567,7 @@ def test_run_airlock_batch_mixed_success_and_refused(tmp_path):
     assert "plan refused" in batch.items[1].limitations[0]
     assert batch.counts == {"done": 1, "refused": 1, "failed": 0, "error": 0}
 
-    summary = json.loads((out / "BATCH_RESULT.json").read_text())
+    summary = json.loads((out / "BATCH_RESULT.json").read_text(encoding="utf-8"))
     assert summary["total"] == 2
     assert summary["profile_id"] == "counterparty_deal_room"
     assert summary["recipient_type"] == "opposing_counsel"
@@ -1028,7 +1031,7 @@ def test_airlock_cli_never_imports_the_engine_or_app_internals():
     in the engine (service/scripts) or the control plane's own internals
     (service/app) -- only stdlib. A real dependency on either would mean
     this script is quietly a second write path, not a thin client."""
-    src = (TOOLS / "counselclear_airlock.py").read_text()
+    src = (TOOLS / "counselclear_airlock.py").read_text(encoding="utf-8")
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
     for banned in (
         "engine_api",
@@ -1122,12 +1125,12 @@ def test_airlock_cli_end_to_end_against_a_real_server(tmp_path, live_server):
     assert (out / "release_packet.json").exists()
     assert (out / "release_result.json").exists()
     assert any(out.glob("*.docx"))
-    summary = json.loads((out / "AIRLOCK_RESULT.json").read_text())
+    summary = json.loads((out / "AIRLOCK_RESULT.json").read_text(encoding="utf-8"))
     assert summary["matter_id"] == matter["id"]
     assert summary["status"] == "done"
     assert summary["release_id"] == result.release_id
 
-    release_result = json.loads((out / "release_result.json").read_text())
+    release_result = json.loads((out / "release_result.json").read_text(encoding="utf-8"))
     assert release_result["release_id"] == result.release_id
     assert release_result["status"] == "done"
 
@@ -1192,7 +1195,7 @@ def test_airlock_cli_batch_end_to_end_against_a_real_server_mixed_folder(tmp_pat
     # as a single refused/failed job in single-file mode.
     assert rc == 2
 
-    summary = json.loads((out / "BATCH_RESULT.json").read_text())
+    summary = json.loads((out / "BATCH_RESULT.json").read_text(encoding="utf-8"))
     assert summary["total"] == 2
     assert summary["profile_id"] == "counterparty_deal_room"
     assert summary["recipient_type"] == "opposing_counsel"
@@ -1275,7 +1278,7 @@ def test_airlock_cli_end_to_end_legal_basis_reaches_certificate_html(tmp_path, l
     )
     assert rc == 0, "acknowledged hidden.xlsx must complete (flag record, not refusal)"
 
-    cert = (out / "certificate.html").read_text()
+    cert = (out / "certificate.html").read_text(encoding="utf-8")
     # The basis reached the operator-facing artifact, spelled as the
     # certificate renders it -- not just the API payload.
     assert "Legal basis for retained content" in cert
@@ -1287,7 +1290,7 @@ def test_airlock_cli_end_to_end_legal_basis_reaches_certificate_html(tmp_path, l
 
     # The packet's machine-readable side carries it too (release_packet.json
     # travels in the same zip the CLI extracted).
-    packet = json.loads((out / "release_packet.json").read_text())
+    packet = json.loads((out / "release_packet.json").read_text(encoding="utf-8"))
     records = [e for e in packet["legal_justifications"] if e["subtype"] == "hidden_structure"]
     assert records, "legal_justifications missing from release_packet.json"
     assert records[0]["legal_justification"]["basis"] == "privilege"

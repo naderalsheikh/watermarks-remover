@@ -161,13 +161,13 @@ def _make_symlink(dest: Path, target: Path) -> None:
 
 def test_safe_write_refuses_symlink_destination(tmp_path: Path):
     victim = tmp_path / "victim.txt"
-    victim.write_text("PRECIOUS DATA")
+    victim.write_text("PRECIOUS DATA", encoding="utf-8")
     dest = tmp_path / "out.txt"
     _make_symlink(dest, victim)
     with pytest.raises(OSError):
         safe_write_text(dest, "cleaned content")
     # The victim must be untouched and no temp litter may remain.
-    assert victim.read_text() == "PRECIOUS DATA"
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS DATA"
     assert not list(tmp_path.glob("*.tmp"))
 
 
@@ -175,7 +175,7 @@ def test_safe_write_atomically_replaces_existing_file(tmp_path: Path):
     dest = tmp_path / "out.txt"
     safe_write_text(dest, "first")
     safe_write_text(dest, "second")
-    assert dest.read_text() == "second"
+    assert dest.read_text(encoding="utf-8") == "second"
     # No stray temp files after a successful write.
     assert not list(tmp_path.glob("*.tmp"))
 
@@ -197,23 +197,23 @@ def test_safe_write_bytes_without_fchmod(tmp_path: Path, monkeypatch):
 
 def test_backup_path_creates_bak_copy(tmp_path: Path):
     src = tmp_path / "doc.md"
-    src.write_text("body")
+    src.write_text("body", encoding="utf-8")
     bak = backup_path(src)
     assert bak.name == "doc.md.bak"
-    assert bak.read_text() == "body"
-    assert src.read_text() == "body"
+    assert bak.read_text(encoding="utf-8") == "body"
+    assert src.read_text(encoding="utf-8") == "body"
 
 
 def test_backup_path_refuses_symlinked_bak(tmp_path: Path):
     src = tmp_path / "doc.md"
-    src.write_text("body")
+    src.write_text("body", encoding="utf-8")
     bak = tmp_path / "doc.md.bak"
     victim = tmp_path / "victim.txt"
-    victim.write_text("PRECIOUS")
+    victim.write_text("PRECIOUS", encoding="utf-8")
     _make_symlink(bak, victim)
     with pytest.raises(SystemExit):
         backup_path(src)
-    assert victim.read_text() == "PRECIOUS"
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS"
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ def test_backup_path_refuses_symlinked_bak(tmp_path: Path):
 def test_read_text_input_refuses_oversized_file(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(common, "MAX_INPUT_BYTES", 8)
     big = tmp_path / "big.txt"
-    big.write_text("x" * 64)
+    big.write_text("x" * 64, encoding="utf-8")
     with pytest.raises(SystemExit):
         read_text_input(str(big))
 
@@ -480,7 +480,7 @@ def test_worker_scans_before_parse_defense_in_depth(tmp_path):
         malware._scanner = malware.DepthAndClamScanner()
 
     assert rc == 0  # refusal is an outcome, not a crash
-    payload = json.loads((output_dir / "result.json").read_text())
+    payload = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
     assert payload["status"] == "refused"
     assert "malware scan" in payload["error"] and "stub-eicar" in payload["error"]
     # original untouched by construction
