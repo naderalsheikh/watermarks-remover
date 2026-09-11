@@ -17,7 +17,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
-import custody as custody_mod  # WORM storage only — never parses documents
 import schemas_meta  # published-schema registry: pins artifacts to contracts (PR 63)
 from common import MAX_INPUT_BYTES  # a size constant, not a parser
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
@@ -35,7 +34,7 @@ from . import oidc as oidc_mod
 # inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
 # isolated worker processes (see app.runner). A test enforces the ban.
 from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, perms_of, revoke
-from .admission import lookup_admission, remember_admission
+from .admission import lookup_admission, new_job, remember_admission, stage_document
 from .audit import append_event, event_hash, lock_matter, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
@@ -53,7 +52,6 @@ from .models import (
     MatterAcl,
     Release,
     _now,
-    _uuid,
 )
 from .oidc import OidcError
 from .security import (
@@ -72,8 +70,7 @@ from .security import (
     verify_attestation,
     verify_password,
 )
-from .storage import StorageError, original_key, storage_from_config
-from .storage import StorageError as StorageError_
+from .storage import StorageError, storage_from_config
 from .tsa import anchor_enabled, request_anchor
 from .tsa import describe_posture as tsa_posture
 
@@ -2225,36 +2222,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         PR 45) create a real Document through the exact same scan/storage/
         audit path a browser upload uses, instead of a second, divergent
         implementation."""
-        name = Path(filename or "upload").name
-        verdict = get_scanner().scan(data, name)
-        if not verdict.clean:
-            raise HTTPException(422, f"malware scanner flagged upload ({verdict.scanner})")
-        doc = Document(
-            id=_uuid(),
-            matter_id=matter_id,
-            filename=name,
-            sha256=custody_mod.sha256_bytes(data),
-            bytes=len(data),
-            storage_path="",
-        )
-        key = original_key(cfg.org, matter_id, doc.id, name)
         try:
-            doc.storage_path = storage.write_once(key, data)
-        except StorageError_ as e:
-            raise HTTPException(409, str(e)) from e
-        s.add(doc)
-        append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="document.upload",
-            payload={
-                "document_id": doc.id,
-                "filename_ext": Path(name).suffix,
-                "sha256": doc.sha256,
-                "bytes": doc.bytes,
-            },
-        )
+            doc = stage_document(
+                s,
+                cfg=cfg,
+                storage=storage,
+                scanner=get_scanner(),
+                matter_id=matter_id,
+                filename=filename,
+                data=data,
+                actor_id=user,
+                audit_append=append_event,
+            )
+        except StorageError as exc:
+            raise HTTPException(409, str(exc)) from exc
         s.commit()
         return doc
 
@@ -2311,11 +2292,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     # --- jobs ---------------------------------------------------------------
 
     def _new_job(**values):
-        return Job(
-            worker_mode=cfg.worker_mode,
-            worker_image=cfg.worker_image if cfg.worker_mode == "docker" else "",
-            **values,
-        )
+        return new_job(cfg, **values)
 
     def _admission(s, matter_id, user, operation, key, docs, body=None, policy_id=None):
         return lookup_admission(

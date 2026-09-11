@@ -9,13 +9,15 @@ applies to a worker bundle before the API records it. Its results carry
 ``verify_derivative`` gate passed and the manifest binds original and
 derivative digests.
 
-What it is *not*: the production isolation path. The API executes jobs in a
-one-shot worker subprocess or a hardened container (``app.runner``) precisely
-so a hostile document cannot reach mail credentials, the database, or other
-tenants' files. This class parses attachments inside the calling process.
+What it is *not*: the production isolation path. The production runner uses a hardened
+container (``app.runner``) to separate document parsing from mail credentials,
+the database, and other tenants' files. Its subprocess development mode
+provides no such filesystem boundary. This class parses attachments inside
+the calling process.
 Use it for local fixtures, engine-backed tests, and the labeled demo. A
 production mail gateway must submit attachment jobs through the durable
-job/runner path; the interface that path still lacks is described in
+job/runner path through ``DurableAttachmentProcessor``; the binding and
+remaining transport requirements are described in
 ``docs/COUNSELCLEAR_MAIL_ADAPTER.md``.
 """
 

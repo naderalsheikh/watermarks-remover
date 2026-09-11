@@ -8,6 +8,9 @@ engine-verified derivatives, and the result re-verified, all inside one
 process with synthetic fixtures. It establishes nothing about Exchange Online
 routing, message authentication, native isolation, or production readiness.
 
+The subsequent durable attachment bridge is described below. It uses the
+shared runner; the M1 in-process evidence above remains the original scope.
+
 ## What M1 delivers
 
 | Piece | Location |
@@ -20,7 +23,7 @@ routing, message authentication, native isolation, or production readiness.
 | Deterministic test double (labelled; refused in production mode) | `service/app/mail/synthetic.py` |
 | Synthetic message/document builders | `service/app/mail/fixtures.py` |
 | Runnable harness | `service/app/mail/demo.py` |
-| Tests with the test double (99) / with the real engine (9) | `tests/test_mail_adapter.py`, `tests/test_mail_adapter_engine.py` |
+| Tests with the test double / with the real engine | `tests/test_mail_adapter.py`, `tests/test_mail_adapter_engine.py` |
 
 Run from a fresh checkout:
 
@@ -207,39 +210,54 @@ hardening and qualification task. A mail gateway receives documents from
 arbitrary senders and needs at least the container-mode boundary, qualified
 for that exposure, before any production claim.
 
-### The interface the shared core still lacks
+### Durable attachment bridge
 
-To move the mail path onto the isolated worker/runner, the shared core needs
-an attachment-job interface the current code does not expose. Today a
-sanitize job is bound to a `Document` row uploaded into a matter by an
-authenticated operator session, and `runner.run_job` reads the `Job` and
-`Document` from the database. A mail gateway needs, without a matter upload:
+The integrated `DurableAttachmentProcessor` in `service/app/mail/durable_processor.py`
+now submits attachments through the same document admission, durable jobs,
+dispatcher, and runner as the application. It does not import or invoke the
+engine in the transport process. The original, job, retry receipt, upload audit
+entry, and mail admission event commit together; immutable storage writes can
+leave an unreferenced original if the database commit fails. They cannot create
+an executable job without that commit.
 
-1. `submit_attachment_job(tenant_id, request_id, part_id, content, policy,
-   caller) -> job_id`: stage bytes for the runner, run the upload-time malware
-   scan, execute under the runner's isolation (subprocess or digest-pinned
-   container), retain or discard the original per tenant policy.
-2. `await_job(job_id) -> validated bundle`: the derivative bytes plus the
-   manifest, after `_validated_bundle`-equivalent checks, with `refused` and
-   `failed` as first-class outcomes.
-3. Durable ownership, lease and idempotency for those jobs: the
-   "durable jobs" work package already listed as the next shared-core
-   increment in the build status. Mail cannot run on the process-local
-   capacity and startup sweep that PR #7 documents as a single-process
-   limitation.
-4. Operator attribution: worker manifests currently record the literal
-   operator `operator`; mail jobs need the service principal and tenant
-   recorded, which depends on the IdP/attribution work.
+A trusted server configuration supplies `TenantJobBinding(tenant_id, matter_id,
+actor_id, policy)`. The service principal must have upload, sanitize, and read
+permissions on that existing matter. The binding is never inferred from email
+headers. Each request must match the configured tenant and policy, and its
+actual bytes must match the supplied source hash. The installed policy contract
+currently supports version 1. This bridge uses an explicit service-owned matter;
+there is no tenant administration or automatic matter-provisioning endpoint.
 
-Production attachment processing for mail uses the shared durable-job
-runner once it exists; there will be no parallel production queue or second
-engine execution path (Codex, acceptance review, 2026-09-11). Until then, M2
-advances the transport/runner contract, the controlled fixture harness, and
-tenant-routing feasibility. If exercising the harness needs a queue or a
-separate process, it is disposable test infrastructure running synthetic
-data, and it carries no claim of isolation, custody, recovery, or delivery
-readiness. The contract is coordinated with Codex before any transport
-worker is written against it.
+The request/part identity is scoped to the tenant, matter, and service principal.
+Its durable receipt binds the attachment bytes, length, engine filename, format,
+policy/version, transport, and peer identity. Concurrent identical calls and
+restarts reuse the same job. Contradictory retries and revoked service permissions
+cannot read or admit work. Whole-message bytes and the full SMTP envelope are
+**not** part of this attachment receipt: the future transport must admit their
+binding separately as described below. `TrustedCallerContext` is a trusted
+internal assertion; this class does not authenticate Exchange or a remote caller.
+
+Pending jobs return `unavailable` with a retained job reference, so the adapter
+holds the message. Replaying the same attachment after completion obtains the
+same result. Before releasing bytes, the bridge revalidates the retained bundle,
+original identity, policy version, admitted actor/matter/image, and derivative
+hash/size. It returns `engine_verified` only from that retained job evidence.
+Terminal failed/refused jobs remain terminal; this interface does not reset them
+or authorize a new attempt. Transport/operator retry actions remain separate work.
+
+Docker with a digest-pinned image is required by default. Tests can explicitly
+select `allow_development=True` for the subprocess runner, which is named as a
+development processor and provides no filesystem sandbox. Originals and bundles
+follow the configured storage/retention behavior; per-tenant discard policies
+are not implemented. The shared worker records the service actor and matter,
+while the admission audit event records the configured tenant.
+
+`tests/test_mail_durable_processor.py` exercises atomic admission, concurrent
+retries, binding/ACL rejection, storage failure, retained-result validation,
+processor restart, and a whole-message hold followed by release through the
+real subprocess runner. The real worker-image workflow also exercises the bridge
+against its built Docker image. These checks do not establish Exchange routing,
+tenant provenance, an SMTP outbox, or a live delivery guarantee.
 
 ## Untrusted marker headers, rule ordering, loop prevention
 

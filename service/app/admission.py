@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import HTTPException
 
-from .audit import lock_matter
-from .models import Admission
+from .audit import append_event, lock_matter
+from .models import Admission, Document, Job
+from .storage import original_key
 
 
 @dataclass(frozen=True)
@@ -51,3 +54,50 @@ def remember_admission(s, ticket: Ticket | None, *, resource_kind: str, resource
                 resource_id=resource_id,
             )
         )
+
+
+def new_job(cfg, **values):
+    """Record the execution target at admission for every transport."""
+    return Job(
+        worker_mode=cfg.worker_mode,
+        worker_image=cfg.worker_image if cfg.worker_mode == "docker" else "",
+        **values,
+    )
+
+
+def stage_document(
+    s, *, cfg, storage, scanner, matter_id, filename, data, actor_id, audit_append=append_event
+):
+    """Stage an original and its upload event in the caller's transaction.
+
+    Immutable storage writes precede the database commit. A failed commit can
+    leave an unreferenced original; it cannot authorize or execute a job.
+    """
+    name = Path(filename or "upload").name
+    verdict = scanner.scan(data, name)
+    if not verdict.clean:
+        raise HTTPException(422, f"malware scanner flagged upload ({verdict.scanner})")
+    doc = Document(
+        id=uuid.uuid4().hex[:16],
+        matter_id=matter_id,
+        filename=name,
+        sha256=hashlib.sha256(data).hexdigest(),
+        bytes=len(data),
+        storage_path="",
+    )
+    doc.storage_path = storage.write_once(original_key(cfg.org, matter_id, doc.id, name), data)
+    s.add(doc)
+    audit_append(
+        s,
+        matter_id=matter_id,
+        actor_id=actor_id,
+        action="document.upload",
+        payload={
+            "document_id": doc.id,
+            "filename_ext": Path(name).suffix,
+            "sha256": doc.sha256,
+            "bytes": doc.bytes,
+        },
+        commit=False,
+    )
+    return doc

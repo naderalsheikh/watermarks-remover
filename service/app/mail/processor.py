@@ -7,12 +7,15 @@ compares the reported policy and verification evidence against the request,
 the same way ``app.runner._validated_bundle`` re-checks a worker's bundle
 before the API records it.
 
-Two implementations ship with M1:
+M1 implementations and the integrated durable bridge:
 
 - :class:`app.mail.engine_processor.LocalEngineProcessor` runs the real
   engine (``engine_api.clean_to_bundle``) in-process. It is the correct
   *engine* contract but not the production *isolation* contract; see its
   docstring.
+- :class:`app.mail.durable_processor.DurableAttachmentProcessor` submits
+  retained attachment jobs through the shared dispatcher and runner. It requires
+  an explicit tenant/matter/service binding; it is not a mail listener.
 - :class:`app.mail.synthetic.SyntheticDeterministicProcessor` is a test
   double. Its results carry ``verification="synthetic"`` and the adapter
   refuses them unless explicitly told it is running a test or demo.

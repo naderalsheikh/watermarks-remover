@@ -246,4 +246,4 @@ jobs:
       - name: Exercise independent owners, crash recovery and atomic publication
         env:
           COUNSELCLEAR_TEST_POSTGRES_URL: postgresql+psycopg://counselclear_test:isolated-ci-only@127.0.0.1:5432/postgres
-        run: python -m pytest tests/test_job_ownership.py tests/test_job_transactions.py tests/test_admission.py tests/test_storage_reference_migration.py tests/test_execution_admission.py -q
+        run: python -m pytest tests/test_job_ownership.py tests/test_job_transactions.py tests/test_admission.py tests/test_storage_reference_migration.py tests/test_execution_admission.py tests/test_mail_durable_processor.py -q

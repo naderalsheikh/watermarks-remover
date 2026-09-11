@@ -97,6 +97,50 @@ def _encrypted_custody_flow(tmp_path, monkeypatch, mode, image=""):
             assert relative.parts[1:] == ("output", "bundle")
             assert not (expected_bundle / "original").exists()
         engine.dispose()
+        # The mail bridge uses this same dispatcher and real worker image.
+        from app.mail import PolicyReference, TrustedCallerContext
+        from app.mail.durable_processor import DurableAttachmentProcessor, TenantJobBinding
+        from app.mail.processor import ProcessRequest
+        from app.malware import get_scanner
+
+        service_actor = "mail:synthetic-tenant"
+        for permission in ("read", "upload", "sanitize"):
+            client.put(
+                f"/v1/matters/{matter}/acl", json={"user_id": service_actor, "perm": permission}
+            ).raise_for_status()
+        dispatcher = client.app.state.batch_dispatcher
+        processor = DurableAttachmentProcessor(
+            cfg=cfg,
+            session_factory=dispatcher._session_factory,
+            storage=storage_from_config(cfg),
+            scanner=get_scanner(),
+            dispatcher=dispatcher,
+            wait_s=60,
+            binding=TenantJobBinding(
+                "synthetic-tenant", matter, service_actor, PolicyReference("external_sharing", 1)
+            ),
+            allow_development=mode == "subprocess",
+        )
+        mail_request = ProcessRequest(
+            "part-1",
+            "spa.docx",
+            "spa.docx",
+            original,
+            hashlib.sha256(original).hexdigest(),
+            "docx",
+            PolicyReference("external_sharing", 1),
+            TrustedCallerContext("synthetic-tenant", "isolated-fixture", True, "mail-fixture"),
+        )
+        mail_result = processor.process(mail_request)
+        assert mail_result.status == "released", mail_result.detail
+        assert mail_result.verification == "engine_verified"
+        assert mail_result.output != original
+        assert hashlib.sha256(mail_result.output).hexdigest() == mail_result.output_sha256
+        with dispatcher._session_factory() as session:
+            mail_job = session.query(Job).filter_by(requested_by=service_actor).one()
+            assert mail_job.worker_image == image
+            assert mail_job.result_json["manifest"]["operator"] == {"id": service_actor}
+            assert mail_job.execution_receipt
         jobs_dir = root / "matters" / matter / "jobs"
         for job_id in (inspect["id"], job["id"]):
             assert not list((jobs_dir / job_id).rglob("input"))
