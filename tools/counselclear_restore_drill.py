@@ -5,7 +5,11 @@
         --source /backups/2026-09-11/data \\
         --destination /srv/counselclear/restored \\
         --old-data-root /srv/counselclear/data \\
-        [--volume-key-file /restored-keys/volume.key] [--report drill.json]
+        --volume-key-file /restored-keys/volume.key \\
+        --report /srv/counselclear/restore-2026-09-11.json
+
+``--volume-key-file`` is needed only when originals are encrypted;
+``--report`` names a new file outside the snapshot and the restored root.
 
 What it qualifies: that a *cold, drained* snapshot of a local data root can
 be copied into a NEW root, its database filesystem references rebased from
@@ -49,6 +53,7 @@ Exit status: 0 verified, 2 refused (precondition), 3 verification failed,
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -301,7 +306,7 @@ def _preflight(source: Path, destination: Path, report: DrillReport) -> list[Pat
 
 
 def _copy_tree(source: Path, destination: Path, files: list[Path], report: DrillReport) -> None:
-    destination.mkdir(parents=False, exist_ok=False)
+    """Copy into an already-created, empty destination the caller owns."""
     total = 0
     for src in files:
         rel = src.relative_to(source)
@@ -405,10 +410,11 @@ def _rebase_references(
 
     receipt_updates: list[tuple[str, str]] = []
     for row in con.execute(
-        "SELECT id, document_id, status, bundle_dir, execution_receipt, result_json FROM jobs"
+        "SELECT id, document_id, kind, status, bundle_dir, execution_receipt, result_json FROM jobs"
     ):
         entry: dict[str, Any] = {
             "document_id": row["document_id"],
+            "kind": row["kind"],
             "status": row["status"],
             "bundle": None,
             "output_dir": None,
@@ -587,84 +593,160 @@ def _verify_originals(
         raise VerificationFailed("original verification failed: " + "; ".join(failures))
 
 
+def _confined_child(base: Path, name: object, *, what: str, job_id: str) -> Path:
+    """``base/name`` where ``name`` must be a plain file name that stays
+    inside ``base`` after resolution. Manifests are signed evidence and are
+    never rewritten, so a manifest that names a path is a failure, not a
+    correction."""
+    if not isinstance(name, str) or not name or name in (".", ".."):
+        raise VerificationFailed(f"job {job_id}: {what} is not a file name")
+    if "/" in name or "\\" in name or "\x00" in name or Path(name).is_absolute():
+        raise VerificationFailed(f"job {job_id}: {what} is a path, not a confined file name")
+    candidate = base / name
+    try:
+        candidate.resolve(strict=False).relative_to(base.resolve())
+    except ValueError:
+        raise VerificationFailed(f"job {job_id}: {what} escapes its bundle directory") from None
+    return candidate
+
+
+def _json_object(text: object, *, what: str, job_id: str) -> dict[str, Any]:
+    if isinstance(text, dict):
+        return text
+    if not isinstance(text, str) or not text:
+        raise VerificationFailed(f"job {job_id}: {what} is missing")
+    try:
+        value = json.loads(text)
+    except ValueError:
+        raise VerificationFailed(f"job {job_id}: {what} is not valid JSON") from None
+    if not isinstance(value, dict):
+        raise VerificationFailed(f"job {job_id}: {what} is not a JSON object")
+    return value
+
+
+def _verify_sanitize_bundle(
+    job_id: str, job: dict[str, Any], documents: dict[str, dict[str, Any]], destination: Path
+) -> None:
+    bundle: Path | None = job["bundle"]
+    if bundle is None:
+        raise VerificationFailed(f"job {job_id}: done sanitize job records no bundle_dir")
+    try:
+        bundle.resolve(strict=False).relative_to(destination.resolve())
+    except ValueError:
+        raise VerificationFailed(f"job {job_id}: bundle_dir escapes the restored root") from None
+    if not bundle.is_dir():
+        raise VerificationFailed(f"job {job_id}: bundle or manifest.json missing after restore")
+    manifest_path = bundle / "manifest.json"
+    if not manifest_path.is_file():
+        raise VerificationFailed(f"job {job_id}: bundle or manifest.json missing after restore")
+    manifest = _json_object(
+        manifest_path.read_bytes().decode("utf-8", "replace"), what="manifest.json", job_id=job_id
+    )
+    derivative = manifest.get("derivative")
+    original = manifest.get("original")
+    if not isinstance(derivative, dict) or not isinstance(original, dict):
+        raise VerificationFailed(f"job {job_id}: manifest lacks original/derivative records")
+
+    derivative_dir = bundle / "derivative"
+    if not derivative_dir.is_dir():
+        raise VerificationFailed(f"job {job_id}: derivative named in manifest is missing")
+    deriv_path = _confined_child(
+        derivative_dir,
+        derivative.get("filename"),
+        what="manifest derivative filename",
+        job_id=job_id,
+    )
+    if not deriv_path.is_file() or deriv_path.is_symlink():
+        raise VerificationFailed(f"job {job_id}: derivative named in manifest is missing")
+    present = sorted(p.name for p in derivative_dir.iterdir())
+    if present != [deriv_path.name]:
+        raise VerificationFailed(
+            f"job {job_id}: derivative directory must contain exactly the declared derivative"
+        )
+    deriv_bytes = deriv_path.read_bytes()
+    if len(deriv_bytes) != derivative.get("bytes") or _sha256_bytes(deriv_bytes) != derivative.get(
+        "sha256"
+    ):
+        raise VerificationFailed(f"job {job_id}: derivative differs from manifest digest or size")
+    if not (bundle / "report.html").is_file():
+        raise VerificationFailed(f"job {job_id}: report.html missing from bundle")
+
+    doc = documents.get(job["document_id"])
+    if doc is None:
+        raise VerificationFailed(f"job {job_id}: document row is missing")
+    if original.get("sha256") != doc["sha256"] or original.get("bytes") != doc["bytes"]:
+        raise VerificationFailed(f"job {job_id}: manifest original does not match the document row")
+
+    result = _json_object(job["result_json"], what="result_json", job_id=job_id)
+    if result.get("manifest") != manifest:
+        raise VerificationFailed(
+            f"job {job_id}: result_json manifest differs from the stored manifest"
+        )
+    if (
+        result.get("verification_pass") is not True
+        or (manifest.get("verification") or {}).get("pass") is not True
+    ):
+        raise VerificationFailed(
+            f"job {job_id}: sanitize result does not carry a passing verification"
+        )
+
+    output_dir: Path | None = job["output_dir"]
+    if output_dir is not None:
+        try:
+            output_dir.resolve(strict=False).relative_to(destination.resolve())
+        except ValueError:
+            raise VerificationFailed(
+                f"job {job_id}: execution receipt output_dir escapes the restored root"
+            ) from None
+        result_file = output_dir / "result.json"
+        if not result_file.is_file():
+            raise VerificationFailed(
+                f"job {job_id}: execution receipt output_dir lacks result.json"
+            )
+        payload = _json_object(
+            result_file.read_bytes().decode("utf-8", "replace"),
+            what="worker result.json",
+            job_id=job_id,
+        )
+        worker_result = payload.get("result")
+        if not isinstance(worker_result, dict) or worker_result.get("manifest") != manifest:
+            raise VerificationFailed(
+                f"job {job_id}: worker result.json manifest differs from bundle"
+            )
+
+
 def _verify_releases(
     con: sqlite3.Connection,
     documents: dict[str, dict[str, Any]],
     jobs: dict[str, dict[str, Any]],
+    destination: Path,
     report: DrillReport,
 ) -> None:
+    """Every done sanitize job must carry its complete bundle evidence, every
+    done inspect job a findings result, and every done release a done
+    sanitize job whose bundle verified. Malformed result types fail; the
+    job kind is read from the row, never guessed from the result."""
     failures: list[str] = []
-    bundles_verified = 0
+    verified_sanitize: set[str] = set()
     done_jobs = 0
     for job_id, job in jobs.items():
         if job["status"] != "done":
             continue
         done_jobs += 1
-        bundle: Path | None = job["bundle"]
-        if bundle is None:
-            # Inspect jobs finish "done" without a bundle; sanitize jobs
-            # always record one. The kind is not needed to tell them apart:
-            # a done job whose result carries a manifest must have a bundle.
-            result = job["result_json"]
-            if isinstance(result, str) and '"manifest"' in result:
-                failures.append(f"job {job_id}: done with a manifest but no bundle_dir")
-            continue
-        manifest_path = bundle / "manifest.json"
-        if not bundle.is_dir() or not manifest_path.is_file():
-            failures.append(f"job {job_id}: bundle or manifest.json missing after restore")
-            continue
         try:
-            manifest = json.loads(manifest_path.read_bytes())
-        except ValueError:
-            failures.append(f"job {job_id}: manifest.json is not valid JSON")
-            continue
-        derivative = manifest.get("derivative") or {}
-        original = manifest.get("original") or {}
-        deriv_path = bundle / "derivative" / str(derivative.get("filename") or "")
-        if not derivative.get("filename") or not deriv_path.is_file():
-            failures.append(f"job {job_id}: derivative named in manifest is missing")
-            continue
-        deriv_bytes = deriv_path.read_bytes()
-        if len(deriv_bytes) != derivative.get("bytes") or _sha256_bytes(
-            deriv_bytes
-        ) != derivative.get("sha256"):
-            failures.append(f"job {job_id}: derivative differs from manifest digest or size")
-            continue
-        if not (bundle / "report.html").is_file():
-            failures.append(f"job {job_id}: report.html missing from bundle")
-            continue
-        doc = documents.get(job["document_id"])
-        if (
-            doc is None
-            or original.get("sha256") != doc["sha256"]
-            or original.get("bytes") != doc["bytes"]
-        ):
-            failures.append(f"job {job_id}: manifest original does not match the document row")
-            continue
-        result_text = job["result_json"]
-        try:
-            result = json.loads(result_text) if isinstance(result_text, str) else result_text
-        except ValueError:
-            failures.append(f"job {job_id}: result_json is not valid JSON")
-            continue
-        if not isinstance(result, dict) or result.get("manifest") != manifest:
-            failures.append(f"job {job_id}: result_json manifest differs from the stored manifest")
-            continue
-        output_dir: Path | None = job["output_dir"]
-        if output_dir is not None:
-            result_file = output_dir / "result.json"
-            if not result_file.is_file():
-                failures.append(f"job {job_id}: execution receipt output_dir lacks result.json")
-                continue
-            try:
-                payload = json.loads(result_file.read_bytes())
-            except ValueError:
-                failures.append(f"job {job_id}: result.json is not valid JSON")
-                continue
-            if (payload.get("result") or {}).get("manifest") != manifest:
-                failures.append(f"job {job_id}: worker result.json manifest differs from bundle")
-                continue
-        bundles_verified += 1
+            if job["kind"] == "sanitize":
+                _verify_sanitize_bundle(job_id, job, documents, destination)
+                verified_sanitize.add(job_id)
+            elif job["kind"] == "inspect":
+                if job["bundle"] is not None:
+                    raise VerificationFailed(f"job {job_id}: inspect job records a bundle_dir")
+                result = _json_object(job["result_json"], what="result_json", job_id=job_id)
+                if not isinstance(result.get("findings"), list):
+                    raise VerificationFailed(f"job {job_id}: inspect result lacks a findings list")
+            else:
+                raise VerificationFailed(f"job {job_id}: unknown job kind {job['kind']!r}")
+        except VerificationFailed as exc:
+            failures.append(str(exc))
 
     releases = list(con.execute("SELECT id, job_id, status, certificate_snapshot FROM releases"))
     done_releases = 0
@@ -674,23 +756,28 @@ def _verify_releases(
             continue
         done_releases += 1
         job = jobs.get(row["job_id"])
-        if job is None or job["status"] != "done":
-            failures.append(f"release {row['id']}: done without a done job")
+        if job is None or job["status"] != "done" or job["kind"] != "sanitize":
+            failures.append(f"release {row['id']}: done without a done sanitize job")
+            continue
+        if row["job_id"] not in verified_sanitize:
+            failures.append(f"release {row['id']}: its job's bundle evidence did not verify")
             continue
         snapshot = row["certificate_snapshot"]
-        if snapshot:
-            try:
-                parsed = json.loads(snapshot)
-            except ValueError:
-                failures.append(f"release {row['id']}: certificate snapshot is not valid JSON")
-                continue
-            if not isinstance(parsed, dict) or not parsed.get("html"):
-                failures.append(f"release {row['id']}: certificate snapshot lacks html")
-                continue
-            snapshots += 1
+        if not snapshot:
+            failures.append(f"release {row['id']}: done release has no certificate snapshot")
+            continue
+        try:
+            parsed = json.loads(snapshot)
+        except ValueError:
+            failures.append(f"release {row['id']}: certificate snapshot is not valid JSON")
+            continue
+        if not isinstance(parsed, dict) or not parsed.get("html"):
+            failures.append(f"release {row['id']}: certificate snapshot lacks html")
+            continue
+        snapshots += 1
     report.releases = {
         "jobs_done": done_jobs,
-        "bundles_verified": bundles_verified,
+        "bundles_verified": len(verified_sanitize),
         "releases": len(releases),
         "releases_done": done_releases,
         "certificate_snapshots_present": snapshots,
@@ -701,7 +788,12 @@ def _verify_releases(
         raise VerificationFailed("release evidence verification failed: " + "; ".join(failures))
 
 
-def _describe_auth(destination: Path, report: DrillReport) -> None:
+def _verify_auth(destination: Path, report: DrillReport, *, custody_depends_on_key: bool) -> None:
+    """Report the auth directory by presence and size only, and require the
+    custody signing key to exist and load when any release custody depends
+    on it. The application generates a replacement identity at first use
+    when the PEM is missing; a restore that silently allows that would
+    change the signer of every future packet."""
     auth = destination / "auth"
     info: dict[str, Any] = {"present": auth.is_dir(), "files": {}}
     if auth.is_dir():
@@ -709,22 +801,59 @@ def _describe_auth(destination: Path, report: DrillReport) -> None:
             if path.is_file():
                 info["files"][path.name] = {"bytes": path.stat().st_size}
     pem = auth / "custody_signing_key.pem"
+    info["custody_signing_key_present"] = pem.is_file()
+    info["custody_signing_key_fingerprint"] = None
+    problem: str | None = None
     if pem.is_file():
         try:
             from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
             key = serialization.load_pem_private_key(pem.read_bytes(), password=None)
-            public = key.public_key().public_bytes(
-                serialization.Encoding.Raw, serialization.PublicFormat.Raw
-            )
-            info["custody_signing_key_fingerprint"] = _sha256_bytes(public)
+            if not isinstance(key, Ed25519PrivateKey):
+                problem = "custody signing key is not an Ed25519 private key"
+            else:
+                public = key.public_key().public_bytes(
+                    serialization.Encoding.Raw, serialization.PublicFormat.Raw
+                )
+                info["custody_signing_key_fingerprint"] = _sha256_bytes(public)
         except Exception as exc:  # the key is opaque to the drill; report the class only
-            info["custody_signing_key_fingerprint"] = None
-            info["custody_signing_key_error"] = type(exc).__name__
+            problem = f"custody signing key did not load ({type(exc).__name__})"
+    else:
+        problem = "custody signing key is missing"
+    info["local_password_hash_present"] = (auth / "local.hash").is_file()
+    info["custody_depends_on_signing_key"] = custody_depends_on_key
     report.auth = info
+    if problem and custody_depends_on_key:
+        raise VerificationFailed(
+            f"{problem}; the application would generate a replacement signing identity on "
+            "boot, which release custody cannot survive"
+        )
+    if problem:
+        info["warning"] = problem
 
 
 # --- driver ------------------------------------------------------------------
+
+
+def _remove_tree(path: Path) -> bool:
+    """Remove a destination the drill created. Read-only members (write-once
+    originals, Windows attributes) are made writable first. Returns whether
+    the path is gone afterwards; never raises."""
+
+    def _on_error(func, target, _exc):
+        with contextlib.suppress(OSError):
+            os.chmod(target, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+            os.chmod(Path(target).parent, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+            func(target)
+
+    with contextlib.suppress(OSError):
+        for dirpath, dirnames, filenames in os.walk(path):
+            for name in (*dirnames, *filenames):
+                with contextlib.suppress(OSError):
+                    os.chmod(Path(dirpath) / name, 0o700)
+        shutil.rmtree(path, onexc=_on_error)
+    return not path.exists()
 
 
 def run_drill(
@@ -744,15 +873,19 @@ def run_drill(
         files = _preflight(source, destination, report)
         mapper = RootMapper(old_data_root, destination)
         keyring = _load_keyring(volume_key_file, report)
+        destination.mkdir(parents=False, exist_ok=False)
+        created = True  # from here on, every failure path removes the destination
         _copy_tree(source, destination, files, report)
-        created = True
         con = _open_database(destination, report)
         _check_drained(con, report)
         refs = _rebase_references(con, mapper, destination, report)
         _verify_audit(con, report)
         _verify_originals(destination, refs["documents"], keyring, report)
-        _verify_releases(con, refs["documents"], refs["jobs"], report)
-        _describe_auth(destination, report)
+        _verify_releases(con, refs["documents"], refs["jobs"], destination, report)
+        custody_depends_on_key = bool(
+            con.execute("SELECT 1 FROM releases WHERE status = 'done' LIMIT 1").fetchone()
+        ) or any(j["status"] == "done" and j["kind"] == "sanitize" for j in refs["jobs"].values())
+        _verify_auth(destination, report, custody_depends_on_key=custody_depends_on_key)
         con.close()
         con = None
         report.outcome = "verified"
@@ -765,13 +898,54 @@ def run_drill(
         report.outcome = "failed"
         report.failures.append(str(exc))
         report.exit_code = EXIT_FAILED
+    except BaseException:
+        # Unexpected errors propagate to the caller, but never leave a
+        # half-written destination behind.
+        report.outcome = "error"
+        report.exit_code = EXIT_ERROR
+        raise
     finally:
         if con is not None:
             con.close()
         if created and report.exit_code != EXIT_OK and not keep_on_failure:
-            shutil.rmtree(destination, ignore_errors=True)
-            report.destination_removed = True
+            report.destination_removed = _remove_tree(destination)
+            if not report.destination_removed:
+                report.failures.append(
+                    "destination could not be removed after failure; inspect and delete it manually"
+                )
     return report
+
+
+def validate_report_path(
+    report_path: Path | None, source: Path, destination: Path, volume_key_file: Path | None
+) -> Path | None:
+    """The report is written to a new file only, never over an existing one,
+    never inside the snapshot, the restored root, or beside the key file."""
+    if report_path is None:
+        return None
+    target = Path(report_path)
+    if target.exists() or target.is_symlink():
+        raise Refused(f"--report must be a new path; {target} already exists")
+    resolved = Path(os.path.abspath(target))
+    for label, forbidden in (
+        ("the source snapshot", Path(os.path.abspath(source))),
+        ("the destination root", Path(os.path.abspath(destination))),
+        (
+            "the volume key file's directory",
+            volume_key_file.parent.resolve() if volume_key_file is not None else None,
+        ),
+    ):
+        if forbidden is not None and (resolved == forbidden or resolved.is_relative_to(forbidden)):
+            raise Refused(f"--report must not be written inside {label}")
+    if not target.parent.is_dir():
+        raise Refused(f"--report parent directory does not exist: {target.parent}")
+    return target
+
+
+def _write_report(path: Path, text: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(text + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -800,6 +974,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        report_path = validate_report_path(
+            args.report, args.source, args.destination, args.volume_key_file
+        )
+    except Refused as exc:
+        refusal = DrillReport(str(args.source), str(args.destination), args.old_data_root)
+        refusal.outcome, refusal.refusal, refusal.exit_code = "refused", str(exc), EXIT_REFUSED
+        print(json.dumps(refusal.to_dict(), indent=2, sort_keys=True))
+        return EXIT_REFUSED
+
+    try:
         report = run_drill(
             args.source,
             args.destination,
@@ -811,8 +995,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"restore drill error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return EXIT_ERROR
     text = json.dumps(report.to_dict(), indent=2, sort_keys=True)
-    if args.report is not None:
-        args.report.write_text(text + "\n", encoding="utf-8")
+    if report_path is not None:
+        _write_report(report_path, text)
     print(text)
     return report.exit_code
 

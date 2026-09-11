@@ -10,6 +10,7 @@ against it by accident.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import io
 import json
@@ -40,6 +41,19 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _stop_app(app) -> None:
+    """A stopped application holds no database handle. The TestClient
+    context already ran shutdown (dispatcher stopped); the pooled SQLite
+    connection is what keeps the directory undeletable and un-renameable
+    on Windows, so dispose the engine explicitly."""
+    dispatcher = getattr(app.state, "batch_dispatcher", None)
+    factory = getattr(dispatcher, "_session_factory", None)
+    engine = getattr(factory, "kw", {}).get("bind") if factory is not None else None
+    if engine is not None:
+        engine.dispose()
+    gc.collect()
+
+
 def _checkpoint(root: Path) -> None:
     con = sqlite3.connect(root / DB)
     con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -61,7 +75,8 @@ def _build_release_root(tmp_path: Path, monkeypatch, *, encrypted: bool = True) 
     root = tmp_path / "live" / "data"
     original = (FIXTURES / "spa.docx").read_bytes()
 
-    with TestClient(create_app(root)) as c:
+    app = create_app(root)
+    with TestClient(app) as c:
         assert c.post("/v1/auth/login", json={"password": PASSWORD}).status_code == 200
         matter = c.post("/v1/matters", json={"name": "Restore drill"}).json()["id"]
         r = c.post(
@@ -77,6 +92,7 @@ def _build_release_root(tmp_path: Path, monkeypatch, *, encrypted: bool = True) 
         assert release["job"]["status"] == "done", release["job"].get("error")
         packet = c.get(f"/v1/matters/{matter}/jobs/{release['job']['id']}/bundle")
         assert packet.status_code == 200
+    _stop_app(app)
     _checkpoint(root)
     return {
         "root": root,
@@ -436,6 +452,308 @@ def test_keep_on_failure_retains_destination_for_inspection(release_snapshot, tm
     )
     assert report.outcome == "failed"
     assert destination.is_dir() and report.destination_removed is False
+
+
+# --- acceptance-review regressions (Codex, PR #10) ------------------------------
+
+
+def _bundle_paths(built: dict) -> tuple[Path, Path]:
+    """(bundle dir, worker output dir) inside the snapshot."""
+    con = sqlite3.connect(built["snapshot"] / DB)
+    bundle, receipt = con.execute("SELECT bundle_dir, execution_receipt FROM jobs").fetchone()
+    con.close()
+    old = built["old_root"]
+    output = json.loads(receipt)["output_dir"]
+    return (
+        built["snapshot"] / Path(bundle).relative_to(old),
+        built["snapshot"] / Path(output).relative_to(old),
+    )
+
+
+def _rewrite_manifest_everywhere(built: dict, mutate) -> None:
+    """Apply ``mutate`` to the manifest and mirror it into result_json and the
+    worker result.json, the way a consistent forgery would."""
+    bundle, output = _bundle_paths(built)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    mutate(manifest)
+    os.chmod(manifest_path, 0o600)
+    manifest_path.write_text(json.dumps(manifest))
+    con = sqlite3.connect(built["snapshot"] / DB)
+    result = json.loads(con.execute("SELECT result_json FROM jobs").fetchone()[0])
+    result["manifest"] = manifest
+    con.execute("UPDATE jobs SET result_json = ?", (json.dumps(result),))
+    con.commit()
+    con.close()
+    payload_path = output / "result.json"
+    payload = json.loads(payload_path.read_bytes())
+    payload["result"]["manifest"] = manifest
+    os.chmod(payload_path, 0o600)
+    payload_path.write_text(json.dumps(payload))
+
+
+def test_missing_or_invalid_signing_key_is_not_verified(release_snapshot, tmp_path):
+    built = release_snapshot
+    pem = built["snapshot"] / "auth" / "custody_signing_key.pem"
+    pem.unlink()
+    report = _run(
+        built["snapshot"], tmp_path / "no-pem", built["old_root"], volume_key_file=built["keyfile"]
+    )
+    assert report.outcome == "failed" and report.exit_code == 3
+    assert "custody signing key is missing" in report.failures[0]
+    assert "replacement signing identity" in report.failures[0]
+    assert report.auth["custody_signing_key_present"] is False
+    assert report.auth["custody_depends_on_signing_key"] is True
+    assert not (tmp_path / "no-pem").exists()
+
+    pem.write_bytes(b"-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n")
+    report = _run(
+        built["snapshot"], tmp_path / "bad-pem", built["old_root"], volume_key_file=built["keyfile"]
+    )
+    assert report.outcome == "failed"
+    assert "did not load" in report.failures[0]
+    assert report.auth["custody_signing_key_fingerprint"] is None
+
+
+def test_signing_key_absence_is_only_a_warning_without_release_custody(tmp_path, monkeypatch):
+    """A root with no done sanitize job or release has nothing signed yet;
+    the drill reports the gap instead of failing on it."""
+    from app.main import create_app
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", PASSWORD)
+    monkeypatch.delenv("COUNSELCLEAR_VOLUME_KEY_FILE", raising=False)
+    root = tmp_path / "live" / "data"
+    app = create_app(root)
+    with TestClient(app) as c:
+        assert c.post("/v1/auth/login", json={"password": PASSWORD}).status_code == 200
+        c.post("/v1/matters", json={"name": "empty"})
+    _stop_app(app)
+    _checkpoint(root)
+    snapshot = _cold_snapshot(root, tmp_path / "backup" / "data")
+    old_root = str(root)
+    os.rename(root, root.with_name("data.gone"))
+    (snapshot / "auth" / "custody_signing_key.pem").unlink(missing_ok=True)
+    report = _run(snapshot, tmp_path / "restored", old_root)
+    assert report.outcome == "verified", (report.refusal, report.failures)
+    assert report.auth["custody_depends_on_signing_key"] is False
+    assert report.auth["warning"] == "custody signing key is missing"
+
+
+def test_done_sanitize_job_without_bundle_evidence_is_not_verified(release_snapshot, tmp_path):
+    built = release_snapshot
+    con = sqlite3.connect(built["snapshot"] / DB)
+    con.execute("UPDATE jobs SET bundle_dir = '', result_json = '{}'")
+    con.commit()
+    con.close()
+    report = _run(
+        built["snapshot"],
+        tmp_path / "no-bundle-dir",
+        built["old_root"],
+        volume_key_file=built["keyfile"],
+    )
+    assert report.outcome == "failed"
+    assert "records no bundle_dir" in report.failures[0]
+    assert report.releases["releases_done"] == 1 and report.releases["bundles_verified"] == 0
+    assert "its job's bundle evidence did not verify" in report.failures[0]
+
+
+@pytest.mark.parametrize(
+    ("result_json", "fragment"),
+    [
+        ("[]", "not a JSON object"),
+        ("null", "not a JSON object"),
+        ("not json", "not valid JSON"),
+        ("", "is missing"),
+        ('{"manifest": {}, "verification_pass": true}', "differs from the stored manifest"),
+    ],
+    ids=["list", "null", "garbage", "empty", "wrong-manifest"],
+)
+def test_malformed_result_json_is_not_verified(release_snapshot, tmp_path, result_json, fragment):
+    built = release_snapshot
+    con = sqlite3.connect(built["snapshot"] / DB)
+    con.execute("UPDATE jobs SET result_json = ?", (result_json,))
+    con.commit()
+    con.close()
+    report = _run(
+        built["snapshot"],
+        tmp_path / "bad-result",
+        built["old_root"],
+        volume_key_file=built["keyfile"],
+    )
+    assert report.outcome == "failed"
+    assert fragment in report.failures[0]
+
+
+def test_release_pointing_at_an_inspect_job_is_not_verified(release_snapshot, tmp_path):
+    built = release_snapshot
+    con = sqlite3.connect(built["snapshot"] / DB)
+    con.execute(
+        "UPDATE jobs SET kind = 'inspect', bundle_dir = '', result_json = '{\"findings\": []}'"
+    )
+    con.commit()
+    con.close()
+    report = _run(
+        built["snapshot"],
+        tmp_path / "inspect-release",
+        built["old_root"],
+        volume_key_file=built["keyfile"],
+    )
+    assert report.outcome == "failed"
+    assert "done without a done sanitize job" in report.failures[0]
+
+
+@pytest.mark.parametrize(
+    ("make_name", "fragment"),
+    [
+        (str, "is a path, not a confined file name"),
+        (lambda outside: "../" + outside.name, "is a path, not a confined file name"),
+        (lambda outside: "..", "is not a file name"),
+        (lambda outside: "", "is not a file name"),
+    ],
+    ids=["absolute", "dotdot-relative", "dotdot", "empty"],
+)
+def test_manifest_derivative_name_is_confined_to_the_bundle(
+    release_snapshot, tmp_path, make_name, fragment
+):
+    """A consistent forgery (manifest, result_json and worker result.json all
+    agree) that names a derivative outside the bundle must still fail; the
+    manifest is never rewritten to repair it."""
+    built = release_snapshot
+    bundle, _ = _bundle_paths(built)
+    original_manifest = json.loads((bundle / "manifest.json").read_bytes())
+    outside = tmp_path / "outside.docx"
+    shutil.copyfile(bundle / "derivative" / original_manifest["derivative"]["filename"], outside)
+
+    def mutate(manifest):
+        manifest["derivative"]["filename"] = make_name(outside)
+
+    _rewrite_manifest_everywhere(built, mutate)
+    destination = tmp_path / "escaped"
+    report = _run(
+        built["snapshot"],
+        destination,
+        built["old_root"],
+        volume_key_file=built["keyfile"],
+        keep_on_failure=True,
+    )
+    assert report.outcome == "failed"
+    assert fragment in report.failures[0]
+    # The (forged) manifest was carried as-is, not corrected.
+    restored_bundle = destination / bundle.relative_to(built["snapshot"])
+    assert json.loads((restored_bundle / "manifest.json").read_bytes())["derivative"][
+        "filename"
+    ] == make_name(outside)
+
+
+def test_extra_file_in_derivative_dir_is_not_verified(release_snapshot, tmp_path):
+    built = release_snapshot
+    bundle, _ = _bundle_paths(built)
+    (bundle / "derivative" / "extra.docx").write_bytes(b"stray")
+    report = _run(
+        built["snapshot"], tmp_path / "extra", built["old_root"], volume_key_file=built["keyfile"]
+    )
+    assert report.outcome == "failed"
+    assert "exactly the declared derivative" in report.failures[0]
+
+
+def test_copy_failure_removes_partial_destination_and_propagates(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / DB).write_bytes(b"synthetic")
+    (source / "auth").mkdir()
+    (source / "auth" / "local.hash").write_bytes(b"x")
+    destination = tmp_path / "restored"
+    calls = {"n": 0}
+    real = drill.shutil.copyfile
+
+    def fail_second(src, dst, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("synthetic copy failure")
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(drill.shutil, "copyfile", fail_second)
+    with pytest.raises(OSError, match="synthetic copy failure"):
+        drill.run_drill(source, destination, str(source))
+    assert not destination.exists()
+
+
+def test_failed_cleanup_is_reported_not_claimed(release_snapshot, tmp_path, monkeypatch):
+    built = release_snapshot
+    wrong = tmp_path / "wrong.key"
+    wrong.write_bytes(os.urandom(32))
+    destination = tmp_path / "stuck"
+    monkeypatch.setattr(drill, "_remove_tree", lambda path: False)
+    report = _run(built["snapshot"], destination, built["old_root"], volume_key_file=wrong)
+    assert report.outcome == "failed"
+    assert report.destination_removed is False
+    assert any("could not be removed" in f for f in report.failures)
+    assert destination.exists()
+
+
+def test_cleanup_handles_read_only_members(release_snapshot, tmp_path):
+    """Write-once originals are stored read-only; the cleanup must still
+    remove the destination it created."""
+    built = release_snapshot
+    wrong = tmp_path / "wrong.key"
+    wrong.write_bytes(os.urandom(32))
+    destination = tmp_path / "ro"
+    report = _run(built["snapshot"], destination, built["old_root"], volume_key_file=wrong)
+    assert report.outcome == "failed" and report.destination_removed is True
+    assert not destination.exists()
+
+
+def test_report_path_must_be_new_and_outside_snapshot_and_root(release_snapshot, tmp_path):
+    built = release_snapshot
+    destination = tmp_path / "report-target"
+    existing = tmp_path / "existing.json"
+    existing.write_text("{}")
+    cases = [
+        (existing, "already exists"),
+        (built["snapshot"] / "drill.json", "inside the source snapshot"),
+        (destination / "drill.json", "inside the destination root"),
+        (built["keyfile"].parent / "drill.json", "volume key file's directory"),
+        (tmp_path / "missing-dir" / "drill.json", "parent directory does not exist"),
+    ]
+    for path, fragment in cases:
+        with pytest.raises(drill.Refused, match=fragment):
+            drill.validate_report_path(path, built["snapshot"], destination, built["keyfile"])
+        assert not destination.exists()
+    fine = tmp_path / "fine.json"
+    assert (
+        drill.validate_report_path(fine, built["snapshot"], destination, built["keyfile"]) == fine
+    )
+    assert drill.validate_report_path(None, built["snapshot"], destination, None) is None
+
+
+def test_cli_refuses_bad_report_path_before_copying(release_snapshot, tmp_path):
+    built = release_snapshot
+    destination = tmp_path / "cli-bad-report"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools" / "counselclear_restore_drill.py"),
+            "--source",
+            str(built["snapshot"]),
+            "--destination",
+            str(destination),
+            "--old-data-root",
+            built["old_root"],
+            "--volume-key-file",
+            str(built["keyfile"]),
+            "--report",
+            str(built["snapshot"] / "drill.json"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert "inside the source snapshot" in completed.stdout
+    assert not destination.exists()
+    assert not (built["snapshot"] / "drill.json").exists()
 
 
 # --- variants -------------------------------------------------------------------

@@ -9,12 +9,24 @@ Status: implemented as `tools/counselclear_restore_drill.py` with tests in
 The drill qualifies one thing: a **cold, drained snapshot** of a
 `COUNSELCLEAR_STORAGE=local` data root with its SQLite database can be
 restored into a **new** root on the same or another host, its database
-filesystem references re-rooted, and the restored state verified — database
-integrity, per-matter audit chains, every original's plaintext hash and
-size (through the envelope with supplied key material), and the released
-artifact evidence of every terminal job — after which the application boots
-on the restored root, authenticates with the restored password hash, serves
-the release packet, and the offline verifier accepts it.
+filesystem references re-rooted, and the restored state verified.
+
+Two layers of evidence, kept distinct:
+
+- **What the tool itself verifies** on every run: database integrity,
+  per-matter audit chains, every original's plaintext hash and size
+  (through the envelope with supplied key material), the bundle evidence of
+  every done sanitize job, the findings result of every done inspect job,
+  the certificate snapshot of every done release, and that the custody
+  signing key exists and loads whenever release custody depends on it.
+- **What the end-to-end test demonstrates** in addition
+  (`test_restore_into_new_root_serves_original_and_release_without_old_root`):
+  the application boots on the restored root, authenticates with the
+  restored password hash, serves the release packet, the offline verifier
+  accepts that packet, and the storage backend reads the restored original.
+  The tool does not boot the application or sign anything; a `verified`
+  report is the tool's claim, the application-level behaviour is the
+  test's.
 
 It does not qualify, and refuses rather than pretends:
 
@@ -32,18 +44,31 @@ It does not qualify, and refuses rather than pretends:
 
 ```sh
 python tools/counselclear_restore_drill.py \
-  --source        /backups/2026-09-11T02-00/data   # cold snapshot, read-only use
-  --destination   /srv/counselclear/restored/data   # must not exist yet
-  --old-data-root /srv/counselclear/data            # the root the snapshot ran under
-  --volume-key-file /srv/counselclear/restored/volume.key   # only if originals are encrypted
-  --report        /srv/counselclear/restored/drill-2026-09-11.json
-  [--keep-on-failure]
+  --source /backups/2026-09-11T02-00/data \
+  --destination /srv/counselclear/restored/data \
+  --old-data-root /srv/counselclear/data \
+  --volume-key-file /srv/counselclear/restored-keys/volume.key \
+  --report /srv/counselclear/restore-2026-09-11.json
 ```
+
+| Argument | Meaning |
+|---|---|
+| `--source` | the cold snapshot; used read-only |
+| `--destination` | the new root; must not exist yet |
+| `--old-data-root` | the absolute root the snapshot's rows were written under; never inferred |
+| `--volume-key-file` | the restored 32-byte volume key; only when originals are encrypted |
+| `--report` | a new file for the JSON report, outside the snapshot, the restored root and the key file's directory |
+| `--keep-on-failure` | keep the destination after a refusal or failure, for inspection |
 
 Exit 0: verified. Exit 2: refused on a precondition (nothing about the
 snapshot's evidence was judged). Exit 3: restored but verification failed.
-Exit 1: unexpected error. On 2 or 3 the destination is removed unless
-`--keep-on-failure` is given; a pre-existing destination is never touched.
+Exit 1: unexpected error. The destination is owned by the drill from the
+moment it is created: on 2, 3 or 1 it is removed unless `--keep-on-failure`
+is given (read-only members are made writable first), and the report says
+`destination_removed: false` if removal did not succeed rather than
+claiming it did. A pre-existing destination is never touched. `--report`
+is validated before anything is copied and refuses an existing path or a
+path inside the snapshot, the restored root, or the key file's directory.
 
 `--old-data-root` is required and never inferred. The snapshot's rows
 contain absolute paths written by the application on the source host; the
@@ -93,21 +118,33 @@ host and vice versa (`test_windows_spelled_references_restore_on_this_host`).
    root), LocalKeyring(supplied key))`; the AAD is the root-relative
    logical key, which is why relocation works without touching the
    envelope. The plaintext must match the row's `sha256` and `bytes`.
-9. **Released artifact evidence.** For every `done` job with a bundle:
-   `manifest.json` parses; the named derivative exists and matches the
-   manifest's digest and size; `report.html` exists; the manifest's
-   original digest/size match the document row; `jobs.result_json.manifest`
-   equals the stored manifest; and, where the execution receipt names an
-   output directory, its `result.json` carries the same manifest. Every
-   `done` release must point at a `done` job and its certificate snapshot
-   (carried in the database, byte-for-byte) must parse and contain the
-   certificate HTML. The packet signature itself is not recomputed by the
-   drill; the decisive test downloads a packet from the restored root and
-   runs `tools/counselclear_verify_release_packet.py` on it.
-10. **Auth directory.** File presence and sizes are reported, plus the
-    custody signing key's public fingerprint (SHA-256 of the raw public
-    key, the value recipients pin). Key bytes, the password hash, cookie and
-    attestation secrets are never read into the report or printed.
+9. **Released artifact evidence.** The job kind is read from the row.
+   Every `done` **sanitize** job must record a `bundle_dir` inside the
+   restored root whose `manifest.json` parses; the derivative it names
+   must be a plain file name confined to `bundle/derivative/` (an absolute
+   or relative path in a manifest is a failure, and the manifest is never
+   rewritten to repair it), the derivative directory must contain exactly
+   that file, its digest and size must match the manifest, `report.html`
+   must exist, the manifest's original digest/size must match the document
+   row, `jobs.result_json` must be a JSON object whose manifest equals the
+   stored one with `verification_pass` true, and where the execution
+   receipt names an output directory its `result.json` must carry the same
+   manifest. Every `done` **inspect** job must have no bundle and a findings
+   list. Malformed result types (a list, `null`, empty, non-JSON) fail.
+   Every `done` release must point at a `done` sanitize job whose bundle
+   verified and must carry a certificate snapshot that parses and contains
+   the certificate HTML. The packet signature itself is not recomputed by
+   the drill; the end-to-end test downloads a packet from the restored root
+   and runs `tools/counselclear_verify_release_packet.py` on it.
+10. **Auth material.** File presence and sizes are reported, never
+    contents. The custody signing key must exist and load as an Ed25519
+    private key whenever release custody depends on it (any done release
+    or done sanitize job); otherwise verification fails, because the
+    application would generate a replacement signing identity at first
+    use and every future packet would be signed by a different key than
+    the restored records. On a root with nothing signed yet, a missing key
+    is reported as a warning. The public fingerprint (SHA-256 of the raw
+    public key, the value recipients pin) is reported for comparison.
 
 ## What "cold and drained" means for the operator
 
@@ -151,6 +188,10 @@ identity at first use; the drill does not create one and reports absence.
 | Audit row altered | exit 3, `audit chain verification failed` |
 | Reference outside the declared root, `..`, S3 form | exit 2, refusal names the column |
 | Queued/running work | exit 2, `snapshot is not drained` |
+| Signing key missing or unloadable with release custody present | exit 3, `custody signing key is missing` / `did not load` |
+| Done sanitize job without bundle evidence, or malformed `result_json` | exit 3, names the job |
+| Manifest naming a derivative outside its bundle | exit 3, `is a path, not a confined file name` |
+| Copy interrupted (I/O error) | exit 1, exception propagates, destination removed |
 
 A `verified` outcome means the restored root is internally consistent and
 its evidence matches the database. It does not mean the snapshot was the
