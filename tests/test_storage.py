@@ -8,7 +8,7 @@ import os
 import stat
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -139,6 +139,14 @@ def test_local_key_from_ref_roundtrip(tmp_path):
     assert s.key_from_ref(ref) == "local/matters/m1/docs/d1/original/a.docx"
 
 
+def test_local_windows_reference_renders_a_portable_logical_key(tmp_path, monkeypatch):
+    storage = LocalStorage(tmp_path / "root")
+    relative = PureWindowsPath(r"local\matters\m1\docs\d1\original\a.docx")
+    monkeypatch.setattr(storage, "_relative_path_from_ref", lambda ref: relative)
+    ref = str(PureWindowsPath(r"D:\custody") / relative)
+    assert storage.key_from_ref(ref) == relative.as_posix()
+
+
 def test_local_key_from_ref_rejects_outside_path(tmp_path):
     s = LocalStorage(tmp_path / "root")
     with pytest.raises(StorageError):
@@ -188,6 +196,41 @@ def test_encrypted_local_roundtrip_and_idempotent(tmp_path):
         s.write_once(key, b"different")
 
 
+@pytest.mark.parametrize("legacy_spelling", ["portable", "windows_native"])
+def test_existing_windows_envelope_keeps_reference_and_ciphertext(
+    tmp_path, monkeypatch, legacy_spelling
+):
+    from app.storage import _seal
+
+    key = "local/matters/m1/docs/d1/original/a.docx"
+    inner = LocalStorage(tmp_path / "root")
+    keyring = LocalKeyring(tmp_path / "volume.key")
+    aad = key if legacy_spelling == "portable" else str(PureWindowsPath(key))
+    # Construct the historical envelope directly, independent of current
+    # EncryptedStorage.write_once, then exercise the real persistent store.
+    sealed = _seal(keyring, b"historical original", aad.encode("utf-8"))
+    ref = inner.write_once(key, sealed)
+    monkeypatch.setattr(inner, "_relative_path_from_ref", lambda ref: PureWindowsPath(key))
+    storage = EncryptedStorage(inner, keyring)
+    assert storage.read(ref) == b"historical original"
+    assert storage.write_once(key, b"historical original") == ref
+    with pytest.raises(StorageError):
+        storage.write_once(key, b"a different original")
+    assert Path(ref).read_bytes() == sealed
+    assert storage.key_from_ref(ref) == key
+
+
+@pytest.mark.skipif(os.name == "nt", reason="literal backslashes distinguish POSIX filenames")
+def test_envelope_cannot_move_between_literal_backslash_and_directory_key(tmp_path):
+    inner = LocalStorage(tmp_path / "root")
+    storage = EncryptedStorage(inner, LocalKeyring(tmp_path / "volume.key"))
+    ref = storage.write_once(r"local\other.txt", b"bound to its exact key")
+    assert storage.read(ref) == b"bound to its exact key"
+    moved = inner.write_once("local/other.txt", Path(ref).read_bytes())
+    with pytest.raises(StorageError, match="integrity check failed"):
+        storage.read(moved)
+
+
 def test_encrypted_local_tamper_detected(tmp_path):
     inner = LocalStorage(tmp_path / "root")
     keyring = LocalKeyring(tmp_path / "volume.key")
@@ -224,7 +267,10 @@ def test_volume_key_file_created_0600_and_reused(tmp_path):
     keyfile = tmp_path / "volume.key"
     LocalKeyring(keyfile)
     assert keyfile.exists()
-    assert stat.S_IMODE(keyfile.stat().st_mode) == 0o600
+    if os.name != "nt":
+        # Windows chmod bits do not express ACL privacy; the persistence
+        # and encryption checks still run there, but this is a POSIX check.
+        assert stat.S_IMODE(keyfile.stat().st_mode) == 0o600
     assert len(keyfile.read_bytes()) == 32
     # second instance reuses the same key (rotation orphans envelopes)
     assert LocalKeyring(keyfile).unwrap(LocalKeyring(keyfile).new_data_key()[1])

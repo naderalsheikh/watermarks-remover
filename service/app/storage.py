@@ -141,12 +141,22 @@ class LocalStorage(Backend):
     def ref_for(self, key: str) -> str:
         return str(self._root / key)
 
-    def key_from_ref(self, ref: str) -> str:
+    def _relative_path_from_ref(self, ref: str) -> Path:
         p = Path(ref).absolute()
         try:
-            return str(p.relative_to(self._root))
+            return p.relative_to(self._root)
         except ValueError:
             raise StorageError(f"reference outside storage root: {ref}") from None
+
+    def key_from_ref(self, ref: str) -> str:
+        # Logical keys (and the original envelope AAD) use forward slashes
+        # on every platform, even when the stored reference is a Windows path.
+        return self._relative_path_from_ref(ref).as_posix()
+
+    def _native_key_from_ref(self, ref: str) -> str:
+        # Read compatibility only: before canonical key rendering, native
+        # Windows keys were the only spelling read() could authenticate.
+        return str(self._relative_path_from_ref(ref))
 
     def describe(self) -> str:
         return f"local ({self._root}, O_EXCL+0444 write-once)"
@@ -449,10 +459,7 @@ class EncryptedStorage(Backend):
             # plaintext is byte-identical.
             ref = self._inner.ref_for(key)
             if self._inner.exists(ref):
-                try:
-                    stored = _open(self._keyring, self._inner.read(ref), key.encode("utf-8"))
-                except StorageError:
-                    raise
+                stored = self.read(ref)
                 if stored == data:
                     return ref
             raise WriteOnceViolation(
@@ -460,8 +467,20 @@ class EncryptedStorage(Backend):
             ) from None
 
     def read(self, ref: str) -> bytes:
-        aad = self._inner.key_from_ref(ref).encode("utf-8")
-        return _open(self._keyring, self._inner.read(ref), aad)
+        key = self._inner.key_from_ref(ref)
+        blob = self._inner.read(ref)
+        try:
+            return _open(self._keyring, blob, key.encode("utf-8"))
+        except StorageError:
+            if isinstance(self._inner, LocalStorage):
+                native_key = self._inner._native_key_from_ref(ref)
+                if native_key != key:
+                    # Windows historically authenticated its native relative
+                    # path spelling. Preserve those immutable envelopes too.
+                    # On POSIX the spellings are identical: a literal '\\'
+                    # must never be treated as a different directory path.
+                    return _open(self._keyring, blob, native_key.encode("utf-8"))
+            raise
 
     def exists(self, ref: str) -> bool:
         return self._inner.exists(ref)

@@ -611,8 +611,11 @@ def _load_packet_files(path: Path) -> dict[str, bytes]:
     """Returns {relative_path: bytes} for every file in the packet,
     whether *path* is a zip or an already-extracted directory."""
     if path.is_dir():
+        # Logical packet member names use ZIP/POSIX separators on every
+        # host. Normalize only filesystem paths, never declared names or
+        # signed artifact bytes (nor literal ZIP member names).
         return {
-            str(p.relative_to(path)): p.read_bytes()
+            p.relative_to(path).as_posix(): p.read_bytes()
             for p in sorted(path.rglob("*"))
             if p.is_file()
         }

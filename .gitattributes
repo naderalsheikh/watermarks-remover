@@ -1,0 +1,3 @@
+# Fixture offsets, lengths, hashes, and signed evidence depend on exact bytes.
+# Preserve the committed bytes on Windows as well as POSIX checkouts.
+tests/fixtures/** -text

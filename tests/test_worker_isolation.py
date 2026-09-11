@@ -59,7 +59,7 @@ def _upload(client, name: str):
 
 
 def test_api_module_never_imports_parsers():
-    src = (REPO / "service" / "app" / "main.py").read_text()
+    src = (REPO / "service" / "app" / "main.py").read_text(encoding="utf-8")
     code = "\n".join(line.split("#")[0] for line in src.splitlines())
     for banned in ("engine_api", "clean_to_bundle", "inspect_bytes"):
         assert banned not in code, f"main.py must not reference {banned}"
@@ -129,7 +129,7 @@ def _imported_roots(path: Path) -> set[str]:
     """Top-level package name of every absolute import in *path* (AST-based,
     not substring matching, so a docstring mentioning "app" or a local
     variable named `app` can't produce a false positive)."""
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     roots: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -371,7 +371,7 @@ def test_docker_mount_is_scoped_to_one_job_not_the_whole_data_root(tmp_path):
     mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
     cmd = build_docker_cmd(cfg, **_docker_kwargs(mount_root))
     mount_flag = cmd[cmd.index("-v") + 1]
-    host_mount = mount_flag.split(":")[0]
+    host_mount = mount_flag.removesuffix(":/data")
     assert host_mount == str(mount_root)
     assert host_mount != str(cfg.data_root)
     # The database lives at a sibling of matters/, never inside a job dir.

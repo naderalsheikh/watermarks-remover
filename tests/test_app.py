@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -1146,7 +1147,10 @@ def test_custody_signing_key_is_provisioned_0600_and_idempotent(client, tmp_path
     assert bundle.status_code == 200
 
     assert key_file.is_file()
-    assert (key_file.stat().st_mode & 0o777) == 0o600
+    if os.name != "nt":
+        # Windows st_mode does not describe ACLs. Key lifecycle assertions
+        # below still run there; native ACL protection needs qualification.
+        assert (key_file.stat().st_mode & 0o777) == 0o600
 
     first = key_file.read_bytes()
     doc2, job2 = _run_done_sanitize(client, filename="spa.txt")
@@ -1205,7 +1209,8 @@ def test_concurrent_first_boot_provisions_exactly_one_key(tmp_path):
         )
         key_file = cfg.custody_signing_key_file
         assert key_file.is_file()
-        assert (key_file.stat().st_mode & 0o777) == 0o600
+        if os.name != "nt":
+            assert (key_file.stat().st_mode & 0o777) == 0o600
 
 
 def test_release_result_carries_signature_ref(client):

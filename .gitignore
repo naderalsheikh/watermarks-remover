@@ -26,6 +26,7 @@
 !/web/**
 !/.dockerignore
 !/.env.example
+!/.gitattributes
 !/.gitignore
 !/.pre-commit-hooks.yaml
 !/CODE_OF_CONDUCT.md

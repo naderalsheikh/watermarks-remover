@@ -45,9 +45,23 @@ unsuccessful process exit cannot become success through a result file.
 Existing terminal records and artifacts are not rewritten by this change.
 Original downloads continue through the existing explicit `download_original`
 permission and custody backend. This increment does not remove plaintext copies
-from historical bundles or establish protection/retention for all historical
-outputs and backups. Any remediation of existing records requires an inventory
-and a procedure that preserves their evidence and access semantics.
+from historical bundles. Protection and retention for new and historical local
+derivatives, reports, staging, and backups remain separate work; original-store
+encryption does not cover them. Any remediation of existing records requires an
+inventory and a procedure that preserves their evidence and access semantics.
+
+Use one API process only. Do not start a second instance against the same database
+until job ownership and restart recovery are corrected; the current startup
+reconciliation cannot distinguish another live process's jobs from abandoned
+work.
+
+Local logical storage keys and extracted packet member names now use `/` on
+every OS. Encrypted reads preserve previously readable Windows native-key
+envelopes using the same stored reference; they do not reseal or rewrite existing
+objects. ZIP member names and signed packet bytes are not normalized. Test
+fixtures retain exact committed bytes across checkout platforms. Windows suite
+results cover functional behavior, not ACL protection or native sandboxing;
+those are explicit requirements for the Desktop packaging workstream.
 
 Subprocess mode remains a development execution mode with the host user's
 privileges. Passing scoped paths does not create a filesystem or network sandbox.
@@ -63,8 +77,9 @@ is shown as not checked or unavailable. Passing partial checks produce
 `VERIFICATION INCOMPLETE`; they cannot establish an authenticated packet.
 
 Use the offline verifier with the complete packet and a trusted installation key
-fingerprint for its broader supported checks. A self-published key alone does not
-establish the producer's identity. Historical signed artifacts remain unchanged.
+fingerprint for its broader supported checks. Supply the exported `--audit-csv`
+for audit-chain cross-checks. A self-published key alone does not establish the
+producer's identity. Historical signed artifacts remain unchanged.
 
 ## Reproducible checks
 
@@ -72,10 +87,13 @@ CI installs the complete shipped Python runtime through `requirements-dev.txt`
 and uses Python 3.14, matching the product image. It runs the Python suite on
 Linux, Windows, and macOS, lint/format checks, dependency audits, web tests/lint/
 static export, and the actual worker image workflow. The web job uses Node 24 and
-the lockfile. Host test jobs install ExifTool and qpdf so required PDF/JPEG paths
-exercise their real tools instead of an unsupported fallback. The frontend dependency patches address the advisories reported by
-the September 11 clean install; the deployed static export does not run a Next.js
-server, but development/build dependencies must still be maintained.
+the lockfile. The complete timestamp-mutation corpus runs in a separate required
+job on each OS so it cannot consume the main suite's timeout budget; no cases or
+OS coverage are removed. Host test jobs install ExifTool and qpdf so required
+PDF/JPEG paths exercise their real tools instead of an unsupported fallback. The frontend
+dependency patches address the advisories reported by the September 11 clean
+install; the deployed static export does not run a Next.js server, but
+development/build dependencies must still be maintained.
 
 ```sh
 python -m pip install -r requirements-dev.txt

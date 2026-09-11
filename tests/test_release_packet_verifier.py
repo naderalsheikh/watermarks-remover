@@ -12,7 +12,7 @@ import hashlib
 import json
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 REPO = Path(__file__).resolve().parents[1]
 TOOLS = REPO / "tools"
@@ -161,6 +161,52 @@ def test_valid_packet_verifies_from_extracted_directory(tmp_path):
     dir_path = _write_dir(tmp_path, _packet_files())
     report = verifier.verify_release_packet(dir_path)
     assert report.valid, report.to_text()
+
+
+def test_windows_directory_members_preserve_signed_packet_verification(tmp_path, monkeypatch):
+    """An extracted packet uses the same logical names and signed bytes as
+    its ZIP, even when the filesystem renders relative paths with backslashes.
+    Exercise Windows path semantics on every host, not only Windows CI.
+    """
+    original = b"the preserved original bytes"
+    files = _packet_files(original_sha256=_sha256(original))
+    files["original/SPA.docx"] = original
+    files, public_keys = _sign_packet_files(files, _ed25519())
+    dir_path = _write_dir(tmp_path, files)
+    zip_path = _write_zip(tmp_path, files)
+    zip_report = verifier.verify_release_packet(zip_path, public_keys=public_keys)
+    assert zip_report.valid, zip_report.to_text()
+    assert zip_report.signature_status == "verified"
+
+    native_relative_to = type(dir_path).relative_to
+
+    def windows_relative_to(self, *args, **kwargs):
+        relative = native_relative_to(self, *args, **kwargs)
+        return PureWindowsPath(*relative.parts)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(dir_path), "relative_to", windows_relative_to)
+        loaded = verifier._load_packet_files(dir_path)
+        directory_report = verifier.verify_release_packet(dir_path, public_keys=public_keys)
+
+    assert loaded == files
+    assert directory_report == zip_report
+
+
+def test_zip_backslash_member_is_not_reinterpreted_as_a_declared_path(tmp_path):
+    """Filesystem portability must not alias a ZIP's literal member names
+    or loosen closed membership to accept an undeclared alternate spelling.
+    """
+    files = _packet_files()
+    files[r"derivative\out.docx"] = files.pop("derivative/out.docx")
+    zip_path = _write_zip(tmp_path, files)
+    assert verifier._load_packet_files(zip_path) == files
+    report = verifier.verify_release_packet(zip_path)
+    assert not report.valid
+    assert next(fc for fc in report.file_checks if fc.name == "derivative").status == "missing"
+    assert (
+        next(fc for fc in report.file_checks if fc.name == "packet membership").status == "mismatch"
+    )
 
 
 # --- derivative layout: nested / flat / ambiguous ------------------------------

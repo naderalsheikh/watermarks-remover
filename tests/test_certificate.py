@@ -694,7 +694,7 @@ def test_certificate_route_never_imports_the_engine():
     route structurally cannot reference them even if someone tried) --
     this test names the certificate route specifically so the guarantee
     is discoverable from this file too."""
-    src = (APP_DIR / "main.py").read_text()
+    src = (APP_DIR / "main.py").read_text(encoding="utf-8")
     route_start = src.index('@app.get("/v1/matters/{matter_id}/jobs/{job_id}/certificate")')
     route_end = src.index("@app.get", route_start + 1)
     route_src = src[route_start:route_end]

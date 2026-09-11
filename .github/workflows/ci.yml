@@ -51,7 +51,11 @@ jobs:
           qpdf --version
 
       - name: Test
-        run: python -m pytest -v --tb=short
+        # Keep the full mutation corpus in its own required matrix below. It
+        # consumed 12 minutes of a 30-minute Windows run before later tests.
+        run: >-
+          python -m pytest -o addopts= -v --tb=short --durations=10
+          --deselect tests/test_rfc3161_anchor_verification.py::test_condition_c_differential_fuzz_agrees_with_library_oracle
 
       - name: Validate OpenAPI spec
         if: matrix.os == 'ubuntu-latest'
@@ -87,6 +91,25 @@ jobs:
           python -m pip_audit -r requirements-dev.txt \
             -r service/requirements-app.txt \
             -r research/harnesses/requirements-synthid-scorer.txt
+
+  timestamp-mutation-corpus:
+    name: Timestamp mutation corpus (${{ matrix.os }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Verify every mutation against the independent oracle
+        run: >-
+          python -m pytest -o addopts= -v --tb=short --durations=10
+          tests/test_rfc3161_anchor_verification.py::test_condition_c_differential_fuzz_agrees_with_library_oracle
 
   lint:
     timeout-minutes: 10
