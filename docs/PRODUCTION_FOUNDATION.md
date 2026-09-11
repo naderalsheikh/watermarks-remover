@@ -43,6 +43,9 @@ and actual derivative digest/size before recording a usable bundle. A timeout or
 unsuccessful process exit cannot become success through a result file.
 
 Existing terminal records and artifacts are not rewritten by this change.
+New batch completion timestamps and their `batch.completed` audit events commit
+together. A failed completion append leaves the batch eligible for retry;
+historical rows with missing events are not reconstructed by this change.
 Original downloads continue through the existing explicit `download_original`
 permission and custody backend. This increment does not remove plaintext copies
 from historical bundles. Protection and retention for new and historical local
@@ -91,7 +94,12 @@ Linux, Windows, and macOS, lint/format checks, dependency audits, web tests/lint
 static export, and the actual worker image workflow. The web job uses Node 24 and
 the lockfile. The complete timestamp-mutation corpus runs in a separate required
 job on each OS so it cannot consume the main suite's timeout budget; no cases or
-OS coverage are removed. Host test jobs install ExifTool and qpdf so required
+OS coverage are removed. Windows main tests run in three deterministic, disjoint
+groups; their combined collected nodes cover the full main suite. An aggregate
+check retains the existing `test (windows-latest)` name and requires the main
+matrix to succeed. Main jobs stop on their first failure so its traceback is
+available before a slow runner can exhaust the job budget.
+Host test jobs install ExifTool and qpdf so required
 PDF/JPEG paths exercise their real tools instead of an unsupported fallback.
 PDF cleanup requires qpdf's `--remove-info` capability (introduced in 11.10).
 The Ubuntu job uses a checksum-pinned upstream 12.4.1 binary because its distro

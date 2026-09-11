@@ -15,11 +15,32 @@ permissions:
 
 jobs:
   test:
+    name: ${{ matrix.check_name }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            check_name: test (ubuntu-latest)
+            shard: 1
+            shards: 1
+          - os: macos-latest
+            check_name: test (macos-latest)
+            shard: 1
+            shards: 1
+          - os: windows-latest
+            check_name: test (windows-latest, shard 1/3)
+            shard: 1
+            shards: 3
+          - os: windows-latest
+            check_name: test (windows-latest, shard 2/3)
+            shard: 2
+            shards: 3
+          - os: windows-latest
+            check_name: test (windows-latest, shard 3/3)
+            shard: 3
+            shards: 3
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,10 +81,18 @@ jobs:
           qpdf --help=--remove-info
 
       - name: Test
+        if: runner.os != 'Windows'
         # Keep the full mutation corpus in its own required matrix below. It
         # consumed 12 minutes of a 30-minute Windows run before later tests.
         run: >-
-          python -m pytest -o addopts= -v --tb=short --durations=10
+          python -m pytest -o addopts= -v --tb=short --durations=10 --maxfail=1
+          --deselect tests/test_rfc3161_anchor_verification.py::test_condition_c_differential_fuzz_agrees_with_library_oracle
+
+      - name: Test (Windows shard)
+        if: runner.os == 'Windows'
+        run: >-
+          python tools/ci_pytest_shard.py --shard ${{ matrix.shard }} --shards ${{ matrix.shards }}
+          -- -o addopts= -v --tb=short --durations=10 --maxfail=1
           --deselect tests/test_rfc3161_anchor_verification.py::test_condition_c_differential_fuzz_agrees_with_library_oracle
 
       - name: Validate OpenAPI spec
@@ -72,7 +101,7 @@ jobs:
           python -c "import sys; sys.path.insert(0, 'service/scripts'); import server; from openapi_spec_validator import validate; validate(server.openapi_spec())"
 
       - name: Smoke (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && matrix.shard == 1
         shell: pwsh
         run: |
           python service/scripts/clean_text.py tests/fixtures/sample_watermarked.txt -o "$env:TEMP/wm.cleaned.txt" --stats &&
@@ -82,7 +111,7 @@ jobs:
           python service/scripts/clean_file.py tests/fixtures/sample_meta.svg -o "$env:TEMP/sample_meta.cleaned.svg"
 
       - name: Validate setup .ps1 scripts
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && matrix.shard == 1
         shell: pwsh
         run: |
           $files = @('research/harnesses/setup_ctrlregen.ps1', 'research/harnesses/setup_synthid.ps1')
@@ -100,6 +129,20 @@ jobs:
           python -m pip_audit -r requirements-dev.txt \
             -r service/requirements-app.txt \
             -r research/harnesses/requirements-synthid-scorer.txt
+
+  windows-test-complete:
+    # Preserve the existing required-check name. The matrix result requires
+    # every Windows shard (and the unchanged Linux/macOS main suites) to pass.
+    name: test (windows-latest)
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful main-suite matrix
+        env:
+          MAIN_TEST_RESULT: ${{ needs.test.result }}
+        run: test "$MAIN_TEST_RESULT" = success
 
   timestamp-mutation-corpus:
     name: Timestamp mutation corpus (${{ matrix.os }})
@@ -133,10 +176,10 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
 
       - name: Lint
-        run: python -m ruff check service tests
+        run: python -m ruff check service tests tools/ci_pytest_shard.py
 
       - name: Format check
-        run: python -m ruff format --check service tests
+        run: python -m ruff format --check service tests tools/ci_pytest_shard.py
 
   web:
     name: Web tests, lint, and static export
