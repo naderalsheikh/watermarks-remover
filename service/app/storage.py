@@ -268,14 +268,18 @@ class S3Storage(Backend):
     Write-once semantics without a filesystem: the PUT carries
     ``If-None-Match: *`` so a raced concurrent write fails server-side
     (the S3-native equivalent of O_EXCL) instead of depending on a
-    head-then-put window. The object's ``sha256`` metadata is the
-    idempotency key: same content → same key returns quietly.
+    head-then-put window. The object's ``sha256`` metadata is a *hint* for
+    the idempotent path: when it matches the submitted content the current
+    version is read back and compared byte-for-byte before its reference
+    is returned, because metadata is whatever the writer said it was.
 
     Object Lock (``ObjectLockMode=COMPLIANCE`` + retain-until) makes the
-    bucket itself refuse overwrite/delete until the date passes — the
-    production WORM story the design doc calls for. It requires the bucket
-    to have lock enabled; retention_days=0 skips the params (startup logs a
-    warning).
+    bucket refuse to delete or overwrite the *retained version* until the
+    date passes — the production WORM story the design doc calls for. It
+    does not stop the key from receiving newer versions or a delete
+    marker; that is exactly why references pin a version (below). It
+    requires the bucket to have lock enabled; retention_days=0 skips the
+    params (startup logs a warning).
 
     Object versions: every write records the exact ``VersionId`` S3 returned
     in the reference it hands back (``s3v1:{VersionId}:{key}``), and every
@@ -417,14 +421,20 @@ class S3Storage(Backend):
             else:
                 raise StorageError(f"s3 head_object failed: {code}") from e
         if head is not None:
-            if head.get("Metadata", {}).get("sha256") == digest:
-                # Idempotent: the same content is already the current
-                # version. Pin *that* version; a later write to the key
-                # cannot make this reference resolve to something else.
-                return self._pinned_ref(object_key, head.get("VersionId"))
-            raise WriteOnceViolation(
-                f"write-once violation: {object_key} exists with different content"
-            )
+            if head.get("Metadata", {}).get("sha256") != digest:
+                raise WriteOnceViolation(
+                    f"write-once violation: {object_key} exists with different content"
+                )
+            # Metadata says the same content is already the current version.
+            # Metadata is writer-supplied, so pin that exact version and
+            # read it back before believing it: a version whose bytes differ
+            # under matching metadata is a conflict, not an idempotent hit.
+            ref = self._pinned_ref(object_key, head.get("VersionId"))
+            if self._fetch(ref) != data:
+                raise WriteOnceViolation(
+                    f"write-once violation: {object_key} exists with different content"
+                )
+            return ref
         params = {
             "Bucket": self._bucket,
             "Key": object_key,
@@ -461,6 +471,14 @@ class S3Storage(Backend):
         return params, version_id
 
     def read(self, ref: str) -> bytes:
+        return self._fetch(ref)
+
+    def _fetch(self, ref: str) -> bytes:
+        """GetObject for ``ref`` with the response checked before its body
+        is trusted. For a pinned reference the response must name exactly
+        the requested version — a response without ``VersionId`` is not
+        proof that the requested version was served — and must not be a
+        delete marker. The body stream is closed on every path."""
         params, version_id = self._version_params(ref)
         try:
             response = self._client.get_object(**params)
@@ -477,13 +495,28 @@ class S3Storage(Backend):
                     "current version in its place"
                 ) from e
             raise StorageError(f"s3 get_object failed: {code or type(e).__name__}") from e
-        if version_id is not None:
-            served = response.get("VersionId") if isinstance(response, dict) else None
-            if served is not None and served != version_id:
-                raise StorageError("s3 served a different object version than the one requested")
-        elif isinstance(response, dict) and response.get("DeleteMarker"):
-            raise StorageError("s3 current version is a delete marker")
-        return response["Body"].read()
+        if not isinstance(response, dict) or "Body" not in response:
+            raise StorageError("s3 get_object returned no body")
+        body = response["Body"]
+        try:
+            if response.get("DeleteMarker"):
+                raise StorageError("s3 served a delete marker instead of object content")
+            if version_id is not None:
+                served = response.get("VersionId")
+                if served is None:
+                    raise StorageError(
+                        "s3 response did not name the object version it served; refusing to "
+                        "treat it as the requested version"
+                    )
+                if served != version_id:
+                    raise StorageError(
+                        "s3 served a different object version than the one requested"
+                    )
+            return body.read()
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
 
     def exists(self, ref: str) -> bool:
         params, version_id = self._version_params(ref)

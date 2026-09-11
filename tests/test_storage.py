@@ -73,6 +73,7 @@ class FakeS3:
         self.versions: dict[str, list[dict]] = {}
         self.puts: list[dict] = []
         self.calls: list[tuple[str, dict]] = []
+        self.bodies: list[io.BytesIO] = []
         self.location = location
         self.versioning = versioning
         self.object_lock = object_lock
@@ -168,7 +169,9 @@ class FakeS3:
     def get_object(self, **kw):
         self.calls.append(("get_object", kw))
         entry = self._lookup(kw)
-        response = {"Body": io.BytesIO(entry["body"])}
+        body = io.BytesIO(entry["body"])
+        self.bodies.append(body)
+        response = {"Body": body}
         if entry.get("vid") is not None:
             response["VersionId"] = entry["vid"]
         return response
@@ -612,8 +615,87 @@ def test_served_version_mismatch_is_refused():
         return response
 
     fake.get_object = lying_get
+    fake.calls.clear()
     with pytest.raises(StorageError, match="different object version"):
         s.read(ref)
+    gets = [kw for name, kw in fake.calls if name == "get_object"]
+    assert [kw.get("VersionId") for kw in gets] == [parse_s3_ref(ref)[1]]
+    assert fake.bodies[-1].closed
+
+
+def test_pinned_read_requires_the_response_to_name_the_version():
+    """A GET for a pinned reference whose response carries no VersionId is
+    not evidence that the requested version was served (an S3-compatible
+    backend that ignores the parameter would look exactly like this)."""
+    s, fake = _s3()
+    ref = s.write_once(KEY, b"x")
+    real_get = fake.get_object
+    fake.get_object = lambda **kw: {k: v for k, v in real_get(**kw).items() if k != "VersionId"}
+    fake.calls.clear()
+    with pytest.raises(StorageError, match="did not name the object version"):
+        s.read(ref)
+    gets = [kw for name, kw in fake.calls if name == "get_object"]
+    assert len(gets) == 1 and gets[0]["VersionId"] == parse_s3_ref(ref)[1]
+    assert fake.bodies[-1].closed
+    # Legacy references make no such demand: there is no version to match.
+    assert s.read(KEY) == b"x"
+
+
+def test_pinned_read_rejects_a_delete_marker_flag_on_a_success_response():
+    s, fake = _s3()
+    ref = s.write_once(KEY, b"x")
+    real_get = fake.get_object
+
+    def flagged(**kw):
+        response = real_get(**kw)
+        response["DeleteMarker"] = True
+        return response
+
+    fake.get_object = flagged
+    fake.calls.clear()
+    with pytest.raises(StorageError, match="delete marker"):
+        s.read(ref)
+    with pytest.raises(StorageError, match="delete marker"):
+        s.read(KEY)
+    assert all(fake.bodies[i].closed for i in (-1, -2))
+    gets = [kw for name, kw in fake.calls if name == "get_object"]
+    assert len(gets) == 2  # one per read; no retry without the version
+
+
+def test_read_closes_the_body_on_success():
+    s, fake = _s3()
+    ref = s.write_once(KEY, b"payload")
+    assert s.read(ref) == b"payload"
+    assert fake.bodies[-1].closed
+
+
+def test_idempotent_write_verifies_the_exact_version_bytes():
+    """Object metadata is writer-supplied. A current version whose sha256
+    metadata matches but whose bytes do not is a conflict, never an
+    idempotent hit; a genuine repeat reads the pinned version back first."""
+    s, fake = _s3()
+    content = b"the recorded original"
+    first = s.write_once(KEY, content)
+    digest = _sha(content)
+    fake.overwrite(KEY, b"different bytes, same metadata", meta={"sha256": digest})
+    fake.calls.clear()
+    with pytest.raises(WriteOnceViolation):
+        s.write_once(KEY, content)
+    gets = [kw for name, kw in fake.calls if name == "get_object"]
+    assert len(gets) == 1
+    assert gets[0]["VersionId"] == fake.versions[KEY][-1]["vid"]
+    assert not any(name == "put_object" for name, _ in fake.calls)
+    assert fake.bodies[-1].closed
+
+    # Genuine repeat: the current version really holds the bytes.
+    fake.overwrite(KEY, content, meta={"sha256": digest})
+    fake.calls.clear()
+    again = s.write_once(KEY, content)
+    assert parse_s3_ref(again) == (KEY, fake.versions[KEY][-1]["vid"])
+    assert again != first
+    gets = [kw for name, kw in fake.calls if name == "get_object"]
+    assert [kw.get("VersionId") for kw in gets] == [fake.versions[KEY][-1]["vid"]]
+    assert not any(name == "put_object" for name, _ in fake.calls)
 
 
 @pytest.mark.parametrize("versioning", [None, "Suspended"])

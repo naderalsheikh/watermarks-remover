@@ -50,15 +50,23 @@ sha256=, size=)` helper packages it for readers that currently call `read`.
   `S3Storage(require_object_versions=False)` explicitly; `storage_from_config`
   passes `cfg.s3_require_object_versions` if the config module ever grows
   that field, and defaults to pinning.
-- **Idempotent writes** (same content already the current version) pin the
-  current version's id; no second PUT.
+- **Idempotent writes** (metadata says the same content is already the
+  current version) pin the current version's id, read that exact version
+  back, and compare it byte-for-byte with the submitted content before
+  returning; the `sha256` object metadata is writer-supplied and is only a
+  hint. Matching metadata over different bytes is a `WriteOnceViolation`.
+  No second PUT either way.
 - **Reads of a pinned reference** address the version explicitly. `NoSuchVersion`
   raises `VersionUnavailable` ("no longer exists; refusing to read the key's
   current version"). A recorded version that is a delete marker (S3 answers
   405 `MethodNotAllowed`) raises `VersionUnavailable` as corruption: no
-  write of ours ever records a delete marker. A response whose `VersionId`
-  differs from the request raises `StorageError`. There is no code path that
-  drops the version id and retries.
+  write of ours ever records a delete marker. A successful response must
+  name the version it served: a `VersionId` that differs from the request,
+  or a response with no `VersionId` at all (what a backend that ignores the
+  parameter would return), raises `StorageError`; so does a success response
+  flagged `DeleteMarker`. There is no code path that drops the version id
+  and retries; the tests assert this from the request log. Response bodies
+  are closed on success and on every validation failure.
 - **`exists` of a pinned reference** is `False` for a permanently removed
   version and raises for a delete-marker version.
 - **Newer versions and delete markers at the key** do not affect pinned
