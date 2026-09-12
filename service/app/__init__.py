@@ -10,7 +10,7 @@ Single-tenant FastAPI app over the engine MVP library:
   verify -> write-once) so a failed gate produces nothing
 - download bundles contain derivative + reports + manifest by default;
   the original rides along only behind an explicit opt-in flag (audited)
-- malware scanning is an interface with an honest stub implementation
+- uploads use bounded archive screening and ClamAV when available
 
 Jobs never execute in the API process (PR 17): the runner spawns a
 one-shot worker subprocess per job, or a hardened digest-pinned container
@@ -28,6 +28,15 @@ _SCRIPTS = _Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPTS) not in _sys.path:
     _sys.path.insert(0, str(_SCRIPTS))
 
-from .main import create_app  # noqa: E402
-
 __all__ = ["create_app"]
+
+
+def __getattr__(name: str):
+    # Importing app.worker must not initialize the FastAPI/SQLAlchemy/Alembic
+    # module graph. Keep the public factory available for API callers while
+    # letting standalone workers and offline tools import only what they use.
+    if name == "create_app":
+        from .main import create_app
+
+        return create_app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -104,10 +104,11 @@ host and vice versa (`test_windows_spelled_references_restore_on_this_host`).
    receipt JSON) are re-rooted from the declared old root to the new root.
    Each must be an absolute path under the old root with no empty, `.` or
    `..` segment, and its re-rooted form must resolve inside the new root;
-   otherwise refusal. A digest over every other table (`matters`,
-   `matter_acl`, `audit_events`, `attestation_uses`, `batches`, `releases`,
-   `job_queue`, `alembic_version`) is taken before and after the update
-   and must be identical. After the update no reference column may still
+   otherwise refusal. A digest over every discovered table, including
+   `admissions` and tables unknown to the tool, is taken before and after
+   the update and must be identical. Only the three rebased columns are
+   excluded; other columns in `documents` and `jobs` are also checked.
+   After the update no reference column may still
    mention the old root.
 7. **Audit chains.** Every matter's events are re-verified with the
    application's own `verify_chain` (seq contiguity, `prev_hash` linkage,
