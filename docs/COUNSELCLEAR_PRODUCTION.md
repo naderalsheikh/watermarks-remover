@@ -371,6 +371,8 @@ require, which this product does not yet implement.
       `/health/ready`
 - [ ] Startup posture log reviewed: `worker_mode`, `auth_mode`, `db_backend`,
       no warnings about subprocess mode / missing clamscan / empty allowlist
+- [ ] `GET /v1` reports the actual release/commit in `version`, not `"dev"`
+      — the image was built with `--build-arg CC_VERSION=...` (§2)
 - [ ] JSON request logs shipped somewhere durable; `X-Request-ID` echoed to
       clients matches log lines
 - [ ] ClamAV is available and its definitions are current under the deployment
