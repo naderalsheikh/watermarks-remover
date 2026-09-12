@@ -621,8 +621,8 @@ def test_clean_install_boots_shipped_container_and_static_ui(tmp_path):
             restored_audit.raise_for_status()
             assert restored_audit.json()["chain_ok"] is True
 
-            assert client.get("/v1/matters").status_code == 401
             client.post("/v1/auth/logout").raise_for_status()
+            assert client.get("/v1/matters").status_code == 401
 
         _teardown(restored_files)
     finally:
