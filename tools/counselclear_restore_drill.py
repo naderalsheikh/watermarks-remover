@@ -80,7 +80,8 @@ DB_NAME = "counselclear.sqlite3"
 DB_SIDECARS = (f"{DB_NAME}-wal", f"{DB_NAME}-shm", f"{DB_NAME}-journal")
 ENVELOPE_MAGIC = b"CCENC"
 ACTIVE_JOB_STATES = ("queued", "running")
-# The only tables that carry filesystem references, and the only columns
+# The document/job tables whose filesystem references this drill can relocate.
+# A nonempty mail spool is refused by _check_drained. The only columns
 # in them the drill may touch. Every other table -- including ones added by
 # later migrations, such as ``admissions`` -- is preserved as copied and
 # proven unchanged by digest; the two reference tables are digested with
@@ -129,6 +130,7 @@ class DrillReport:
                 "KMS-wrapped key material",
                 "external identity providers",
                 "cloud restore",
+                "retained mail spool relocation",
             ],
         }
     )
@@ -368,6 +370,17 @@ def _open_database(destination: Path, report: DrillReport) -> sqlite3.Connection
 
 
 def _check_drained(con: sqlite3.Connection, report: DrillReport) -> None:
+    mail_table = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mail_submissions'"
+    ).fetchone()
+    mail_count = (
+        con.execute("SELECT COUNT(*) FROM mail_submissions").fetchone()[0] if mail_table else 0
+    )
+    report.database["mail_submissions"] = mail_count
+    if mail_count:
+        raise Refused(
+            "mail spool relocation is not qualified: snapshot contains retained mail submissions"
+        )
     active_jobs = [
         (row["id"], row["status"])
         for row in con.execute(
