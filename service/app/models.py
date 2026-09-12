@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, BigInteger, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,6 +42,10 @@ class Matter(Base):
     # matter exactly like any other -- it's real data in the same tables,
     # just clearly labeled, never hidden from the person who created it.
     is_demo: Mapped[bool] = mapped_column(default=False)
+    client_name: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    matter_number: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    status: Mapped[str] = mapped_column(String(12), default="active", server_default="active")
+    organization_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class Document(Base):
@@ -53,6 +57,10 @@ class Document(Base):
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     bytes: Mapped[int] = mapped_column()
     storage_path: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    # An operator-authored relationship; never a replacement of custody bytes.
+    previous_revision_id: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    organization_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
 
 

@@ -121,16 +121,16 @@ def test_upgrade_preserves_legacy_execution_and_round_trips_new_pin(tmp_path, qu
             }
         )
         assert "worker_mode" not in columns
-        con.execute(Matter.__table__.insert().values(id="m", name="Synthetic"))
         con.execute(
-            Document.__table__.insert().values(
-                id="d",
-                matter_id="m",
-                filename="x.txt",
-                bytes=0,
-                sha256="0" * 64,
-                storage_path="legacy",
+            text(
+                "INSERT INTO matters (id,name,created_utc,is_demo) VALUES ('m','Synthetic','2026-01-01',false)"
             )
+        )
+        con.execute(
+            text(
+                "INSERT INTO documents (id,matter_id,filename,bytes,sha256,storage_path,created_utc) VALUES ('d','m','x.txt',0,:hash,'legacy','2026-01-01')"
+            ),
+            {"hash": "0" * 64},
         )
         con.execute(
             Job.__table__.insert().values(

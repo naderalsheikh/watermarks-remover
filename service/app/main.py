@@ -21,7 +21,7 @@ import schemas_meta  # published-schema registry: pins artifacts to contracts (P
 from common import MAX_INPUT_BYTES  # a size constant, not a parser
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, or_, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -1342,7 +1342,32 @@ class LoginBody(BaseModel):
 
 
 class MatterBody(BaseModel):
-    name: str
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=200)
+    client_name: str = Field(default="", max_length=200)
+    matter_number: str = Field(default="", max_length=80)
+
+
+class MatterOrganizationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    client_name: str = Field(max_length=200)
+    matter_number: str = Field(max_length=80)
+    status: str
+    expected_version: int = Field(ge=0, strict=True)
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, value):
+        if value not in ("active", "closed"):
+            raise ValueError("status must be active or closed")
+        return value
+
+
+class DocumentOrganizationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    category: str = Field(max_length=80)
+    previous_revision_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{16}$")
+    expected_version: int = Field(ge=0, strict=True)
 
 
 class LegalJustificationBody(BaseModel):
@@ -2156,6 +2181,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         limit: int = 100,
         offset: int = 0,
         q: str = "",
+        status: str = "",
     ):
         limit = min(max(1, limit), 500)  # server-capped, never unbounded
         offset = max(0, offset)
@@ -2170,7 +2196,17 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # else here -- it can never surface a matter name the caller
             # couldn't otherwise list. ilike() compiles to a case-insensitive
             # LIKE on every backend this app supports (sqlite/Postgres).
-            base = base.filter(Matter.name.ilike(f"%{_escape_like(q)}%", escape="\\"))
+            base = base.filter(
+                or_(
+                    Matter.name.ilike(f"%{_escape_like(q)}%", escape="\\"),
+                    Matter.client_name.ilike(f"%{_escape_like(q)}%", escape="\\"),
+                    Matter.matter_number.ilike(f"%{_escape_like(q)}%", escape="\\"),
+                )
+            )
+        if status:
+            if status not in ("active", "closed"):
+                raise HTTPException(422, "status must be active or closed")
+            base = base.filter(Matter.status == status)
         total = base.count()
         matters = base.order_by(Matter.created_utc.desc()).offset(offset).limit(limit)
         return {
@@ -2185,7 +2221,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     def create_matter(
         body: MatterBody, user: str = Depends(principal), s: Session = Depends(db_session)
     ):
-        matter = Matter(name=body.name)
+        matter = Matter(
+            name=body.name, client_name=body.client_name, matter_number=body.matter_number
+        )
         s.add(matter)
         s.flush()
         # The creating principal gets OWNER_PERMS (minus download_original,
@@ -2197,7 +2235,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             matter_id=matter.id,
             actor_id=user,
             action="matter.create",
-            payload={"name": body.name},
+            payload={
+                "name": body.name,
+                "client_name": body.client_name,
+                "matter_number": body.matter_number,
+            },
         )
         s.commit()
         return _matter_dict(matter, perms_of(s, matter.id, user))
@@ -2260,6 +2302,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         limit: int = 100,
         offset: int = 0,
         q: str = "",
+        category: str | None = None,
+        document_id: str = "",
     ):
         limit = min(max(1, limit), 500)  # server-capped, never unbounded
         offset = max(0, offset)
@@ -2269,6 +2313,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         q = q.strip()
         if q:
             base = base.filter(Document.filename.ilike(f"%{_escape_like(q)}%", escape="\\"))
+        if category is not None:
+            base = base.filter(Document.category == category.strip())
+        if document_id:
+            base = base.filter(Document.id == document_id)
         total = base.count()
         docs = base.order_by(Document.created_utc.desc()).offset(offset).limit(limit)
         return {
@@ -2288,6 +2336,140 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     ):
         _require(matter_id, "read", s, user)
         return _doc_dict(_document(matter_id, doc_id, s))
+
+    # Organization edits are admin-only, transactional and audit-recorded.
+    # Lock one matter on PostgreSQL to serialize revision graph edits. SQLite
+    # already acquires BEGIN IMMEDIATE for the transaction in make_engine.
+    def _lock_organization(matter_id, s, user):
+        _require(matter_id, "read", s, user)
+        _require(matter_id, "admin", s, user)
+        m = s.query(Matter).filter_by(id=matter_id).with_for_update().populate_existing().first()
+        if m is None:
+            raise HTTPException(404, "matter not found")
+        return m
+
+    @app.put("/v1/matters/{matter_id}/organization")
+    def organize_matter(
+        matter_id: str,
+        body: MatterOrganizationBody,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        m = _lock_organization(matter_id, s, user)
+        if body.expected_version != m.organization_version:
+            raise HTTPException(409, "Matter details changed. Reload and review before saving.")
+        values = body.model_dump(exclude={"expected_version"})
+        changes = {
+            key: {"before": getattr(m, key), "after": value}
+            for key, value in values.items()
+            if getattr(m, key) != value
+        }
+        if changes:
+            for key, value in values.items():
+                setattr(m, key, value)
+            m.organization_version += 1
+            append_event(
+                s,
+                matter_id=matter_id,
+                actor_id=user,
+                action="matter.organize",
+                payload={"changes": changes, "version": m.organization_version},
+                commit=False,
+            )
+            s.commit()
+        return _matter_dict(m, perms_of(s, matter_id, user))
+
+    @app.get("/v1/matters/{matter_id}/document-categories")
+    def document_categories(
+        matter_id: str, user: str = Depends(principal), s: Session = Depends(db_session)
+    ):
+        _require(matter_id, "read", s, user)
+        rows = (
+            s.query(Document.category)
+            .filter_by(matter_id=matter_id)
+            .distinct()
+            .order_by(Document.category)
+            .all()
+        )
+        return {"categories": [row[0] for row in rows]}
+
+    @app.put("/v1/matters/{matter_id}/documents/{doc_id}/organization")
+    def organize_document(
+        matter_id: str,
+        doc_id: str,
+        body: DocumentOrganizationBody,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        _lock_organization(matter_id, s, user)
+        doc = _document(matter_id, doc_id, s)
+        if body.expected_version != doc.organization_version:
+            raise HTTPException(409, "Document details changed. Reload and review before saving.")
+        # Walk stored links under the matter lock: no self-link, foreign
+        # matter relationship, cycle, or propagation of a corrupt chain.
+        seen = {doc_id}
+        previous = body.previous_revision_id
+        while previous:
+            if previous in seen:
+                raise HTTPException(409, "Revision link would create a cycle.")
+            seen.add(previous)
+            parent = s.get(Document, previous)
+            if parent is None or parent.matter_id != matter_id:
+                raise HTTPException(422, "Earlier revision must be a document in this matter.")
+            previous = parent.previous_revision_id
+        values = body.model_dump(exclude={"expected_version"})
+        changes = {
+            key: {"before": getattr(doc, key), "after": value}
+            for key, value in values.items()
+            if getattr(doc, key) != value
+        }
+        if changes:
+            for key, value in values.items():
+                setattr(doc, key, value)
+            doc.organization_version += 1
+            append_event(
+                s,
+                matter_id=matter_id,
+                actor_id=user,
+                action="document.organize",
+                payload={
+                    "document_id": doc_id,
+                    "changes": changes,
+                    "version": doc.organization_version,
+                },
+                commit=False,
+            )
+            s.commit()
+        return _doc_dict(doc)
+
+    @app.get("/v1/matters/{matter_id}/documents/{doc_id}/revisions")
+    def document_revisions(
+        matter_id: str,
+        doc_id: str,
+        offset: int = 0,
+        limit: int = 50,
+        user: str = Depends(principal),
+        s: Session = Depends(db_session),
+    ):
+        _require(matter_id, "read", s, user)
+        doc = _document(matter_id, doc_id, s)
+        parent = s.get(Document, doc.previous_revision_id) if doc.previous_revision_id else None
+        if parent is not None and parent.matter_id != matter_id:
+            parent = None  # Never disclose a foreign document, even after DB corruption.
+        base = s.query(Document).filter_by(matter_id=matter_id, previous_revision_id=doc_id)
+        offset, limit = max(0, offset), min(100, max(1, limit))
+        return {
+            "previous": _doc_dict(parent) if parent else None,
+            "next": [
+                _doc_dict(d)
+                for d in base.order_by(Document.created_utc, Document.id)
+                .offset(offset)
+                .limit(limit)
+            ],
+            "total": base.count(),
+            "offset": offset,
+            "limit": limit,
+        }
 
     # --- jobs ---------------------------------------------------------------
 
@@ -4993,7 +5175,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         return r
 
     def _matter_dict(m: Matter, perms: list[str] | None = None) -> dict:
-        d: dict = {"id": m.id, "name": m.name, "created_utc": m.created_utc, "is_demo": m.is_demo}
+        d: dict = {
+            "id": m.id,
+            "name": m.name,
+            "created_utc": m.created_utc,
+            "is_demo": m.is_demo,
+            "client_name": m.client_name,
+            "matter_number": m.matter_number,
+            "status": m.status,
+            "organization_version": m.organization_version,
+        }
         # perms is the calling principal's OWN grants on this matter --
         # only computed by routes that already know who's asking (get_matter,
         # create_matter), not list_matters (would be an N+1 query per row
@@ -5009,6 +5200,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "id": d.id,
             "matter_id": d.matter_id,
             "filename": d.filename,
+            "category": d.category,
+            "previous_revision_id": d.previous_revision_id,
+            "organization_version": d.organization_version,
             "sha256": d.sha256,
             "bytes": d.bytes,
             "created_utc": d.created_utc,

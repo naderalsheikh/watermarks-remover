@@ -1,5 +1,7 @@
 "use client";
 
+import { DocumentOrganization, MatterOrganization } from "@/components/DocumentOrganization";
+
 import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -489,6 +491,7 @@ function DocumentRow({
   releaseProfiles,
   recipientTypes,
   onJobStarted,
+  onOrganized,
   highlighted,
   selected,
   onToggleSelected,
@@ -500,6 +503,7 @@ function DocumentRow({
   releaseProfiles: ReleaseProfile[];
   recipientTypes: string[];
   onJobStarted: () => void;
+  onOrganized: () => void;
   highlighted: boolean;
   selected: boolean;
   onToggleSelected: (id: string, checked: boolean) => void;
@@ -605,6 +609,8 @@ function DocumentRow({
           onDone={onJobStarted}
         />
       )}
+
+      <DocumentOrganization doc={doc} canEdit={!!perms?.includes("admin")} onSaved={onOrganized} />
 
       {/* Job history is execution detail, not the primary signal -- the
           release-aware badge above already says what matters. Collapsed
@@ -1048,6 +1054,8 @@ function MatterView({
   const perms = matterQ.data?.perms;
   const uploadGate = permissionGate(perms, "upload");
   const [docSearch, setDocSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const categoriesQ = useApiData(() => api.get<{ categories: string[] }>(`/v1/matters/${matterId}/document-categories`), `categories:${matterId}`);
   const searchInput = useRef<HTMLInputElement>(null);
   const debouncedDocSearch = useDebouncedValue(docSearch.trim(), 300);
   const docsQ = usePaginatedList<Document>(
@@ -1055,14 +1063,16 @@ function MatterView({
       api
         .get<{ documents: Document[]; total: number }>(
           `/v1/matters/${matterId}/documents?limit=${PAGE_SIZE}&offset=${offset}` +
-            `&q=${encodeURIComponent(debouncedDocSearch)}`,
+            `&q=${encodeURIComponent(debouncedDocSearch)}` +
+            (categoryFilter === "all" ? "" : `&category=${encodeURIComponent(categoryFilter.slice(2))}`) +
+            (highlightDocId ? `&document_id=${encodeURIComponent(highlightDocId)}` : ""),
         )
         .then((r) => ({ items: r.documents, total: r.total })),
     // Search runs on the server (same GET, `q` param) across every
     // document in this matter, not just what's loaded -- changing it
     // resets pagination to page 1 of the new result, like a matter-id
     // change does elsewhere.
-    `docs:${matterId}:${debouncedDocSearch}`,
+    `docs:${matterId}:${debouncedDocSearch}:${categoryFilter}:${highlightDocId ?? ""}`,
   );
   const jobsQ = usePaginatedList<Job>(
     (offset) =>
@@ -1140,6 +1150,7 @@ function MatterView({
       await api.post(`/v1/matters/${matterId}/documents`, body);
       if (fileInput.current) fileInput.current.value = "";
       docsQ.reload();
+      categoriesQ.reload();
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Upload failed");
     } finally {
@@ -1151,6 +1162,7 @@ function MatterView({
   function resetDocumentFilters() {
     setDocSearch("");
     setStatusFilter("all");
+    setCategoryFilter("all");
     searchInput.current?.focus();
   }
   // docSearch above already narrowed docsQ.items on the server; this filter
@@ -1224,9 +1236,12 @@ function MatterView({
       )}
       {matterQ.error && <p className="mb-4 text-sm text-red-600">{matterQ.error}</p>}
 
+      {matterQ.data && <MatterOrganization matter={matterQ.data} onSaved={matterQ.reload} />}
+      {highlightDocId && <p className="my-4 text-sm">Showing the linked document. <Link className="underline" href={`/matters/view?id=${matterId}`}>Show all documents</Link></p>}
+
       {matterQ.data && <ReportsAndExports matterId={matterId} perms={perms} />}
 
-      {!docsQ.loading && !docsQ.error && !debouncedDocSearch && (
+      {!docsQ.loading && !docsQ.error && !debouncedDocSearch && categoryFilter === "all" && !highlightDocId && (
         <MatterStats
           documents={docsQ.items}
           documentsTotal={docsQ.total}
@@ -1298,6 +1313,15 @@ function MatterView({
         </p>
       )}
 
+      <div className="my-4 max-w-sm">
+        <label className="mb-1 block text-sm" htmlFor="document-category-filter">Filter by category</label>
+        <select id="document-category-filter" className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}>
+          <option value="all">All categories</option>
+          {categoryFilter !== "all" && !categoriesQ.data?.categories.includes(categoryFilter.slice(2)) && <option value={categoryFilter}>{categoryFilter.slice(2) || "Uncategorized"}</option>}
+          {(categoriesQ.data?.categories ?? []).map(c => <option key={c} value={`c:${c}`}>{c || "Uncategorized"}</option>)}
+        </select>
+        {categoriesQ.error && <p role="alert" className="mt-1 text-sm text-red-600">{categoriesQ.error}</p>}
+      </div>
       <section
         aria-labelledby="documents-heading"
         className="mb-4 space-y-3 rounded-lg border border-border p-4"
@@ -1337,8 +1361,8 @@ function MatterView({
           )}
         </div>
         <p id="document-search-help" className="text-xs text-muted">
-          Search covers every filename in this matter. Status filters cover loaded documents
-          and loaded job history only.
+          {highlightDocId ? "Search is limited to the linked document." : "Search covers every filename in this matter."}
+          {" "}Status filters cover loaded documents and loaded job history only.
         </p>
         <div className="flex flex-wrap gap-1.5">
           <button
@@ -1469,8 +1493,8 @@ function MatterView({
         <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
           {debouncedDocSearch
             ? `No documents match "${debouncedDocSearch}".`
-            : "No documents yet — upload one above to inspect or release it."}
-          {debouncedDocSearch && (
+            : highlightDocId ? "This linked document is unavailable in this matter." : categoryFilter !== "all" ? "No documents in this category." : "No documents yet — upload one above to inspect or release it."}
+          {(debouncedDocSearch || categoryFilter !== "all") && (
             <button type="button" onClick={resetDocumentFilters} className="mt-3 block w-full font-medium text-accent hover:underline">
               Clear filters and show all documents
             </button>
@@ -1514,7 +1538,8 @@ function MatterView({
                     jobs={jobsQ.items}
                     releaseProfiles={releaseProfilesQ.data?.release_profiles ?? []}
                     recipientTypes={releaseProfilesQ.data?.recipient_types ?? []}
-                    onJobStarted={jobsQ.reload}
+                    onOrganized={() => { docsQ.reload(); categoriesQ.reload(); }}
+                onJobStarted={jobsQ.reload}
                     highlighted={doc.id === highlightDocId}
                     selected={selected.has(doc.id)}
                     onToggleSelected={(id, checked) =>
@@ -1558,7 +1583,7 @@ function MatterViewInner() {
   // Audit-log document cross-links (web/app/matters/audit/page.tsx) land
   // here with ?doc= — scrolled to and highlighted in DocumentRow below,
   // since there's no separate per-document page to link to instead.
-  return <MatterView key={id} matterId={id} highlightDocId={params.get("doc")} />;
+  return <MatterView key={`${id}:${params.get("doc") ?? ""}`} matterId={id} highlightDocId={params.get("doc")} />;
 }
 
 export default function MatterViewPage() {
