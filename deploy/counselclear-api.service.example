@@ -51,8 +51,9 @@ ExecStart=/opt/counselclear/.venv/bin/python -m uvicorn app.asgi:app \
 # brute-force throttle keys on the socket peer, never X-Forwarded-For, so
 # forwarding headers cannot weaken it.
 
-# Crash mid-job is survivable by design: create_app sweeps orphaned
-# queued/running jobs to failed on boot before serving.
+# Durable jobs recover after their database lease expires; completed trusted
+# receipts can be published without re-running the engine. Legacy unowned jobs
+# retain the startup failure behavior. Keep the data root and admitted image.
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s

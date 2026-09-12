@@ -56,10 +56,10 @@ derivatives, reports, staging, and backups remain separate work; original-store
 encryption does not cover them. Any remediation of existing records requires an
 inventory and a procedure that preserves their evidence and access semantics.
 
-Use one API process only. Do not start a second instance against the same database
-until job ownership and restart recovery are corrected; the current startup
-reconciliation cannot distinguish another live process's jobs from abandoned
-work.
+Use one API process for the shipped deployment. Durable database leases now
+distinguish live owners and recover expired jobs; SQLite and PostgreSQL concurrency
+are tested. Shared-volume paths, ingress, identity, and restore still need
+qualification before deploying multiple replicas. See COUNSELCLEAR_JOB_RECOVERY.md.
 
 Local logical storage keys and extracted packet member names now use `/` on
 every OS. Encrypted reads preserve previously readable Windows native-key
@@ -102,7 +102,8 @@ database, including snapshot bytes, in the upgrade backup and restore procedure:
 downgrading to `0011` drops those bytes, and the old application regenerates
 certificates. Schema downgrade is therefore not a byte-preserving rollback after
 snapshots have been used. PostgreSQL migration SQL is checked, but PostgreSQL
-runtime concurrency is not qualified by the local SQLite tests.
+runtime concurrency is covered by dedicated live PostgreSQL CI, separately
+from these snapshot tests.
 
 ## Browser verification
 
@@ -161,11 +162,12 @@ complete UI/service packaging still needs the separate deployment workstream.
 
 ## Remaining shared release blockers
 
-- Durable job admission, ownership, finalization, and restart recovery.
-- Exact S3 object-version references and tested storage/key recovery.
+- Deployment-specific storage/key recovery. Durable jobs and request receipts
+  are implemented and tested; S3 originals now retain exact object versions.
 - Production configuration propagation, readiness, and one qualified complete
   deployment, including UI, API, workers, storage, TLS, and backup/restore.
-- Actual IdP qualification and consistent operator identity in custody records.
+- Actual IdP qualification. New jobs now retain the admitted operator and
+  validate that identity against the worker manifest.
 - Release-page decision hierarchy, unavailable-evidence states, accessible forms,
   and the shared brand/system refinements.
 - Edition packaging, tenant isolation, administration, and live mail integration
