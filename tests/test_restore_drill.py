@@ -989,3 +989,40 @@ def test_root_mapper_rejects_escapes_and_foreign_flavours(tmp_path):
         win.rebase("D:\\cc\\data\\..\\x.docx", column="c")
     with pytest.raises(drill.Refused, match="absolute"):
         drill.RootMapper("cc/data", tmp_path / "new")
+
+
+@pytest.mark.parametrize(
+    "mail_state",
+    [
+        "admitted",
+        "processing",
+        "held",
+        "refused",
+        "released",
+        "submitted",
+        "acknowledged",
+        "ambiguous",
+    ],
+)
+def test_restore_refuses_any_retained_mail_spool_before_relocation(mail_state):
+    # A minimal snapshot proves the precondition is checked before any document
+    # rebasing; even terminal mail rows carry refs this tool cannot relocate yet.
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        con.execute("CREATE TABLE mail_submissions (id TEXT, status TEXT)")
+        con.execute("INSERT INTO mail_submissions VALUES (?, ?)", ("retained", mail_state))
+        report = drill.DrillReport("source", "destination", "old-root")
+        with pytest.raises(drill.Refused, match="mail spool relocation is not qualified"):
+            drill._check_drained(con, report)
+        assert report.database["mail_submissions"] == 1
+
+
+def test_empty_mail_table_does_not_change_drained_snapshot_check():
+    with sqlite3.connect(":memory:") as con:
+        con.row_factory = sqlite3.Row
+        for table in ("mail_submissions", "jobs", "releases"):
+            con.execute(f"CREATE TABLE {table} (id TEXT, status TEXT)")
+        con.execute("CREATE TABLE batches (id TEXT, finished_utc TEXT)")
+        report = drill.DrillReport("source", "destination", "old-root")
+        drill._check_drained(con, report)
+        assert report.database["mail_submissions"] == 0

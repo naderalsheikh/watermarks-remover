@@ -35,6 +35,7 @@ It does not qualify, and refuses rather than pretends:
 | Live backup acquisition (quiescing the app, snapshotting a running root) | The snapshot is an input; the drill checks it is drained and copies it |
 | S3 object storage (`s3v1:` or key-only references) | Refused: "object-storage (S3) references present" |
 | PostgreSQL (`COUNSELCLEAR_DATABASE_URL` not SQLite) | Refused |
+| Retained mail submissions (any state) | Refused until whole-message spool relocation and delivery recovery are qualified |
 | KMS-wrapped envelopes (`kms:` key id in the envelope header) | Refused: only the local volume key can be opened offline |
 | External identity (OIDC) | Not exercised; the drill verifies the local password hash file only by presence |
 | Cloud restore, cross-region replication | Not exercised |

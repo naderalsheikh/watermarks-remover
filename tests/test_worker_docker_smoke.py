@@ -141,6 +141,45 @@ def _encrypted_custody_flow(tmp_path, monkeypatch, mode, image=""):
             assert mail_job.worker_image == image
             assert mail_job.result_json["manifest"]["operator"] == {"id": service_actor}
             assert mail_job.execution_receipt
+        # Whole-message receipt and outbox use the same image, encrypted store,
+        # retained jobs and full envelope; acquiring a ticket does not send mail.
+        from app.mail import Envelope
+        from app.mail.fixtures import AttachmentSpec, build_message
+        from app.mail.submissions import MailSubmissionRegistry
+
+        registry = MailSubmissionRegistry(
+            cfg=cfg,
+            session_factory=dispatcher._session_factory,
+            storage=storage_from_config(cfg),
+            binding=processor.binding,
+        )
+        raw_message = build_message(
+            attachments=(
+                AttachmentSpec(
+                    "spa.docx",
+                    original,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            )
+        )
+        envelope = Envelope("sender@example.test", ("to@example.test", "bcc@example.test"))
+        submission = registry.admit(
+            raw_message,
+            envelope,
+            TrustedCallerContext(
+                "synthetic-tenant",
+                "isolated-fixture",
+                True,
+                "whole-mail-fixture",
+                "fixture-peer",
+            ),
+        )
+        decision = registry.process(submission.id, processor)
+        assert decision.status == "released", decision
+        ticket = registry.prepare_delivery(submission.id)
+        assert ticket.envelope == envelope and ticket.raw != raw_message
+        assert registry.get(submission.id).status == "submitted"
+        assert registry.mark_ambiguous(ticket).status == "ambiguous"
         jobs_dir = root / "matters" / matter / "jobs"
         for job_id in (inspect["id"], job["id"]):
             assert not list((jobs_dir / job_id).rglob("input"))

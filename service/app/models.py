@@ -326,3 +326,41 @@ class AttestationUse(Base):
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), index=True)
     matter_id: Mapped[str] = mapped_column(String(16), index=True)
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+class MailSubmission(Base):
+    """Private whole-message admission receipt and conservative delivery state."""
+
+    __tablename__ = "mail_submissions"
+    __table_args__ = (UniqueConstraint("tenant_id", "request_key", name="uq_mail_tenant_request"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    request_key: Mapped[str] = mapped_column(String(64))
+    request_id: Mapped[str] = mapped_column(String(200))
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), index=True)
+    actor_id: Mapped[str] = mapped_column(String(64))
+    policy_id: Mapped[str] = mapped_column(String(128))
+    policy_version: Mapped[int] = mapped_column()
+    transport: Mapped[str] = mapped_column(String(200))
+    peer_identity: Mapped[str] = mapped_column(String(200))
+    binding_sha256: Mapped[str] = mapped_column(String(64))
+    envelope: Mapped[dict] = mapped_column(JSONColumn)
+    limits: Mapped[dict] = mapped_column(JSONColumn)
+    input_ref: Mapped[str] = mapped_column(Text)
+    input_sha256: Mapped[str] = mapped_column(String(64))
+    input_bytes: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(32), default="admitted", index=True)
+    retryable: Mapped[bool] = mapped_column(default=False)
+    reasons: Mapped[list] = mapped_column(JSONColumn, default=list)
+    attempt: Mapped[int] = mapped_column(default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    delivery_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    delivery_expires_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    acknowledgment_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_epoch: Mapped[int] = mapped_column(BigInteger)
+    updated_epoch: Mapped[int] = mapped_column(BigInteger)
