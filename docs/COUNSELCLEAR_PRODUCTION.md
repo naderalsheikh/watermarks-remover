@@ -7,6 +7,12 @@ durable jobs, request retries, version-pinned S3 originals, and an internal mail
 attachment bridge. Live mail transport and central tenant administration remain
 separate work.
 
+For an installed single-operator LOCAL/SQLite pilot, run the
+[read-only configuration preflight](COUNSELCLEAR_PREFLIGHT.md) under the API's
+service account and environment before the synthetic deployment rehearsal.
+It reports configuration blockers and unchecked runtime requirements without
+starting services, connecting to databases, or creating keys.
+
 Use one API process with a durable data root. For untrusted document processing,
 use the Docker worker mode described below. The compose subprocess profile is a
 development/evaluation configuration. The API also performs upload screening and
