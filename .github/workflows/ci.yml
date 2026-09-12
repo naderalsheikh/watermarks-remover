@@ -72,7 +72,24 @@ jobs:
       - name: Install document tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install exiftool qpdf --yes --no-progress
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nativePackages = @(
+            @{ Name = 'exiftool'; Version = '13.59.0' },
+            @{ Name = 'qpdf'; Version = '12.4.1' }
+          )
+          foreach ($nativePackage in $nativePackages) {
+            for ($installAttempt = 1; $installAttempt -le 3; $installAttempt++) {
+              choco install $nativePackage.Name --version $nativePackage.Version --yes --no-progress
+              $packageExit = $LASTEXITCODE
+              $nativeCommand = Get-Command $nativePackage.Name -ErrorAction SilentlyContinue
+              if ($packageExit -eq 0 -and $nativeCommand) { break }
+              if ($installAttempt -eq 3) {
+                throw "Native dependency $($nativePackage.Name) unavailable after three attempts (exit $packageExit)"
+              }
+              Start-Sleep -Seconds 15
+            }
+          }
 
       - name: Verify native tools
         run: |
