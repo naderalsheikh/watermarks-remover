@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -160,13 +161,13 @@ def _make_symlink(dest: Path, target: Path) -> None:
 
 def test_safe_write_refuses_symlink_destination(tmp_path: Path):
     victim = tmp_path / "victim.txt"
-    victim.write_text("PRECIOUS DATA")
+    victim.write_text("PRECIOUS DATA", encoding="utf-8")
     dest = tmp_path / "out.txt"
     _make_symlink(dest, victim)
     with pytest.raises(OSError):
         safe_write_text(dest, "cleaned content")
     # The victim must be untouched and no temp litter may remain.
-    assert victim.read_text() == "PRECIOUS DATA"
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS DATA"
     assert not list(tmp_path.glob("*.tmp"))
 
 
@@ -174,7 +175,7 @@ def test_safe_write_atomically_replaces_existing_file(tmp_path: Path):
     dest = tmp_path / "out.txt"
     safe_write_text(dest, "first")
     safe_write_text(dest, "second")
-    assert dest.read_text() == "second"
+    assert dest.read_text(encoding="utf-8") == "second"
     # No stray temp files after a successful write.
     assert not list(tmp_path.glob("*.tmp"))
 
@@ -196,23 +197,23 @@ def test_safe_write_bytes_without_fchmod(tmp_path: Path, monkeypatch):
 
 def test_backup_path_creates_bak_copy(tmp_path: Path):
     src = tmp_path / "doc.md"
-    src.write_text("body")
+    src.write_text("body", encoding="utf-8")
     bak = backup_path(src)
     assert bak.name == "doc.md.bak"
-    assert bak.read_text() == "body"
-    assert src.read_text() == "body"
+    assert bak.read_text(encoding="utf-8") == "body"
+    assert src.read_text(encoding="utf-8") == "body"
 
 
 def test_backup_path_refuses_symlinked_bak(tmp_path: Path):
     src = tmp_path / "doc.md"
-    src.write_text("body")
+    src.write_text("body", encoding="utf-8")
     bak = tmp_path / "doc.md.bak"
     victim = tmp_path / "victim.txt"
-    victim.write_text("PRECIOUS")
+    victim.write_text("PRECIOUS", encoding="utf-8")
     _make_symlink(bak, victim)
     with pytest.raises(SystemExit):
         backup_path(src)
-    assert victim.read_text() == "PRECIOUS"
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS"
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +224,7 @@ def test_backup_path_refuses_symlinked_bak(tmp_path: Path):
 def test_read_text_input_refuses_oversized_file(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(common, "MAX_INPUT_BYTES", 8)
     big = tmp_path / "big.txt"
-    big.write_text("x" * 64)
+    big.write_text("x" * 64, encoding="utf-8")
     with pytest.raises(SystemExit):
         read_text_input(str(big))
 
@@ -467,8 +468,11 @@ def test_worker_scans_before_parse_defense_in_depth(tmp_path):
     set_scanner(_FlaggingScanner())
     try:
         rc = _run_job(
-            kind="inspect", input_path=original, output_dir=output_dir,
-            policy_id="external_sharing", attest=False,
+            kind="inspect",
+            input_path=original,
+            output_dir=output_dir,
+            policy_id="external_sharing",
+            attest=False,
         )
     finally:
         from app import malware
@@ -476,7 +480,7 @@ def test_worker_scans_before_parse_defense_in_depth(tmp_path):
         malware._scanner = malware.DepthAndClamScanner()
 
     assert rc == 0  # refusal is an outcome, not a crash
-    payload = json.loads((output_dir / "result.json").read_text())
+    payload = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
     assert payload["status"] == "refused"
     assert "malware scan" in payload["error"] and "stub-eicar" in payload["error"]
     # original untouched by construction
@@ -522,8 +526,16 @@ def test_run_job_uses_caps_budget_as_timeout(monkeypatch, tmp_path):
     original.write_bytes(b"hello")
     s.add(Matter(id="m1", name="m"))
     s.flush()
-    s.add(Document(id="doc1", matter_id="m1", filename="orig.txt", sha256="0" * 64,
-                   bytes=5, storage_path=str(original)))
+    s.add(
+        Document(
+            id="doc1",
+            matter_id="m1",
+            filename="orig.txt",
+            sha256=hashlib.sha256(b"hello").hexdigest(),
+            bytes=5,
+            storage_path=str(original),
+        )
+    )
     s.add(Job(id="j1", matter_id="m1", document_id="doc1", kind="inspect"))
     s.commit()
 
@@ -706,9 +718,7 @@ def test_attestation_roundtrip_and_tamper_rejection(tmp_path):
     assert jti
     assert expires.endswith("+00:00")
 
-    claims = verify_attestation(
-        cfg, tok, matter_id="m1", doc_sha256="a" * 64
-    )
+    claims = verify_attestation(cfg, tok, matter_id="m1", doc_sha256="a" * 64)
     assert claims is not None
     assert claims["sub"] == "operator"
     assert claims["strength"] == "preserve"
@@ -718,7 +728,9 @@ def test_attestation_roundtrip_and_tamper_rejection(tmp_path):
     assert verify_attestation(cfg, tok, matter_id="m2", doc_sha256="a" * 64) is None
     assert verify_attestation(cfg, tok, matter_id="m1", doc_sha256="b" * 64) is None
     body, _sig = tok.split(".")
-    assert verify_attestation(cfg, f"{body}.{'0' * 64}", matter_id="m1", doc_sha256="a" * 64) is None
+    assert (
+        verify_attestation(cfg, f"{body}.{'0' * 64}", matter_id="m1", doc_sha256="a" * 64) is None
+    )
     assert verify_attestation(cfg, "garbage", matter_id="m1", doc_sha256="a" * 64) is None
     assert verify_attestation(cfg, None, matter_id="m1", doc_sha256="a" * 64) is None
 
@@ -729,9 +741,7 @@ def test_attestation_strength_allowlist(tmp_path):
 
     cfg = Config(tmp_path)
     for ok in ATTEST_STRENGTHS:
-        issue_attestation(
-            cfg, subject="operator", matter_id="m", doc_sha256="a" * 64, strength=ok
-        )
+        issue_attestation(cfg, subject="operator", matter_id="m", doc_sha256="a" * 64, strength=ok)
     import pytest as _pytest
 
     with _pytest.raises(ValueError):
@@ -740,8 +750,12 @@ def test_attestation_strength_allowlist(tmp_path):
         )
     with _pytest.raises(ValueError):
         issue_attestation(
-            cfg, subject="operator", matter_id="m", doc_sha256="a" * 64,
-            strength="preserve", label="not_content_altering",
+            cfg,
+            subject="operator",
+            matter_id="m",
+            doc_sha256="a" * 64,
+            strength="preserve",
+            label="not_content_altering",
         )
 
 
@@ -799,7 +813,15 @@ def test_attestation_jti_replay_refused_after_restart(tmp_path, monkeypatch):
         m = c.post("/v1/matters", json={"name": "m"}).json()["id"]
         r = c.post(
             f"/v1/matters/{m}/documents",
-            files={"file": ("spa.docx", (Path(__file__).resolve().parent / "fixtures" / "legal" / "spa.docx").read_bytes(), "application/octet-stream")},
+            files={
+                "file": (
+                    "spa.docx",
+                    (
+                        Path(__file__).resolve().parent / "fixtures" / "legal" / "spa.docx"
+                    ).read_bytes(),
+                    "application/octet-stream",
+                )
+            },
         )
         assert r.status_code == 200, r.text
         return c, m, r.json()["id"]
@@ -811,7 +833,13 @@ def test_attestation_jti_replay_refused_after_restart(tmp_path, monkeypatch):
     m1 = c1.post("/v1/matters", json={"name": "m"}).json()["id"]
     d1 = c1.post(
         f"/v1/matters/{m1}/documents",
-        files={"file": ("spa.docx", (Path(__file__).resolve().parent / "fixtures" / "legal" / "spa.docx").read_bytes(), "application/octet-stream")},
+        files={
+            "file": (
+                "spa.docx",
+                (Path(__file__).resolve().parent / "fixtures" / "legal" / "spa.docx").read_bytes(),
+                "application/octet-stream",
+            )
+        },
     ).json()["id"]
     tok = c1.post(
         "/v1/attestations",

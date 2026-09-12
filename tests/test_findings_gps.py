@@ -31,7 +31,7 @@ _SCHEMA_CANDIDATES = (
     ROOT / "engine" / "schemas" / "finding.schema.json",
     SCRIPTS / "schemas" / "finding.schema.json",
 )
-SCHEMA = json.loads(next(p for p in _SCHEMA_CANDIDATES if p.is_file()).read_text())
+SCHEMA = json.loads(next(p for p in _SCHEMA_CANDIDATES if p.is_file()).read_text(encoding="utf-8"))
 
 
 def _tiff_block(with_gps: bool) -> bytes:

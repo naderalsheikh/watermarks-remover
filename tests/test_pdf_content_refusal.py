@@ -118,9 +118,7 @@ def test_production_approve_route_does_not_silently_succeed_for_annots():
     the same honest refusal external_sharing gives, not a different,
     quieter failure mode just because a decision was actively supplied."""
     data = _pdf(b"<< /Type /Annots /Subtype /Square /Rect [0 0 1 1] >>")
-    msg = _plan_and_expect_refusal(
-        data, policy="production", decisions={"pdf_annots": "approve"}
-    )
+    msg = _plan_and_expect_refusal(data, policy="production", decisions={"pdf_annots": "approve"})
     assert PDF_CONTENT_REFUSAL_MARKER in msg
 
 

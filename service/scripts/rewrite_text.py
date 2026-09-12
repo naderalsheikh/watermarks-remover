@@ -59,9 +59,7 @@ DEFAULT_CANDIDATES = 1
 DEFAULT_MAX_LOOPS = 1
 
 PRESERVE_STRENGTHS = frozenset({"preserve", "legal"})
-MEANING_CHANGING_STRENGTHS = frozenset(
-    {"paraphrase", "humanize", "backtranslate", "structural"}
-)
+MEANING_CHANGING_STRENGTHS = frozenset({"paraphrase", "humanize", "backtranslate", "structural"})
 
 _NUMBER_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:USD|US\$|\$|€|£)?\d+(?:[.,]\d+)*(?:%|k|m|b)?",
@@ -201,9 +199,7 @@ def meaning_lock_violations(original: str, candidate: str) -> list[str]:
     if original and candidate:
         ratio = len(candidate) / len(original)
         if ratio < 0.85 or ratio > 1.20:
-            violations.append(
-                f"length drift {ratio:.2f}x (preserve lock requires 0.85-1.20)"
-            )
+            violations.append(f"length drift {ratio:.2f}x (preserve lock requires 0.85-1.20)")
     for label, pattern, lower in (
         ("number", _NUMBER_RE, False),
         ("modal", _MODAL_RE, True),

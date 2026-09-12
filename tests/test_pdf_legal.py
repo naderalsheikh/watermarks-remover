@@ -96,7 +96,9 @@ def test_clean_pdf_has_no_legal_hits():
 
 
 def test_info_summary_redacts_but_keeps_producer():
-    blob = _pdf_structured_blob(_pdf(info=b"<< /Author (Very Secret Name) /Producer (Claude Opus) >>"))
+    blob = _pdf_structured_blob(
+        _pdf(info=b"<< /Author (Very Secret Name) /Producer (Claude Opus) >>")
+    )
     info = pdf_legal.pdf_info_summary(blob)
     assert info["author"] == "present (16 chars)"
     assert info["producer"] == "Claude Opus"
@@ -178,4 +180,4 @@ def test_reinspect_of_cleaned_pdf_finds_no_identity(tmp_path):
     rep = inspect_container(dest).to_dict()
     info = rep["details"]["pdf_legal"]["info"]
     assert info["author"] is None
-    assert "Anthropic" not in dest.read_text(errors="ignore")
+    assert b"Anthropic" not in dest.read_bytes()

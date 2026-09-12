@@ -370,9 +370,7 @@ class KGWTextDetector:
             )
             return report
         try:
-            payload = detect_kgw_text(
-                text, key, threshold=self._threshold or KGW_THRESHOLD
-            )
+            payload = detect_kgw_text(text, key, threshold=self._threshold or KGW_THRESHOLD)
         except Exception as e:
             report["error"] = f"KGW detection failed: {e}"
             return report

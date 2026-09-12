@@ -34,8 +34,7 @@ def _load(name: str) -> bytes:
 def test_sha256_known_vector():
     assert sha256_bytes(b"abc") == hashlib.sha256(b"abc").hexdigest()
     assert (
-        sha256_bytes(b"abc")
-        == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        sha256_bytes(b"abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     )
 
 
@@ -208,7 +207,7 @@ def test_write_manifest_is_write_once(tmp_path):
     with pytest.raises(CustodyError):
         write_manifest(tmp_path, {"manifest_version": 2})
     assert c1 and not c2
-    on_disk = json.loads(p1.read_text())
+    on_disk = json.loads(p1.read_text(encoding="utf-8"))
     assert on_disk == m
 
 
@@ -229,7 +228,7 @@ def test_bundle_text_fixture_end_to_end(tmp_path):
     cleaned = deriv.read_bytes()
     assert "\u200b" not in cleaned.decode("utf-8")
 
-    m = json.loads(manifest_path.read_text())
+    m = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert m["original"]["sha256"] == hashlib.sha256(_load("spa.txt")).hexdigest()
     assert m["derivative"]["sha256"] == hashlib.sha256(cleaned).hexdigest()
     assert m["derivative"]["bytes"] == len(cleaned)
@@ -260,7 +259,7 @@ def test_bundle_docx_privacy_and_refuses_rerun_with_drift(tmp_path):
     assert "<dc:creator>Jane Associate</dc:creator>" not in core
     verification = r1["verification"]
     assert verification["pass"] is True
-    m = json.loads(Path(r1["manifest"]).read_text())
+    m = json.loads(Path(r1["manifest"]).read_text(encoding="utf-8"))
     assert m["verification"]["pass"] is True
 
     # identical rerun: idempotent everywhere

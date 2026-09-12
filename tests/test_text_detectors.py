@@ -85,7 +85,7 @@ def test_markllm_prefers_checkout_venv(monkeypatch, tmp_path):
     else:
         venv_python = upstream / ".venv" / "bin" / "python"
     venv_python.parent.mkdir(parents=True)
-    venv_python.write_text("")
+    venv_python.write_text("", encoding="utf-8")
     (upstream / "watermark").mkdir()
     seen: dict = {}
 

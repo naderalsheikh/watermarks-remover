@@ -611,15 +611,42 @@ def _load_packet_files(path: Path) -> dict[str, bytes]:
     """Returns {relative_path: bytes} for every file in the packet,
     whether *path* is a zip or an already-extracted directory."""
     if path.is_dir():
+        # Logical packet member names use ZIP/POSIX separators on every
+        # host. Normalize only filesystem paths, never declared names or
+        # signed artifact bytes (nor literal ZIP member names).
         return {
-            str(p.relative_to(path)): p.read_bytes()
+            p.relative_to(path).as_posix(): p.read_bytes()
             for p in sorted(path.rglob("*"))
             if p.is_file()
         }
     if path.is_file():
         try:
             with zipfile.ZipFile(path) as zf:
-                return {name: zf.read(name) for name in zf.namelist() if not name.endswith("/")}
+                # ZipInfo.filename is normalized by the host (backslashes
+                # become slashes on Windows, and NUL suffixes are removed).
+                # Membership must use the original archive spelling. Read
+                # each entry by its ZipInfo, not the normalized name lookup,
+                # which can alias a different entry in the same archive.
+                files = {}
+                for member in zf.infolist():
+                    name = member.orig_filename
+                    # A NUL suffix can disguise a file as a directory here
+                    # while an extractor truncates it to a declared filename.
+                    if "\0" in name:
+                        raise PacketLoadError(f"{path} contains a NUL in member name {name!r}")
+                    # Extra fields must not redirect a raw member to another
+                    # extraction path. Allow only the host's usual constructor
+                    # normalization, while keeping the raw name for membership.
+                    if member.filename != zipfile.ZipInfo(name).filename:
+                        raise PacketLoadError(
+                            f"{path} contains a conflicting decoded member name for {name!r}"
+                        )
+                    if name.endswith("/"):
+                        continue
+                    if name in files:
+                        raise PacketLoadError(f"{path} contains duplicate member {name!r}")
+                    files[name] = zf.read(member)
+                return files
         except zipfile.BadZipFile as e:
             raise PacketLoadError(f"{path} is not a valid zip file: {e}") from e
     raise PacketLoadError(f"{path} does not exist")

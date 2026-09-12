@@ -247,9 +247,7 @@ _RELEASE_GATE_POLICIES = frozenset({"external_sharing", "production"})
 # still find the finding, and the job would die at the verify gate with an
 # opaque message. This refusal says what is actually true, and names the
 # one-flag remedy.
-WHITE_ONLY_HIDDEN_REFUSAL = (
-    "hidden text is white-on-white, which this engine cannot remove safely"
-)
+WHITE_ONLY_HIDDEN_REFUSAL = "hidden text is white-on-white, which this engine cannot remove safely"
 
 # Stable, greppable marker so the API, the UI and the tests can tell this
 # refusal apart from a macro refusal or an unattested-signature refusal --
@@ -566,7 +564,12 @@ def plan_actions(
                 plan.actions[st] = {"action": "keep", "reason": "operator_kept"}
             else:
                 plan.actions[st] = {"action": "keep", "reason": "no_decision"}
-        elif default == "strip" and st == "hidden_text" and decisions.get(st) == "keep" and st in seen:
+        elif (
+            default == "strip"
+            and st == "hidden_text"
+            and decisions.get(st) == "keep"
+            and st in seen
+        ):
             # The one subtype where an operator may decline a strip.
             #
             # hidden_text's remover is deliberately partial: it deletes
@@ -684,9 +687,7 @@ def plan_actions(
             approved = [
                 st for st in blocked if plan.actions[st].get("reason") == "operator_approved"
             ]
-            never_asked = [
-                st for st in blocked if plan.actions[st].get("reason") == "no_decision"
-            ]
+            never_asked = [st for st in blocked if plan.actions[st].get("reason") == "no_decision"]
             unasked = [st for st in blocked if st not in approved and st not in never_asked]
             parts = []
             if never_asked:
@@ -1058,7 +1059,9 @@ OPERATOR_ACKNOWLEDGED_MARKER = "acknowledged by operator before release"
 APPROVED_BUT_NO_OP_MARKER = "approved, but this subtype has no strip action under this policy"
 
 
-def _surviving_finding_records(plan: ActionPlan, existing: set[tuple[str, str]]) -> list[ActionRecord]:
+def _surviving_finding_records(
+    plan: ActionPlan, existing: set[tuple[str, str]]
+) -> list[ActionRecord]:
     """Explicit records for present findings that survive the derivative.
 
     This covers the older approve-default keep disclosures plus policy
@@ -1194,9 +1197,7 @@ def _subtype_for_message(m: str, fallback: str) -> str:
     return fallback
 
 
-def _classify_ooxml_messages(
-    msgs: list[str], a2: dict[str, Any]
-) -> list[ActionRecord]:
+def _classify_ooxml_messages(msgs: list[str], a2: dict[str, Any]) -> list[ActionRecord]:
     """Turn cleaner messages into ActionRecords -- ALL of them.
 
     The loop this replaces iterated msgs[:12], silently dropping every

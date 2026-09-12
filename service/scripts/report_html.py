@@ -118,15 +118,17 @@ def _findings_html(findings: list[dict[str, Any]]) -> str:
         return '<p class="empty">No structured findings — nothing to report.</p>'
 
     by_category: dict[str, list[dict[str, Any]]] = {}
-    for f in sorted(findings, key=lambda f: (_risk_rank(f.get("risk_level") or "info"))):
+    for f in sorted(findings, key=lambda f: _risk_rank(f.get("risk_level") or "info")):
         by_category.setdefault(f.get("category") or "other", []).append(f)
 
     parts: list[str] = []
     for category, items in by_category.items():
-        parts.append(f'<div class="group"><h3>{_esc(_label(CATEGORY_LABELS, category))}'
-                      f' &middot; {len(items)}</h3><div class="tablewrap"><table><thead><tr>'
-                      "<th>Risk</th><th>What</th><th>Where</th><th>Action</th>"
-                      "<th>Detail</th></tr></thead><tbody>")
+        parts.append(
+            f'<div class="group"><h3>{_esc(_label(CATEGORY_LABELS, category))}'
+            f' &middot; {len(items)}</h3><div class="tablewrap"><table><thead><tr>'
+            "<th>Risk</th><th>What</th><th>Where</th><th>Action</th>"
+            "<th>Detail</th></tr></thead><tbody>"
+        )
         for f in items:
             risk = f.get("risk_level") or "info"
             what = _label(SUBTYPE_LABELS, f.get("subtype"))
@@ -281,8 +283,7 @@ def render_report_html(
         '<span class="brand">CounselClear</span>',
         f'<span class="where">{_esc(generated_at)}</span>',
         "</header>",
-        f"<h1>{'Sanitization report' if mode == 'sanitize' else 'Inspection report'}"
-        f"</h1>",
+        f"<h1>{'Sanitization report' if mode == 'sanitize' else 'Inspection report'}</h1>",
         f'<p class="lede">{_esc(subject_name)} &middot; {_esc(kind)}/{_esc(format)}'
         + (f" &middot; policy <code>{_esc(policy_id)}</code>" if policy_id else "")
         + "</p>",
@@ -301,7 +302,7 @@ def render_report_html(
             body.append("</ul>")
         if checks:
             body.append(_checks_html(checks))
-        foot = ["<h2>Custody</h2><div class=\"foot\">"]
+        foot = ['<h2>Custody</h2><div class="foot">']
         if original_sha256:
             foot.append(f"<div>original   sha256 {_esc(original_sha256)}</div>")
         if derivative_name:
@@ -310,13 +311,15 @@ def render_report_html(
             foot.append(f"<div>derivative sha256 {_esc(derivative_sha256)}</div>")
         if processor:
             tools = ", ".join(f"{k}={v}" for k, v in (processor.get("tools") or {}).items())
-            foot.append(f"<div>processor  {_esc(processor.get('git_sha') or 'unknown')}"
-                        f"{(' &middot; ' + _esc(tools)) if tools else ''}</div>")
+            foot.append(
+                f"<div>processor  {_esc(processor.get('git_sha') or 'unknown')}"
+                f"{(' &middot; ' + _esc(tools)) if tools else ''}</div>"
+            )
         foot.append("</div>")
         body.extend(foot)
 
     return (
-        "<!doctype html><meta charset=\"utf-8\">"
+        '<!doctype html><meta charset="utf-8">'
         f"<title>{_esc(subject_name)} — CounselClear report</title>"
         f"<style>{_CSS}</style>"
         f'<div class="wrap">{"".join(body)}</div>'
@@ -357,8 +360,11 @@ def render_intake_report(
     this never cleans anything, it only summarizes what inspect_bytes (plus,
     optionally, authoring_identity.extract_identities) already found.
     """
-    scanned = [dict(r, _findings=[_as_dict(f) for f in (r.get("findings") or [])])
-               for r in records if not r.get("error")]
+    scanned = [
+        dict(r, _findings=[_as_dict(f) for f in (r.get("findings") or [])])
+        for r in records
+        if not r.get("error")
+    ]
     errored = [r for r in records if r.get("error")]
 
     all_findings = [f for r in scanned for f in r["_findings"]]
@@ -397,9 +403,7 @@ def render_intake_report(
                 "<th>Files</th></tr></thead><tbody>"
             )
             for label, value, n in identity_rows:
-                body.append(
-                    f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td><td>{n}</td></tr>"
-                )
+                body.append(f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td><td>{n}</td></tr>")
             body.append("</tbody></table></div>")
         else:
             body.append('<p class="empty">No authoring identity fields found.</p>')
@@ -419,8 +423,10 @@ def render_intake_report(
             "<th>Findings</th><th>Most severe</th></tr></thead><tbody>"
         )
         for r in sorted(
-            scanned, key=lambda r: _risk_rank((_top_finding(r["_findings"]) or {}).get(
-                "risk_level") or "info")
+            scanned,
+            key=lambda r: _risk_rank(
+                (_top_finding(r["_findings"]) or {}).get("risk_level") or "info"
+            ),
         ):
             top = _top_finding(r["_findings"])
             top_label = _label(SUBTYPE_LABELS, top.get("subtype")) if top else "—"
@@ -439,7 +445,7 @@ def render_intake_report(
         body.append("</tbody></table></div>")
 
     return (
-        "<!doctype html><meta charset=\"utf-8\">"
+        '<!doctype html><meta charset="utf-8">'
         f"<title>{_esc(root_label)} — CounselClear intake report</title>"
         f"<style>{_CSS}</style>"
         f'<div class="wrap">{"".join(body)}</div>'

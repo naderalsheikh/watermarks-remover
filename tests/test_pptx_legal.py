@@ -27,7 +27,7 @@ _PPT_NS = 'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
 def _slide(show_attr: str = "") -> bytes:
     return (
         f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        f'<p:sld {_PPT_NS} {show_attr}><p:cSld><p:spTree/></p:cSld></p:sld>'
+        f"<p:sld {_PPT_NS} {show_attr}><p:cSld><p:spTree/></p:cSld></p:sld>"
     ).encode()
 
 
@@ -82,11 +82,14 @@ def _pptx(parts: dict[str, bytes]) -> bytes:
 
 def _full_pptx() -> bytes:
     return _pptx(
-        {"ppt/slides/slide1.xml": _slide(), "ppt/slides/slide2.xml": _slide('show="0"'),
-         "ppt/notesSlides/notesSlide1.xml": b"<p:notes/>",
-         "ppt/notesSlides/notesSlide2.xml": b"<p:notes/>",
-         "ppt/comments/comment1.xml": b"<p:cmLst/>",
-         "ppt/commentAuthors.xml": b"<p:cmAuthorLst/>"},
+        {
+            "ppt/slides/slide1.xml": _slide(),
+            "ppt/slides/slide2.xml": _slide('show="0"'),
+            "ppt/notesSlides/notesSlide1.xml": b"<p:notes/>",
+            "ppt/notesSlides/notesSlide2.xml": b"<p:notes/>",
+            "ppt/comments/comment1.xml": b"<p:cmLst/>",
+            "ppt/commentAuthors.xml": b"<p:cmAuthorLst/>",
+        },
     )
 
 
@@ -161,9 +164,7 @@ def test_clean_opt_out_flags_keep_parts():
 
 
 def test_clean_plain_deck_reports_no_artifacts():
-    _out, actions = clean_pptx(
-        _pptx({"ppt/slides/slide1.xml": _slide()})
-    )
+    _out, actions = clean_pptx(_pptx({"ppt/slides/slide1.xml": _slide()}))
     assert any("no PPTX legal artifacts found" in a for a in actions)
 
 
@@ -174,9 +175,7 @@ def test_findings_project_pptx_legal_signals(tmp_path):
     p = tmp_path / "t.pptx"
     p.write_bytes(_full_pptx())
     rep = inspect_container(p).to_dict()
-    by_subtype = {
-        f.subtype: f for f in findings_for_report("container", rep) if f.format == "pptx"
-    }
+    by_subtype = {f.subtype: f for f in findings_for_report("container", rep) if f.format == "pptx"}
     assert by_subtype["comments_and_notes"].action_recommended == "strip"
     assert by_subtype["comments_and_notes"].risk_level == "high"
     hs = by_subtype["hidden_structure"]

@@ -87,11 +87,11 @@ class Config:
         self.cmk_arn = os.environ.get("COUNSELCLEAR_CMK_ARN", "").strip()
         self.volume_key_file = os.environ.get("COUNSELCLEAR_VOLUME_KEY_FILE", "").strip()
 
-        # PR 31: bound on concurrently-executing batch child jobs. Enforced
-        # in-process only (ThreadPoolExecutor max_workers) — see
-        # service/app/dispatcher.py's module docstring for the multi-replica
-        # caveat this implies.
+        # Shared database capacity covers single jobs and batch children.
+        # All dispatchers for this database must use the same capacity.
         self.batch_max_concurrent = self._int_env("COUNSELCLEAR_BATCH_MAX_CONCURRENT", 4, 1)
+        self.job_lease_s = self._int_env("COUNSELCLEAR_JOB_LEASE_S", 30, 3)
+        self.job_max_attempts = self._int_env("COUNSELCLEAR_JOB_MAX_ATTEMPTS", 3, 1)
 
         # --- login brute-force throttle ---------------------------------------
         # Sliding-window failure counter per client peer address, held in

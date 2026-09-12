@@ -43,7 +43,7 @@ def pinned_packages(requirements: Path = REQUIREMENTS) -> list[str]:
     than dropped; missing it would understate the copyleft surface.
     """
     names: list[str] = []
-    for raw in requirements.read_text().splitlines():
+    for raw in requirements.read_text(encoding="utf-8").splitlines():
         pin = raw.strip()
         if not pin or pin.startswith("#"):
             continue
@@ -195,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rendered = render(pinned_packages())
     if args.check:
-        current = OUTPUT.read_text() if OUTPUT.is_file() else ""
+        current = OUTPUT.read_text(encoding="utf-8") if OUTPUT.is_file() else ""
         # The trailing generation date changes daily and is not a staleness
         # signal on its own -- only the substance is compared.
         if _substance(current) != _substance(rendered):
@@ -205,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
         return 0
-    OUTPUT.write_text(rendered)
+    OUTPUT.write_text(rendered, encoding="utf-8", newline="\n")
     print(f"wrote {OUTPUT.relative_to(REPO)}")
     return 0
 

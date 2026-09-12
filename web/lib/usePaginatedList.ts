@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError } from "./api";
 import { createPaginationScope } from "./paginationScope";
@@ -122,6 +122,11 @@ export function usePaginatedList<T, M = undefined>(
     });
   }
 
+  const updateItems = useCallback((transform: (items: T[]) => T[]) => {
+    if (scopeRef.current?.requestKey !== requestKey) return;
+    setState(current => current.requestKey === requestKey ? { ...current, items: transform(current.items) } : current);
+  }, [requestKey]);
+
   return {
     items: state.items,
     total: state.total,
@@ -131,6 +136,7 @@ export function usePaginatedList<T, M = undefined>(
     loadingMore,
     hasMore: !loading && state.items.length < state.total,
     loadMore,
+    updateItems,
     reload: () => {
       // Invalidate immediately: an old page may settle before the next effect.
       scopeRef.current?.cancel();

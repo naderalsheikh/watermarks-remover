@@ -168,7 +168,7 @@ def main() -> None:
     for clause in SPA_CLAUSES:
         body_parts.append(f"<w:p><w:r><w:t>{clause}</w:t></w:r></w:p>")
     body_parts.append(
-        f'<w:p><w:ins><w:r><w:t>{SPA_INSERTED}</w:t></w:r></w:ins>'
+        f"<w:p><w:ins><w:r><w:t>{SPA_INSERTED}</w:t></w:r></w:ins>"
         f"<w:del><w:r><w:delText>{SPA_DELETED}</w:delText></w:r></w:del></w:p>"
     )
     body_parts.append(
@@ -196,7 +196,10 @@ def main() -> None:
     # 4. .docm carrying VBA.
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+        zf.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        )
         zf.writestr(
             "word/document.xml",
             f'<?xml version="1.0"?><w:document {W_NS}><w:body><w:p/></w:body></w:document>',
@@ -210,7 +213,7 @@ def main() -> None:
             "xl/worksheets/sheet1.xml": (
                 '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
             ),
-            "xl/comments1.xml": "<comments xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><comment ref=\"A1\"/></comments>",
+            "xl/comments1.xml": '<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><comment ref="A1"/></comments>',
             # Real Excel numbers this part (person1.xml, person2.xml, ...); it
             # never writes the unnumbered person.xml this fixture used to use.
             "xl/persons/person1.xml": '<persons xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person/></persons>',
@@ -239,7 +242,10 @@ def main() -> None:
     jpg += b"\xff\xda\x00\x02\x00\x00\xff\xd9"
     (HERE / "gps.jpg").write_bytes(bytes(jpg))
 
-    print("fixtures written:", ", ".join(sorted(p.name for p in HERE.glob("*.*") if p.name != "generate.py")))
+    print(
+        "fixtures written:",
+        ", ".join(sorted(p.name for p in HERE.glob("*.*") if p.name != "generate.py")),
+    )
 
 
 if __name__ == "__main__":

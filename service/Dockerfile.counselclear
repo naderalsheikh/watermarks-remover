@@ -24,6 +24,7 @@ RUN apt-get update \
         libarchive-zip-perl \
         libimage-exiftool-perl \
         qpdf \
+    && qpdf --help=--remove-info > /dev/null \
     && rm -rf /var/lib/apt/lists/*
 
 # Seed a virus-definition database at build time so app.malware's real

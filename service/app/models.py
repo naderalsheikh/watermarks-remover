@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,7 +52,7 @@ class Document(Base):
     filename: Mapped[str] = mapped_column(String(255))
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     bytes: Mapped[int] = mapped_column()
-    storage_path: Mapped[str] = mapped_column(String(1024))
+    storage_path: Mapped[str] = mapped_column(Text)
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
 
 
@@ -127,6 +127,27 @@ class Batch(Base):
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
+class Admission(Base):
+    __tablename__ = "admissions"
+
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), primary_key=True)
+    requested_by: Mapped[str] = mapped_column(String(64), primary_key=True)
+    operation: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_sha256: Mapped[str] = mapped_column(String(64))
+    resource_kind: Mapped[str] = mapped_column(String(16))
+    resource_id: Mapped[str] = mapped_column(String(16))
+    created_utc: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+class JobQueue(Base):
+    """One database-wide capacity reservation shared by all dispatchers."""
+
+    __tablename__ = "job_queue"
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    capacity: Mapped[int] = mapped_column()
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
@@ -137,7 +158,9 @@ class Job(Base):
     # by the synchronous single-document routes (the synchronous
     # /bulk-jobs endpoint that used to also leave this NULL was retired in
     # PR 31 commit 3).
-    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"), nullable=True, index=True)
+    batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("batches.id"), nullable=True, index=True
+    )
     kind: Mapped[str] = mapped_column(String(16))  # inspect | sanitize
     policy_id: Mapped[str] = mapped_column(String(40), default="external_sharing")
     reason: Mapped[str] = mapped_column(String(500), default="")
@@ -170,6 +193,17 @@ class Job(Base):
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # NULL actor identifies historical admission, which had no durable owner.
+    requested_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    attempt_number: Mapped[int] = mapped_column(default=0)
+    # Parent-observed worker exit, persisted before terminal publication. A
+    # recovery attempt can revalidate these private files without rerunning.
+    execution_receipt: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
+    # Set at admission. NULL preserves pre-pinning jobs on upgrade.
+    worker_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
 
 class Release(Base):
     """The business/custody event: a document was prepared for release to
@@ -201,7 +235,9 @@ class Release(Base):
     # server-side Batch", which covers both a true single-document release
     # and a client-driven sequence of independent releases (e.g. the
     # Airlock CLI's own folder loop, which never touches Batch at all).
-    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id"), nullable=True, index=True)
+    batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("batches.id"), nullable=True, index=True
+    )
     # 1:1 with its Job, always -- created in the same transaction as the
     # Job it wraps, never pointed at an existing/shared Job.
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), unique=True, index=True)
@@ -244,6 +280,13 @@ class Release(Base):
     status: Mapped[str] = mapped_column(String(12), default="queued", index=True)
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
     finished_utc: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Internal certificate snapshot shared by result hashes and downloads.
+    # Legacy releases have no snapshot until one is recorded. Python None
+    # must bind as SQL NULL so the first writer can claim it atomically.
+    certificate_snapshot: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+    )
     # The most recent observed outcome of anchoring a packet for this
     # release (migration 0011). Deliberately "last_", not "anchor_": a
     # packet is rebuilt per download and legitimately differs each time --
@@ -283,3 +326,41 @@ class AttestationUse(Base):
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), index=True)
     matter_id: Mapped[str] = mapped_column(String(16), index=True)
     created_utc: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+class MailSubmission(Base):
+    """Private whole-message admission receipt and conservative delivery state."""
+
+    __tablename__ = "mail_submissions"
+    __table_args__ = (UniqueConstraint("tenant_id", "request_key", name="uq_mail_tenant_request"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    request_key: Mapped[str] = mapped_column(String(64))
+    request_id: Mapped[str] = mapped_column(String(200))
+    matter_id: Mapped[str] = mapped_column(ForeignKey("matters.id"), index=True)
+    actor_id: Mapped[str] = mapped_column(String(64))
+    policy_id: Mapped[str] = mapped_column(String(128))
+    policy_version: Mapped[int] = mapped_column()
+    transport: Mapped[str] = mapped_column(String(200))
+    peer_identity: Mapped[str] = mapped_column(String(200))
+    binding_sha256: Mapped[str] = mapped_column(String(64))
+    envelope: Mapped[dict] = mapped_column(JSONColumn)
+    limits: Mapped[dict] = mapped_column(JSONColumn)
+    input_ref: Mapped[str] = mapped_column(Text)
+    input_sha256: Mapped[str] = mapped_column(String(64))
+    input_bytes: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(32), default="admitted", index=True)
+    retryable: Mapped[bool] = mapped_column(default=False)
+    reasons: Mapped[list] = mapped_column(JSONColumn, default=list)
+    attempt: Mapped[int] = mapped_column(default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_expires_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    delivery_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    delivery_expires_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    acknowledgment_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_epoch: Mapped[int] = mapped_column(BigInteger)
+    updated_epoch: Mapped[int] = mapped_column(BigInteger)

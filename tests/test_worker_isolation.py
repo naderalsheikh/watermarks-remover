@@ -9,6 +9,7 @@ reconciles terminal state.
 from __future__ import annotations
 
 import ast
+import hashlib
 import io
 import sys
 import zipfile
@@ -58,7 +59,7 @@ def _upload(client, name: str):
 
 
 def test_api_module_never_imports_parsers():
-    src = (REPO / "service" / "app" / "main.py").read_text()
+    src = (REPO / "service" / "app" / "main.py").read_text(encoding="utf-8")
     code = "\n".join(line.split("#")[0] for line in src.splitlines())
     for banned in ("engine_api", "clean_to_bundle", "inspect_bytes"):
         assert banned not in code, f"main.py must not reference {banned}"
@@ -128,7 +129,7 @@ def _imported_roots(path: Path) -> set[str]:
     """Top-level package name of every absolute import in *path* (AST-based,
     not substring matching, so a docstring mentioning "app" or a local
     variable named `app` can't produce a false positive)."""
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     roots: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -220,13 +221,25 @@ def test_worker_cli_is_pure_no_db_access(tmp_path):
     env = dict(__import__("os").environ, PYTHONPATH=str(REPO / "service"))
     proc = sp.run(
         [
-            sys.executable, "-m", "app.worker", "run-job",
-            "--kind", "inspect", "--input", str(src), "--output-dir", str(out),
+            sys.executable,
+            "-m",
+            "app.worker",
+            "run-job",
+            "--kind",
+            "inspect",
+            "--input",
+            str(src),
+            "--output-dir",
+            str(out),
         ],
-        capture_output=True, text=True, env=env, cwd=str(REPO / "service"), check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO / "service"),
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    result = (out / "result.json").read_text()
+    result = (out / "result.json").read_text(encoding="utf-8")
     assert '"status": "done"' in result
 
 
@@ -247,13 +260,22 @@ def test_run_job_real_subprocess_timeout_is_recorded_as_failed(tmp_path, monkeyp
     original.write_bytes(b"hello")
     s.add(Matter(id="m1", name="m"))
     s.flush()
-    s.add(Document(id="doc1", matter_id="m1", filename="orig.txt", sha256="0" * 64,
-                   bytes=5, storage_path=str(original)))
+    s.add(
+        Document(
+            id="doc1",
+            matter_id="m1",
+            filename="orig.txt",
+            sha256=hashlib.sha256(b"hello").hexdigest(),
+            bytes=5,
+            storage_path=str(original),
+        )
+    )
     s.add(Job(id="j1", matter_id="m1", document_id="doc1", kind="inspect"))
     s.commit()
 
     monkeypatch.setattr(
-        runner, "build_subprocess_cmd",
+        runner,
+        "build_subprocess_cmd",
         lambda **kw: [sys.executable, "-c", "import time; time.sleep(30)"],
     )
     res = runner.run_job(cfg, s, "j1", kind="inspect")
@@ -278,8 +300,9 @@ def test_sync_backstop_marks_failed_on_crash(tmp_path, monkeypatch):
     s = make_session_factory(make_engine(Config(root)))()
     s.add(Matter(id="m", name="m"))
     s.flush()
-    s.add(Document(id="d", matter_id="m", filename="f.txt", sha256="0" * 64,
-                   bytes=0, storage_path=""))
+    s.add(
+        Document(id="d", matter_id="m", filename="f.txt", sha256="0" * 64, bytes=0, storage_path="")
+    )
     job = Job(matter_id="m", document_id="d", kind="inspect", status="running")
     s.add(job)
     s.commit()
@@ -332,6 +355,10 @@ def test_docker_cmd_is_hardened_and_digest_pinned(tmp_path):
         assert flag in joined, flag
     assert cmd[cmd.index("--network") + 1] == "none"
     assert "/data" in joined and cfg.worker_image in cmd
+    # The image ENTRYPOINT is python3. Supplying another interpreter after
+    # the image would execute `python3 python -m ...` and fail before startup.
+    assert cmd[cmd.index("--entrypoint") + 1] == "python3"
+    assert cmd[cmd.index(cfg.worker_image) + 1 :][:3] == ["-m", "app.worker", "run-job"]
 
 
 def test_docker_mount_is_scoped_to_one_job_not_the_whole_data_root(tmp_path):
@@ -344,7 +371,7 @@ def test_docker_mount_is_scoped_to_one_job_not_the_whole_data_root(tmp_path):
     mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
     cmd = build_docker_cmd(cfg, **_docker_kwargs(mount_root))
     mount_flag = cmd[cmd.index("-v") + 1]
-    host_mount = mount_flag.split(":")[0]
+    host_mount = mount_flag.removesuffix(":/data")
     assert host_mount == str(mount_root)
     assert host_mount != str(cfg.data_root)
     # The database lives at a sibling of matters/, never inside a job dir.
@@ -359,6 +386,20 @@ def test_docker_mode_refuses_unpinned_image(tmp_path):
     mount_root = cfg.data_root / "matters" / "m1" / "jobs" / "job123"
     with pytest.raises(ValueError, match="digest-pinned"):
         build_docker_cmd(cfg, **_docker_kwargs(mount_root))
+
+
+def test_docker_command_without_posix_identity_uses_image_user(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.delattr(os, "geteuid", raising=False)
+    monkeypatch.delattr(os, "getegid", raising=False)
+    cfg = Config.__new__(Config)
+    cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
+    cfg.worker_runtime = ""
+    cmd = build_docker_cmd(cfg, **_docker_kwargs(tmp_path))
+    assert "--user" not in cmd
+    assert cmd[cmd.index("--input") + 1] == "/data/input/x.docx"
+    assert cmd[cmd.index("--output-dir") + 1] == "/data/output"
 
 
 def test_docker_cmd_selects_hardened_runtime_when_configured(tmp_path):
@@ -383,9 +424,46 @@ def test_config_rejects_unknown_worker_mode(monkeypatch, tmp_path):
 
 def test_build_subprocess_cmd_shape(tmp_path):
     cmd = build_subprocess_cmd(
-        input_path=tmp_path / "in" / "x.docx", output_dir=tmp_path / "out",
-        kind="inspect", policy_id="external_sharing", attest=False, matter_id="m1",
+        input_path=tmp_path / "in" / "x.docx",
+        output_dir=tmp_path / "out",
+        kind="inspect",
+        policy_id="external_sharing",
+        attest=False,
+        matter_id="m1",
     )
     assert cmd[:4] == [sys.executable, "-m", "app.worker", "run-job"]
     assert "--input" in cmd and str(tmp_path / "in" / "x.docx") in cmd
     assert "--output-dir" in cmd and str(tmp_path / "out") in cmd
+
+
+def test_authenticated_submitter_reaches_real_worker_manifest(client):
+    route = next(
+        route
+        for route in client.app.routes
+        if getattr(route, "path", "").endswith("/sanitize-jobs")
+    )
+    principal = next(dep.call for dep in route.dependant.dependencies if dep.name == "user")
+    actor = "oidc:" + "a" * 40
+    client.app.dependency_overrides[principal] = lambda: actor
+    matter, doc_id = _upload(client, "spa.txt")
+    response = client.post(f"/v1/matters/{matter}/documents/{doc_id}/sanitize-jobs")
+    assert response.status_code == 200, response.text
+    job = response.json()
+    assert job["status"] == "done", job.get("error")
+    manifest = job["result"]["manifest"]
+    assert manifest["operator"] == {"id": actor}
+    assert manifest["matter"] == {"id": matter}
+    from app.models import AuditEvent, Job
+
+    with client.app.state.batch_dispatcher._session_factory() as session:
+        assert session.get(Job, job["id"]).requested_by == actor
+        event = session.query(AuditEvent).filter_by(matter_id=matter, action="job.sanitize").one()
+        assert event.actor_id == actor
+
+
+def test_docker_command_carries_admitted_actor_as_one_argument(tmp_path):
+    cfg = Config(tmp_path)
+    cfg.worker_image = "ghcr.io/acme/counselclear@sha256:" + "ab" * 32
+    actor = "oidc:" + "b" * 40
+    cmd = build_docker_cmd(cfg, **_docker_kwargs(tmp_path), operator_id=actor)
+    assert cmd[cmd.index("--operator-id") + 1] == actor

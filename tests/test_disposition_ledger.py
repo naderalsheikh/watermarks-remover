@@ -109,7 +109,9 @@ def test_every_postcondition_value_is_in_the_published_schema():
     import json
 
     schema = json.loads(
-        (REPO / "service" / "scripts" / "schemas" / "manifest.schema.json").read_text()
+        (REPO / "service" / "scripts" / "schemas" / "manifest.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     allowed = set(schema["$defs"]["disposition"]["properties"]["postcondition"]["enum"])
     produced = set()

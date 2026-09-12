@@ -12,11 +12,10 @@ Two entry modes:
        python -m app.worker run-job --kind inspect|sanitize --input /data/input/x.docx
            --output-dir /data/output [--policy external_sharing] [--attest]
 
-   This process has **no database access whatsoever** — it never imports
-   `.db`/`.models`, and its only filesystem access is the two paths given on
-   the command line. That's deliberate: the runner (app.runner, run in the
-   trusted parent process, never inside the isolated worker) mounts *only* a
-   fresh per-job directory containing a copy of the one document being
+   Job execution opens no database session and uses the input and output
+   paths given on the command line. In Docker mode the runner (app.runner,
+   run in the trusted parent process) mounts *only* a fresh per-job directory
+   containing a copy of the one document being
    processed, so a compromised parser can reach neither the shared database
    nor any other matter's files. The worker reports its outcome by writing
    ``{output_dir}/result.json`` — the parent reads that file back and is the
@@ -24,7 +23,9 @@ Two entry modes:
    or times out before writing that file leaves the parent's crash backstop
    to record "failed"; a worker that writes it always exits 0, because
    "terminal status was recorded" is success from this process's point of
-   view even when the recorded status is refused/failed.
+   view even when the recorded status is refused/failed. Subprocess mode
+   shares the host user's privileges; passing scoped paths does not itself
+   sandbox that process.
 """
 
 from __future__ import annotations
@@ -45,25 +46,38 @@ def _write_result(output_dir: Path, payload: dict) -> None:
     tmp.replace(output_dir / "result.json")
 
 
-def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, attest: bool,
-             matter_id: str | None = None, decisions: dict[str, str] | None = None,
-             legal_justifications: dict | None = None,
-             layer_b: str | None = None) -> int:
-    """Pure: no DB, no network, no filesystem access outside the two given
-    paths. Always exits 0 once result.json is written — the *content* of
+def _run_job(
+    *,
+    kind: str,
+    input_path: Path,
+    output_dir: Path,
+    policy_id: str,
+    attest: bool,
+    matter_id: str | None = None,
+    operator_id: str = "operator",
+    decisions: dict[str, str] | None = None,
+    legal_justifications: dict | None = None,
+    layer_b: str | None = None,
+) -> int:
+    """Execute without a database session; Docker enforces the scoped mount.
+    Always exits 0 once result.json is written — the *content* of
     that file (status: done|refused|failed) is the real outcome."""
     from .malware import get_scanner  # defense-in-depth (PR 18): re-scan here too
 
     name = input_path.name
 
-    def finish(status: str, error: str = "", result: dict | None = None,
-               bundle_dir: str = "") -> int:
-        _write_result(output_dir, {
-            "status": status,
-            "error": error[:1000],
-            "result": result,
-            "bundle_dir": bundle_dir,
-        })
+    def finish(
+        status: str, error: str = "", result: dict | None = None, bundle_dir: str = ""
+    ) -> int:
+        _write_result(
+            output_dir,
+            {
+                "status": status,
+                "error": error[:1000],
+                "result": result,
+                "bundle_dir": bundle_dir,
+            },
+        )
         return 0
 
     try:
@@ -91,16 +105,21 @@ def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, a
                     # TypeScript, which would drift from policies.py).
                     pst = policy_subtype_for_finding(f)
                     d["policy_subtype"] = pst
-                    d["requires_approval"] = bool(pst and DEFAULT_POLICIES["production"].get(pst) == "approve")
+                    d["requires_approval"] = bool(
+                        pst and DEFAULT_POLICIES["production"].get(pst) == "approve"
+                    )
                 else:
                     d = f
                 findings.append(d)
-            return finish("done", result={
-                "kind": res.kind,
-                "format": res.format,
-                "findings": findings,
-                "unsupported_reason": res.unsupported_reason,
-            })
+            return finish(
+                "done",
+                result={
+                    "kind": res.kind,
+                    "format": res.format,
+                    "findings": findings,
+                    "unsupported_reason": res.unsupported_reason,
+                },
+            )
 
         if kind == "sanitize":
             bundle_dir = output_dir / "bundle"
@@ -108,16 +127,18 @@ def _run_job(*, kind: str, input_path: Path, output_dir: Path, policy_id: str, a
                 input_path,
                 bundle_dir,
                 policy_id=policy_id,
-                operator_id="operator",
+                operator_id=operator_id,
                 matter_id=matter_id,
                 signature_break_attestation=attest,
                 decisions=decisions,
                 legal_justifications=legal_justifications,
                 layer_b_strength=layer_b,
+                retain_original=False,
             )
             return finish(
                 "done",
-                bundle_dir=str(bundle_dir),
+                # A relative identifier, never a worker-selected host path.
+                bundle_dir="bundle",
                 result={
                     "derivative": Path(result["derivative"]).name,
                     "manifest": result["manifest_data"],
@@ -146,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     jp = sub.add_parser(
         "run-job",
         help="execute one job against an already-staged input/output directory pair "
-             "(no database access — see module docstring)",
+        "(no database access — see module docstring)",
     )
     jp.add_argument("--kind", required=True, choices=("inspect", "sanitize"))
     jp.add_argument("--input", required=True, type=Path)
@@ -154,20 +175,25 @@ def main(argv: list[str] | None = None) -> int:
     jp.add_argument("--policy", default="external_sharing")
     jp.add_argument("--attest", action="store_true")
     jp.add_argument("--matter-id", default=None)
+    jp.add_argument("--operator-id", default="operator")
     jp.add_argument(
-        "--decisions", default=None,
+        "--decisions",
+        default=None,
         help="JSON object {subtype: 'approve'|'keep'} for approve-default policy cells "
-             "(e.g. production's comments_and_notes) — without this every such cell "
-             "resolves to keep, per plan_actions' own no_decision default",
+        "(e.g. production's comments_and_notes) — without this every such cell "
+        "resolves to keep, per plan_actions' own no_decision default",
     )
     jp.add_argument(
-        "--legal-justifications", default=None,
+        "--legal-justifications",
+        default=None,
         help="JSON object {subtype: {basis, note}} for legal grounds on surviving findings",
     )
     jp.add_argument(
-        "--layer-b", default=None, choices=("preserve", "paraphrase"),
+        "--layer-b",
+        default=None,
+        choices=("preserve", "paraphrase"),
         help="PR 20: run a Layer B (statistical watermark) rewrite at this strength; "
-             "a meaning-lock miss fails the job instead of falling back to the original",
+        "a meaning-lock miss fails the job instead of falling back to the original",
     )
 
     p.add_argument("verb", choices=("inspect", "sanitize"), nargs="?")
@@ -180,7 +206,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "run-job":
         decisions = json.loads(args.decisions) if args.decisions else None
-        legal_justifications = json.loads(args.legal_justifications) if args.legal_justifications else None
+        legal_justifications = (
+            json.loads(args.legal_justifications) if args.legal_justifications else None
+        )
         return _run_job(
             kind=args.kind,
             input_path=args.input,
@@ -188,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
             policy_id=args.policy,
             attest=args.attest,
             matter_id=args.matter_id,
+            operator_id=args.operator_id,
             decisions=decisions,
             legal_justifications=legal_justifications,
             layer_b=args.layer_b,

@@ -1,0 +1,201 @@
+"""Real subprocess and optional real-image worker/custody integration.
+
+CI builds and pushes the CounselClear image to a local registry, then sets
+COUNSELCLEAR_TEST_WORKER_IMAGE to its repo@sha256 digest. No Docker command
+or parser is mocked; leaving the variable unset skips only the image test.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import sys
+import zipfile
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "service"))
+
+from app.config import Config
+from app.db import make_engine, make_session_factory
+from app.main import create_app
+from app.models import Document, Job
+from app.storage import storage_from_config
+
+
+def _encrypted_custody_flow(tmp_path, monkeypatch, mode, image=""):
+    monkeypatch.setenv("COUNSELCLEAR_WORKER_MODE", mode)
+    monkeypatch.setenv("COUNSELCLEAR_WORKER_IMAGE", image)
+    monkeypatch.setenv("COUNSELCLEAR_WORKER_RUNTIME", "")
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "worker-integration-password")
+    monkeypatch.setenv("COUNSELCLEAR_STORAGE", "local")
+    monkeypatch.setenv("COUNSELCLEAR_VOLUME_KEY_FILE", str(tmp_path / "volume.key"))
+    monkeypatch.delenv("COUNSELCLEAR_CMK_ARN", raising=False)
+    root = tmp_path / "data"
+    original = (REPO / "tests" / "fixtures" / "legal" / "spa.docx").read_bytes()
+    with TestClient(create_app(root)) as client:
+        login = client.post("/v1/auth/login", json={"password": "worker-integration-password"})
+        assert login.status_code == 200
+        matter = client.post("/v1/matters", json={"name": "Encrypted worker test"}).json()["id"]
+        response = client.post(
+            f"/v1/matters/{matter}/documents",
+            files={"file": ("spa.docx", original, "application/octet-stream")},
+        )
+        assert response.status_code == 200, response.text
+        doc_id = response.json()["id"]
+        inspect = client.post(f"/v1/matters/{matter}/documents/{doc_id}/inspect-jobs").json()
+        assert inspect["status"] == "done", inspect
+        response = client.post(f"/v1/matters/{matter}/documents/{doc_id}/sanitize-jobs", json={})
+        assert response.status_code == 200, response.text
+        job = response.json()
+        assert job["status"] == "done", job
+        assert job["worker_image"] == image
+        assert job["result"]["verification_pass"] is True
+        url = f"/v1/matters/{matter}/jobs/{job['id']}/bundle"
+        packet = client.get(url)
+        assert packet.status_code == 200, packet.text
+        with zipfile.ZipFile(io.BytesIO(packet.content)) as archive:
+            assert not any(name.startswith("original/") for name in archive.namelist())
+            manifest = json.loads(archive.read("manifest.json"))
+            derivative = archive.read("derivative/" + manifest["derivative"]["filename"])
+            assert hashlib.sha256(derivative).hexdigest() == manifest["derivative"]["sha256"]
+            assert manifest["original"]["sha256"] == hashlib.sha256(original).hexdigest()
+            for required in (
+                "release_packet.json",
+                "certificate.html",
+                "README.txt",
+                "report.json",
+            ):
+                assert required in archive.namelist()
+        assert client.get(url + "?include_original=true").status_code == 403
+        granted = client.put(
+            f"/v1/matters/{matter}/acl", json={"user_id": "operator", "perm": "download_original"}
+        )
+        assert granted.status_code == 200
+        packet = client.get(url + "?include_original=true")
+        assert packet.status_code == 200, packet.text
+        with zipfile.ZipFile(io.BytesIO(packet.content)) as archive:
+            assert archive.read("original/spa.docx") == original
+
+        cfg = Config(root)
+        engine = make_engine(cfg)
+        with make_session_factory(engine)() as session:
+            stored_doc = session.get(Document, doc_id)
+            stored_job = session.get(Job, job["id"])
+            assert storage_from_config(cfg).read(stored_doc.storage_path) == original
+            assert Path(stored_doc.storage_path).read_bytes() != original
+            attempt_root = root / "matters" / matter / "jobs" / job["id"] / "attempts"
+            expected_bundle = Path(stored_job.bundle_dir)
+            relative = expected_bundle.relative_to(attempt_root)
+            assert len(relative.parts) == 3
+            assert relative.parts[0].startswith(f"{stored_job.attempt_number}-")
+            assert relative.parts[1:] == ("output", "bundle")
+            assert not (expected_bundle / "original").exists()
+        engine.dispose()
+        # The mail bridge uses this same dispatcher and real worker image.
+        from app.mail import PolicyReference, TrustedCallerContext
+        from app.mail.durable_processor import DurableAttachmentProcessor, TenantJobBinding
+        from app.mail.processor import ProcessRequest
+        from app.malware import get_scanner
+
+        service_actor = "mail:synthetic-tenant"
+        for permission in ("read", "upload", "sanitize"):
+            client.put(
+                f"/v1/matters/{matter}/acl", json={"user_id": service_actor, "perm": permission}
+            ).raise_for_status()
+        dispatcher = client.app.state.batch_dispatcher
+        processor = DurableAttachmentProcessor(
+            cfg=cfg,
+            session_factory=dispatcher._session_factory,
+            storage=storage_from_config(cfg),
+            scanner=get_scanner(),
+            dispatcher=dispatcher,
+            wait_s=60,
+            binding=TenantJobBinding(
+                "synthetic-tenant", matter, service_actor, PolicyReference("external_sharing", 1)
+            ),
+            allow_development=mode == "subprocess",
+        )
+        mail_request = ProcessRequest(
+            "part-1",
+            "spa.docx",
+            "spa.docx",
+            original,
+            hashlib.sha256(original).hexdigest(),
+            "docx",
+            PolicyReference("external_sharing", 1),
+            TrustedCallerContext("synthetic-tenant", "isolated-fixture", True, "mail-fixture"),
+        )
+        mail_result = processor.process(mail_request)
+        assert mail_result.status == "released", mail_result.detail
+        assert mail_result.verification == "engine_verified"
+        assert mail_result.output != original
+        assert hashlib.sha256(mail_result.output).hexdigest() == mail_result.output_sha256
+        with dispatcher._session_factory() as session:
+            mail_job = session.query(Job).filter_by(requested_by=service_actor).one()
+            assert mail_job.worker_image == image
+            assert mail_job.result_json["manifest"]["operator"] == {"id": service_actor}
+            assert mail_job.execution_receipt
+        # Whole-message receipt and outbox use the same image, encrypted store,
+        # retained jobs and full envelope; acquiring a ticket does not send mail.
+        from app.mail import Envelope
+        from app.mail.fixtures import AttachmentSpec, build_message
+        from app.mail.submissions import MailSubmissionRegistry
+
+        registry = MailSubmissionRegistry(
+            cfg=cfg,
+            session_factory=dispatcher._session_factory,
+            storage=storage_from_config(cfg),
+            binding=processor.binding,
+        )
+        raw_message = build_message(
+            attachments=(
+                AttachmentSpec(
+                    "spa.docx",
+                    original,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ),
+            )
+        )
+        envelope = Envelope("sender@example.test", ("to@example.test", "bcc@example.test"))
+        submission = registry.admit(
+            raw_message,
+            envelope,
+            TrustedCallerContext(
+                "synthetic-tenant",
+                "isolated-fixture",
+                True,
+                "whole-mail-fixture",
+                "fixture-peer",
+            ),
+        )
+        decision = registry.process(submission.id, processor)
+        assert decision.status == "released", decision
+        ticket = registry.prepare_delivery(submission.id)
+        assert ticket.envelope == envelope and ticket.raw != raw_message
+        assert registry.get(submission.id).status == "submitted"
+        assert registry.mark_ambiguous(ticket).status == "ambiguous"
+        jobs_dir = root / "matters" / matter / "jobs"
+        for job_id in (inspect["id"], job["id"]):
+            assert not list((jobs_dir / job_id).rglob("input"))
+        # A raw original must not remain in any worker output after dispatch.
+        assert all(path.read_bytes() != original for path in jobs_dir.rglob("*") if path.is_file())
+
+
+def test_real_subprocess_preserves_encrypted_original_custody(tmp_path, monkeypatch):
+    _encrypted_custody_flow(tmp_path, monkeypatch, "subprocess")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("COUNSELCLEAR_TEST_WORKER_IMAGE"),
+    reason="requires a built CounselClear image at an immutable repository digest",
+)
+def test_real_docker_image_inspect_sanitize_and_encrypted_custody(tmp_path, monkeypatch):
+    _encrypted_custody_flow(
+        tmp_path, monkeypatch, "docker", os.environ["COUNSELCLEAR_TEST_WORKER_IMAGE"]
+    )

@@ -2,29 +2,115 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/custody-record-truthfulness]
   pull_request:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   test:
+    name: ${{ matrix.check_name }}
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            check_name: test (ubuntu-latest)
+            shard: 1
+            shards: 1
+          - os: macos-latest
+            check_name: test (macos-latest)
+            shard: 1
+            shards: 1
+          - os: windows-latest
+            check_name: test (windows-latest, shard 1/3)
+            shard: 1
+            shards: 3
+          - os: windows-latest
+            check_name: test (windows-latest, shard 2/3)
+            shard: 2
+            shards: 3
+          - os: windows-latest
+            check_name: test (windows-latest, shard 3/3)
+            shard: 3
+            shards: 3
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install test deps
         run: python -m pip install -r requirements-dev.txt
 
+      - name: Install document tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libimage-exiftool-perl unzip
+          # Ubuntu's qpdf 11.9 lacks --remove-info (introduced in 11.10).
+          # Keep the upstream archive's bin/ and lib/ together for its RPATH.
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/qpdf.zip" \
+            https://github.com/qpdf/qpdf/releases/download/v12.4.1/qpdf-12.4.1-bin-linux-x86_64.zip
+          echo "db9122e88ec00c76ac6a14e09ffb92406db1773d47b968911ff6e69f28c09bf9  $RUNNER_TEMP/qpdf.zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/qpdf.zip" -d "$RUNNER_TEMP/qpdf-12.4.1"
+          echo "$RUNNER_TEMP/qpdf-12.4.1/bin" >> "$GITHUB_PATH"
+
+      - name: Install document tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install exiftool qpdf
+
+      - name: Install document tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nativePackages = @(
+            @{ Name = 'exiftool'; Version = '13.59.0' },
+            @{ Name = 'qpdf'; Version = '12.4.1' }
+          )
+          foreach ($nativePackage in $nativePackages) {
+            for ($installAttempt = 1; $installAttempt -le 3; $installAttempt++) {
+              choco install $nativePackage.Name --version $nativePackage.Version --yes --no-progress
+              $packageExit = $LASTEXITCODE
+              $nativeCommand = Get-Command $nativePackage.Name -ErrorAction SilentlyContinue
+              if ($packageExit -eq 0 -and $nativeCommand) { break }
+              if ($installAttempt -eq 3) {
+                throw "Native dependency $($nativePackage.Name) unavailable after three attempts (exit $packageExit)"
+              }
+              Start-Sleep -Seconds 15
+            }
+          }
+
+      - name: Verify native tools
+        run: |
+          exiftool -ver
+          qpdf --version
+          qpdf --help=--remove-info
+
       - name: Test
-        run: python -m pytest -q
+        if: runner.os != 'Windows'
+        # Keep the full mutation corpus in its own required matrix below. It
+        # consumed 12 minutes of a 30-minute Windows run before later tests.
+        run: >-
+          python -m pytest -o addopts= -v --tb=short --durations=10 --maxfail=1
+          --deselect tests/test_rfc3161_anchor_verification.py::test_condition_c_differential_fuzz_agrees_with_library_oracle
+
+      - name: Test (Windows shard)
+        if: runner.os == 'Windows'
+        run: >-
+          python tools/ci_pytest_shard.py --shard ${{ matrix.shard }} --shards ${{ matrix.shards }}
+          -- -o addopts= -v --tb=short --durations=10 --maxfail=1
+          --deselect tests/test_rfc3161_anchor_verification.py::test_condition_c_differential_fuzz_agrees_with_library_oracle
 
       - name: Validate OpenAPI spec
         if: matrix.os == 'ubuntu-latest'
@@ -32,7 +118,7 @@ jobs:
           python -c "import sys; sys.path.insert(0, 'service/scripts'); import server; from openapi_spec_validator import validate; validate(server.openapi_spec())"
 
       - name: Smoke (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && matrix.shard == 1
         shell: pwsh
         run: |
           python service/scripts/clean_text.py tests/fixtures/sample_watermarked.txt -o "$env:TEMP/wm.cleaned.txt" --stats &&
@@ -42,16 +128,16 @@ jobs:
           python service/scripts/clean_file.py tests/fixtures/sample_meta.svg -o "$env:TEMP/sample_meta.cleaned.svg"
 
       - name: Validate setup .ps1 scripts
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-latest' && matrix.shard == 1
         shell: pwsh
         run: |
-          $files = @('service/scripts/setup_ctrlregen.ps1', 'service/scripts/setup_synthid.ps1')
+          $files = @('research/harnesses/setup_ctrlregen.ps1', 'research/harnesses/setup_synthid.ps1')
           foreach ($f in $files) {
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$tokens, [ref]$errors) | Out-Null
             if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
           }
-          $ps1 = Get-Content service/scripts/setup_ctrlregen.ps1 -Raw
+          $ps1 = Get-Content research/harnesses/setup_ctrlregen.ps1 -Raw
           if ($ps1 -notmatch 'cuda\.is_available\(\)') { Write-Error 'post-install CUDA verification missing'; exit 1 }
 
       - name: Audit dependencies (pip-audit)
@@ -59,21 +145,136 @@ jobs:
         run: |
           python -m pip_audit -r requirements-dev.txt \
             -r service/requirements-app.txt \
-            -r service/scripts/requirements-synthid-scorer.txt
+            -r research/harnesses/requirements-synthid-scorer.txt
+
+  windows-test-complete:
+    # Preserve the existing required-check name. The matrix result requires
+    # every Windows shard (and the unchanged Linux/macOS main suites) to pass.
+    name: test (windows-latest)
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require successful main-suite matrix
+        env:
+          MAIN_TEST_RESULT: ${{ needs.test.result }}
+        run: test "$MAIN_TEST_RESULT" = success
+
+  timestamp-mutation-corpus:
+    name: Timestamp mutation corpus (${{ matrix.os }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Verify every mutation against the independent oracle
+        run: >-
+          python -m pytest -o addopts= -v --tb=short --durations=10
+          tests/test_rfc3161_anchor_verification.py::test_condition_c_differential_fuzz_agrees_with_library_oracle
 
   lint:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install test deps
         run: python -m pip install -r requirements-dev.txt
 
       - name: Lint
-        run: python -m ruff check service tests
+        run: python -m ruff check service tests tools/ci_pytest_shard.py
 
       - name: Format check
-        run: python -m ruff format --check service tests
+        run: python -m ruff format --check service tests tools/ci_pytest_shard.py
+
+  web:
+    name: Web tests, lint, and static export
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+
+  worker-image:
+    name: Production worker image and packet workflow
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Build and pin the actual worker image
+        run: |
+          docker run -d --name counselclear-ci-registry -p 127.0.0.1:5000:5000 registry:2
+          docker build -f service/Dockerfile.counselclear -t localhost:5000/counselclear:ci service
+          docker push localhost:5000/counselclear:ci
+          IMAGE=$(docker image inspect localhost:5000/counselclear:ci --format '{{index .RepoDigests 0}}')
+          echo "COUNSELCLEAR_TEST_WORKER_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+      - name: Exercise upload, inspect, release, and packet download
+        run: python -m pytest tests/test_worker_docker_smoke.py -v
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the same-origin web deployment
+        working-directory: web
+        run: npm ci && npm run build
+      - name: Install the deployment proxy
+        run: sudo apt-get update && sudo apt-get install -y nginx
+      - name: Rehearse HTTPS deployment with the real worker image
+        env:
+          COUNSELCLEAR_TEST_WEB_ROOT: ${{ github.workspace }}/web/out
+        run: python -m pytest tests/test_deployment_http_smoke.py -v
+
+  postgres-queue:
+    name: PostgreSQL job ownership and recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: counselclear_test
+          POSTGRES_PASSWORD: isolated-ci-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U counselclear_test -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Exercise independent owners, crash recovery and atomic publication
+        env:
+          COUNSELCLEAR_TEST_POSTGRES_URL: postgresql+psycopg://counselclear_test:isolated-ci-only@127.0.0.1:5432/postgres
+        run: python -m pytest tests/test_job_ownership.py tests/test_job_transactions.py tests/test_admission.py tests/test_storage_reference_migration.py tests/test_execution_admission.py tests/test_mail_durable_processor.py tests/test_mail_submissions.py -q

@@ -21,9 +21,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     with op.batch_alter_table("audit_events") as batch_op:
-        batch_op.create_unique_constraint(
-            "uq_audit_events_matter_seq", ["matter_id", "seq"]
-        )
+        batch_op.create_unique_constraint("uq_audit_events_matter_seq", ["matter_id", "seq"])
 
 
 def downgrade() -> None:

@@ -159,6 +159,7 @@ _REAL_JPEG_WITH_GPS = base64.b64decode(
     "oooA//9k="
 )
 
+
 def _jpeg_appn(marker: int, payload: bytes) -> bytes:
     return bytes([0xFF, marker]) + struct.pack(">H", len(payload) + 2) + payload
 
@@ -424,10 +425,7 @@ def test_clean_pdf_strip_preserves_real_jpeg_scan_data_byte_for_byte(tmp_path):
     assert len(out_streams) == 1
     orig_sos = _REAL_JPEG.find(b"\xff\xda")
     out_sos = out_streams[0].find(b"\xff\xda")
-    assert (
-        _REAL_JPEG[orig_sos:]
-        == out_streams[0][out_sos : out_sos + (len(_REAL_JPEG) - orig_sos)]
-    )
+    assert _REAL_JPEG[orig_sos:] == out_streams[0][out_sos : out_sos + (len(_REAL_JPEG) - orig_sos)]
 
 
 @NEED_EXIFTOOL_QPDF
@@ -665,7 +663,9 @@ def test_privacy_only_pdf_strips_gps_keeps_other_exif_and_provenance(tmp_path):
     et = shutil.which("exiftool")
     proc = subprocess.run(
         [et, "-GPSLatitude", "-Model", "-j", str(check_path)],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     tags = json.loads(proc.stdout)[0]
     assert "GPSLatitude" not in tags

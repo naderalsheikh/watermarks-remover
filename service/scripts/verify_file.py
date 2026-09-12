@@ -29,9 +29,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("original", type=Path)
     p.add_argument("derivative", type=Path)
-    p.add_argument("--policy", default="external_sharing",
-                   choices=("external_sharing", "privacy_only", "production",
-                            "evidence_preservation"))
+    p.add_argument(
+        "--policy",
+        default="external_sharing",
+        choices=("external_sharing", "privacy_only", "production", "evidence_preservation"),
+    )
     p.add_argument("--attest-signature-break", action="store_true")
     args = p.parse_args()
 

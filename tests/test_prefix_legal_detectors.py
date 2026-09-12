@@ -153,12 +153,8 @@ def test_wx_hidden_text_oracle_sees_the_vanish_run():
     """extract_docx_hidden_text (Task 3's oracle) is QName-based and already
     prefix-agnostic; pinned here so the wx: document's concealed run is
     visible to it exactly as the w: run is."""
-    assert container_meta.extract_docx_hidden_text(_pair_docx("wx")) == [
-        HIDDEN_SECRET
-    ]
-    assert container_meta.extract_docx_hidden_text(_pair_docx("w")) == [
-        HIDDEN_SECRET
-    ]
+    assert container_meta.extract_docx_hidden_text(_pair_docx("wx")) == [HIDDEN_SECRET]
+    assert container_meta.extract_docx_hidden_text(_pair_docx("w")) == [HIDDEN_SECRET]
 
 
 def test_wx_plaintext_extraction_matches_w():
@@ -232,9 +228,10 @@ def test_wx_verify_fails_while_deletion_survives():
     # Forge the failure mode this test exists to catch: a derivative that
     # still carries the deleted clause.
     buf = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(cleaned)) as zin, zipfile.ZipFile(
-        buf, "w", zipfile.ZIP_DEFLATED
-    ) as zout:
+    with (
+        zipfile.ZipFile(io.BytesIO(cleaned)) as zin,
+        zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout,
+    ):
         for info in zin.infolist():
             if info.filename == "word/document.xml":
                 doc = zin.read(info.filename).decode("utf-8")
@@ -248,9 +245,7 @@ def test_wx_verify_fails_while_deletion_survives():
     doctored = buf.getvalue()
     report = verify_derivative(data, doctored, plan, name="d.docx")
     assert report["pass"] is False, [c for c in report["checks"] if not c["pass"]]
-    oracle = next(
-        c for c in report["checks"] if c["name"] == "accept_all_deleted_text_absent"
-    )
+    oracle = next(c for c in report["checks"] if c["name"] == "accept_all_deleted_text_absent")
     assert oracle["pass"] is False, oracle
 
 
@@ -261,9 +256,7 @@ def test_wx_clean_verify_passes_with_oracle_check_present():
     data = _pair_docx("wx")
     plan, cleaned = _plan_and_apply(data)
     report = verify_derivative(data, cleaned, plan, name="d.docx")
-    oracle = next(
-        c for c in report["checks"] if c["name"] == "accept_all_deleted_text_absent"
-    )
+    oracle = next(c for c in report["checks"] if c["name"] == "accept_all_deleted_text_absent")
     assert oracle["pass"] is True, oracle
     assert report["pass"] is True, [c for c in report["checks"] if not c["pass"]]
 
@@ -274,7 +267,7 @@ def test_wx_clean_verify_passes_with_oracle_check_present():
 def _glossary_wx_docx() -> bytes:
     glossary_header = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
-        f'<wx:hdr {_decl("wx")}>'
+        f"<wx:hdr {_decl('wx')}>"
         "<wx:p><wx:r><wx:t>Glossary header.</wx:t></wx:r></wx:p>"
         "<wx:p><wx:r><wx:rPr><wx:vanish/></wx:rPr>"
         "<wx:t>GLOSSARY SECRET</wx:t></wx:r></wx:p></wx:hdr>"
@@ -330,7 +323,7 @@ def test_drawingml_move_to_does_not_trip_the_gate_or_detector():
         b'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
         b'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
         b"<w:body><w:p><w:r><w:t>shape</w:t></w:r></w:p>"
-        b"<a:custGeom><a:pathLst><a:path><a:moveTo><a:pt x=\"0\" y=\"0\"/></a:moveTo>"
+        b'<a:custGeom><a:pathLst><a:path><a:moveTo><a:pt x="0" y="0"/></a:moveTo>'
         b"</a:path></a:pathLst></a:custGeom></w:body></w:document>"
     )
     assert not container_meta._DOCX_LEGAL_MARKUP_RE.search(geom)
@@ -348,7 +341,5 @@ def test_w9_transitional_binding_is_tolerated():
         "<w9:body><w9:p><w9:r><w9:rPr><w9:vanish/></w9:rPr>"
         f"<w9:t>{HIDDEN_SECRET}</w9:t></w9:r></w9:p></w9:body></w9:document>"
     ).encode()
-    legal = container_meta.inspect_docx(_docx({"word/document.xml": doc}))[3][
-        "docx_legal"
-    ]
+    legal = container_meta.inspect_docx(_docx({"word/document.xml": doc}))[3]["docx_legal"]
     assert legal["hidden_vanish"] == 1, legal

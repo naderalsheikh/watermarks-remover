@@ -164,7 +164,9 @@ def packet_canonical_bytes(packet: dict, *, exclude_anchor: bool = False) -> byt
     if exclude_anchor:
         content.pop("anchor", None)
     _assert_canonical_scalar_types(content)
-    return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
 
 
 def custody_key_id(cfg: Config) -> str:
@@ -200,9 +202,11 @@ def custody_public_key_hex(cfg: Config) -> str:
     key = cfg.ensure_custody_signing_key()
     if not isinstance(key, Ed25519PrivateKey):
         raise RuntimeError("custody signing key is not an Ed25519 private key")
-    return key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
-    ).hex()
+    return (
+        key.public_key()
+        .public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+        .hex()
+    )
 
 
 def sign_release_packet(cfg: Config, packet: dict, *, exclude_anchor: bool = False) -> dict:
@@ -238,7 +242,9 @@ def sign_release_packet(cfg: Config, packet: dict, *, exclude_anchor: bool = Fal
         # canonical bytes would only make that circularity harder to see.
         "public_key": custody_public_key_hex(cfg),
         "signed_fields": (
-            PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR if exclude_anchor else PACKET_SIGNATURE_SIGNED_FIELDS
+            PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR
+            if exclude_anchor
+            else PACKET_SIGNATURE_SIGNED_FIELDS
         ),
         "digest": f"sha256:{digest}",
         "value": value,

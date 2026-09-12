@@ -68,6 +68,5 @@ def list_grants(s: Session, matter_id: str) -> list[dict]:
     for r in rows:
         by_user.setdefault(r.user_id, []).append(r.perm)
     return [
-        {"user_id": user_id, "perms": sorted(perms)}
-        for user_id, perms in sorted(by_user.items())
+        {"user_id": user_id, "perms": sorted(perms)} for user_id, perms in sorted(by_user.items())
     ]

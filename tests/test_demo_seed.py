@@ -109,7 +109,9 @@ def test_demo_seed_creates_matter_with_three_documents_and_releases(env):
 
     jobs = c.get(f"/v1/matters/{matter_id}/jobs").json()["jobs"]
     assert len(jobs) == 3
-    by_filename = {next(d["filename"] for d in docs if d["id"] == j["document_id"]): j for j in jobs}
+    by_filename = {
+        next(d["filename"] for d in docs if d["id"] == j["document_id"]): j for j in jobs
+    }
 
     # spa.docx: a done release with both a strip (the comment) and a
     # flag-only kept finding (hidden/vanish text) -- the "What was found"

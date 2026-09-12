@@ -168,17 +168,17 @@ def cmd_intake(args: argparse.Namespace) -> int:
             data = path.read_bytes()
             result = inspect_bytes(data, path.name)
             identities = (
-                identities_mod.extract_identities(data, result.format)
-                if identities_mod
-                else None
+                identities_mod.extract_identities(data, result.format) if identities_mod else None
             )
-            records.append({
-                "name": rel,
-                "kind": result.kind,
-                "format": result.format,
-                "findings": result.findings,
-                "identities": identities,
-            })
+            records.append(
+                {
+                    "name": rel,
+                    "kind": result.kind,
+                    "format": result.format,
+                    "findings": result.findings,
+                    "identities": identities,
+                }
+            )
         except Exception as e:  # keep the intake going on one bad file
             records.append({"name": rel, "error": str(e)})
 
@@ -201,8 +201,7 @@ def cmd_intake(args: argparse.Namespace) -> int:
                 {
                     **{k: v for k, v in r.items() if k != "findings"},
                     "findings": [
-                        f.to_dict() if hasattr(f, "to_dict") else f
-                        for f in r.get("findings", [])
+                        f.to_dict() if hasattr(f, "to_dict") else f for f in r.get("findings", [])
                     ],
                 }
                 for r in records
@@ -230,8 +229,9 @@ def main(argv: list[str] | None = None) -> int:
     ins = sub.add_parser("inspect", help="structured inspect; unknown/unsupported = 2")
     ins.add_argument("path", type=Path)
     ins.add_argument("--json", action="store_true")
-    ins.add_argument("--html", type=Path, metavar="OUT",
-                      help="also write a self-contained HTML report to OUT")
+    ins.add_argument(
+        "--html", type=Path, metavar="OUT", help="also write a self-contained HTML report to OUT"
+    )
     ins.set_defaults(func=cmd_inspect)
 
     san = sub.add_parser("sanitize", help="policy sanitize into a write-once bundle")

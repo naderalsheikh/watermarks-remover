@@ -51,6 +51,7 @@ def anchor_enabled() -> bool:
         return True
     return value.strip().lower() not in _TSA_DISABLED_VALUES
 
+
 # OID 2.16.840.1.101.3.4.2.1 (SHA-256) in DER. The query carries explicit
 # NULL AlgorithmIdentifier parameters: the default DigiCert TSA rejects
 # the absent-parameters form with HTTP 400 (confirmed live while

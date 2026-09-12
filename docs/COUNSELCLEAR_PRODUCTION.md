@@ -1,17 +1,24 @@
 # CounselClear — production deployment guide
 
-This guide turns the compose `legal` profile into a deployment a law firm's
-IT/security review can sign off. It separates three things explicitly:
+This guide describes the deployment components and the evidence still needed
+for a controlled pilot. Passing CI does not qualify a firm's deployment or any
+of the Desktop, Server, or Cloud editions. The current integration implements
+durable jobs, request retries, version-pinned S3 originals, and an internal mail
+attachment bridge. Live mail transport and central tenant administration remain
+separate work.
 
-- **enforced in code** — the product refuses to run unsafely;
-- **deployment configuration** — decisions this guide walks through;
-- **infrastructure obligations** — what your cloud/storage layer must
-  provide, because no application setting can.
+For an installed single-operator LOCAL/SQLite pilot, run the
+[read-only configuration preflight](COUNSELCLEAR_PREFLIGHT.md) under the API's
+service account and environment before the synthetic deployment rehearsal.
+It reports configuration blockers and unchecked runtime requirements without
+starting services, connecting to databases, or creating keys.
 
-Everything here assumes `docs/COUNSELCLEAR_DESIGN.md` as background. The
-threat model in one line: untrusted documents are parsed only inside
-disposable, network-off workers; the API process and the custody store must
-be protected accordingly.
+Use one API process with a durable data root. For untrusted document processing,
+use the Docker worker mode described below. The compose subprocess profile is a
+development/evaluation configuration. The API also performs upload screening and
+bounded archive inspection; it is incorrect to describe it as parsing no
+untrusted input. Worker isolation reduces the document engine's exposure but
+does not remove the API's own input-processing surface.
 
 ---
 
@@ -22,46 +29,37 @@ engine's 256 MiB limit, login rate-limit zone, docs endpoints 404'd at the
 edge, `X-Forwarded-Proto` for cookie `secure`) ships as
 `deploy/nginx-counselclear.conf.example`.
 
-```
-            TLS terminate            ┌─────────────────────────────┐
-browser ───────────────────────────▶│ reverse proxy (nginx/ALB)   │
-                                    └──────────┬──────────────────┘
-                                               │ plain HTTP, loopback/
-                                               │ private network only
-                                    ┌──────────▼──────────┐
-                                    │ cc-api  (1..N)      │────▶ managed Postgres
-                                    │ read_only container │      (COUNSELCLEAR_DATABASE_URL)
-                                    └──────────┬──────────┘
-                                               │ per-job: child process
-                                               │ (subprocess mode, §3)
-                                    ┌──────────▼──────────┐
-                                    │ custody volume       │  WORM originals + bundles
-                                    │ (matters/<id>/...)   │  → S3 + Object Lock (§5)
-                                    └─────────────────────┘
+```text
+browser -- HTTPS --> nginx (static web/out and same-origin API proxy)
+                         |
+                         v
+                  native cc-api (one process) --> SQLite or PostgreSQL
+                         |                              |
+                         +--> durable local data root <-+
+                         |    attempts, bundles, auth keys
+                         +--> original store: local or S3 version references
+                         |
+                         +--> Docker daemon --> per-job engine container
+                                                network off for metadata jobs
 ```
 
-- The API never parses documents; workers do (`app.runner`). The default
-  topology above isolates that parsing to a separate OS process
-  (subprocess mode) but not a separate container — see §3 for what it
-  would take to get real per-job container/gVisor isolation, and why that
-  is a different topology from "N containerized cc-api replicas."
-- Multiple API replicas are supported **only** with Postgres
-  (`COUNSELCLEAR_DATABASE_URL`); SQLite is single-writer by design.
-- The login throttle and ClamAV-definition cache are per-process; behind
-  replicas, enforce connection-level rate limits at the proxy too.
-- **Async batch dispatch (PR 31) is concurrency-bounded per process, not
-  cluster-wide.** `POST .../batches` durably queues child Job rows and
-  each `cc-api` process runs its own in-process `BatchDispatcher`
-  (`COUNSELCLEAR_BATCH_MAX_CONCURRENT`, default 4) against them. The
-  per-job *claim* is a real conditional `UPDATE ... WHERE status='queued'`,
-  so two dispatchers — in one process or across replicas sharing Postgres
-  — can never both execute the same job; that correctness guarantee holds
-  under N replicas. The *concurrency cap* does not: with N replicas the
-  effective global ceiling is `N × COUNSELCLEAR_BATCH_MAX_CONCURRENT`, not
-  the configured value, since no dispatcher knows about any other. There
-  is no cross-process lease yet. If you run multiple replicas, size
-  `COUNSELCLEAR_BATCH_MAX_CONCURRENT` down accordingly, or restrict batch
-  submission to a single replica, until a shared lease is added.
+- The API's Docker access remains host-root-equivalent in this topology.
+  Running it natively avoids a socket mount but does not remove that privilege.
+  Restrict the host to this deployment and treat API compromise as a host-level
+  custody risk. A separate constrained launcher is not implemented.
+- The durable job queue uses database claims, shared capacity, renewable
+  leases and attempt fencing. Single requests and batch children use the same
+  queue. A request disconnect does not cancel admitted work; expired owners
+  are recovered, and job/release/batch terminal records commit with their
+  audit events. See [job recovery operations](COUNSELCLEAR_JOB_RECOVERY.md).
+- Queue concurrency and transaction behavior have dedicated SQLite and real
+  PostgreSQL tests, including independent processes. This does not qualify an
+  entire multi-replica deployment: every executor still needs the same durable
+  data-root paths for attempt files and bundles. Apply migrations once before
+  starting workers. Keep the shipped one-API topology until shared-volume,
+  ingress/identity and restore behavior are qualified for the target environment.
+- The login throttle and ClamAV-definition cache remain per-process. A
+  multi-replica deployment also needs proxy-level connection throttling.
 
 ## 2. Images: pin everything
 
@@ -81,21 +79,23 @@ DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' registry.internal/co
 # use $DIGEST for COUNSELCLEAR_WORKER_IMAGE *and* the cc-api image reference
 ```
 
-Worker and API should be **the same digest**: the worker is just the API
-image invoked with an entrypoint that has no DB access. One digest means one
-supply-chain review per release.
+Build the native API checkout and worker image from the same reviewed revision.
+When using the evaluation API container, use that same image digest for both.
+The worker entrypoint does not use the database; Docker mode withholds its
+credentials and the main data root. Subprocess mode inherits API privileges.
+Keep previously admitted worker images available until their queued jobs drain.
 
 ## 3. Worker sandboxing: subprocess mode (default) vs. docker mode (+ optional gVisor)
 
-**Default: subprocess mode.** The shipped compose `cc-api` container is
+**Development default: subprocess mode.** The shipped compose `cc-api` container is
 read-only, non-root, and has no docker CLI or socket. `COUNSELCLEAR_WORKER_MODE`
 defaults to `subprocess`: each job runs as a plain child OS process of
 `cc-api` (`python -m app.worker`), isolated from the API's own DB session
 (zero DB imports in `app/worker.py`, per-job scoped directories) but *not*
 inside its own container — a parser exploit in a job can still reach
 anything the `cc-api` container's own filesystem/user can reach, which is
-why the container itself runs read-only and non-root. This is the deployment
-default and works with no further setup.
+why read-only and non-root settings alone do not qualify this mode for a
+production document-processing boundary.
 
 **Docker mode gets you per-job container isolation, but needs a real Docker
 daemon reachable from wherever the job launcher runs — which the
@@ -157,9 +157,9 @@ hardening upgrade available on top:
 
 Separately, if your orchestrator supports per-container runtimes, running
 `cc-api`'s own container under gVisor (or Kata) is still worth doing
-regardless of worker mode — the API parses nothing itself, so plain `runc`
-is acceptable, but gVisor is cheap insurance and shrinks the whole stack's
-kernel exposure, not just the workers'.
+regardless of worker mode — the API still handles uploads, archive screening, and authentication.
+Runtime availability and compatibility must be tested on the target host;
+the current real-image CI exercises Docker's default runtime, not gVisor.
 
 ## 4. Database
 
@@ -169,8 +169,10 @@ Use a managed Postgres where someone else owns patching and backups:
 COUNSELCLEAR_DATABASE_URL=postgresql+psycopg://counselclear:<secret>@db.internal:5432/counselclear
 ```
 
-- Migrations run automatically on every boot (`upgrade_head`) — replicas
-  racing at boot is safe (Alembic runs inside a transaction).
+- Startup invokes `upgrade_head`. Stop the existing service, preserve a cold
+  backup, and start one upgraded API process to apply migrations before admitting
+  requests. Alembic transactions are not a cross-process migration lock; do not
+  race application starts while schema changes are being applied.
 - Enable encryption at rest (KMS-backed storage encryption) and automated
   snapshots with PITR. The audit hash chain detects tampering but does not
   replace backups.
@@ -181,23 +183,27 @@ COUNSELCLEAR_DATABASE_URL=postgresql+psycopg://counselclear:<secret>@db.internal
 
 ## 5. Custody store: Object Lock, CMK, residency
 
-Originals and derivative bundles are written once (`custody.write_once`
-refuses overwrites of existing content) under `{data_root}/matters/...`.
-For production, put that directory on storage with real immutability:
+The original store is selected by `COUNSELCLEAR_STORAGE=local|s3`. Derivative
+bundles, attempt staging, and auth keys remain under the durable local data root;
+configuring S3 originals does not move or encrypt those files.
 
-**S3 + Object Lock (recommended shape)**
+**Local originals** use exclusive creation and read-only file permissions.
+Those permissions are not WORM storage against an administrator. Protect the
+volume and its backups according to the deployment's retention and access policy.
 
-- Create the bucket with **Object Lock enabled** (bucket property, only set
-  at creation), versioning on.
-- Use **compliance mode** retention for matter originals — nobody, including
-  root, can shorten it. Choose the retention from your jurisdiction's
-  retention schedule (e.g. 7–10 years); governance mode is only for testing.
-- Default retention on the bucket (e.g. `COMPLIANCE`, N days) plus a
-  lifecycle policy for non-original prefixes.
-- Mount options: s3fs/Mountpoint-for-S3 works for the pilot profile; for
-  throughput-sensitive deployments, sync to S3 asynchronously and keep the
-  local volume as cache — the app only requires POSIX write-once semantics
-  on the path it sees.
+**S3 originals** use the application's native S3 client, not a filesystem mount.
+Configure `COUNSELCLEAR_S3_BUCKET`, `COUNSELCLEAR_S3_REGION`, the optional prefix,
+and an explicit retention period. Startup requires enabled versioning and, when
+retention is nonzero, Object Lock. Writes retain the exact uploaded `VersionId`;
+reads and heads use that version. Missing or changed versions fail instead of
+selecting the latest object. Legacy key-only references require separate handling.
+See [object-version operations](COUNSELCLEAR_STORAGE_OBJECT_VERSIONS.md).
+
+The application requests COMPLIANCE retention when configured. Choose the period
+with the records owner before provisioning; do not treat an example retention
+value as a policy decision. S3 permissions, live provider behavior, key recovery,
+and restoration into the intended account still need deployment qualification.
+Do not substitute an S3 filesystem mount for the local queue/attempt volume.
 
 **CMK (customer-managed key)**
 
@@ -216,11 +222,13 @@ For production, put that directory on storage with real immutability:
   compute running `cc-api`/workers in one region. Cross-region replication
   would silently defeat residency promises — don't enable it unless counsel
   says otherwise.
-- The manifest records digests and tool versions, not personal data; the
-  documents themselves are what residency rules target.
+- Manifests, reports, filenames, actor identifiers, audit records, and document
+  bytes may all contain sensitive information. Include them in the same residency
+  and access review.
 - Note egress exceptions honestly: the `cc-freshclam` sidecar needs
   outbound 443 to `database.clamav.net`, and OIDC login calls your IdP.
-  Everything else (workers, DB, storage) stays inside the perimeter.
+  The TSA, S3/KMS, identity provider, and any enabled rewrite provider add their
+  own configured destinations. Review the actual endpoint inventory.
 
 ## 6. Authentication
 
@@ -268,10 +276,10 @@ check is purely informational, surfaced in `docker ps`.
 
 **Anchoring is ON by default, and the default endpoint is a third party.**
 An unset `COUNSELCLEAR_TSA_URL` resolves to `http://timestamp.digicert.com`,
-and every completed release makes an outbound request to it. Nothing else in
-this system calls out to the internet, so if your threat model treats egress
-from the release path as disqualifying, this is the one setting you must
-change before going live.
+and eligible packet generation can make an outbound request to it. Set the
+intended TSA explicitly before deployment. Disabling it removes timestamp
+egress; it does not disable OIDC, object storage/KMS, malware-definition updates,
+or an explicitly enabled rewrite provider.
 
 The default is deliberate. An RFC 3161 token is the only claim CounselClear
 makes that does not rest on the operator's own key: everything else — the
@@ -356,14 +364,18 @@ require, which this product does not yet implement.
       no warnings about subprocess mode / missing clamscan / empty allowlist
 - [ ] JSON request logs shipped somewhere durable; `X-Request-ID` echoed to
       clients matches log lines
-- [ ] `cc-freshclam` running and the shared definitions volume younger than
-      a week (else uploads fall back to depth checks only)
+- [ ] ClamAV is available and its definitions are current under the deployment
+      policy. A missing binary permits archive-depth-only screening; an installed
+      scanner returning an error rejects the upload. Readiness does not check
+      definitions or certify malware coverage.
 - [ ] Docs endpoints (`/docs`, `/openapi.json`) returning 404 — they are
       opt-in (`COUNSELCLEAR_ENABLE_DOCS=1`) for local development only
 - [ ] Audit chains verified periodically: `GET /v1/matters/{id}/audit`
       reports `chain_ok: true` (hash chain recomputed server-side)
-- [ ] Backup restore rehearsed: Postgres snapshot + custody volume restored
-      into a scratch environment, bundle download succeeds
+- [ ] Restore rehearsed for the selected database, original store, durable
+      volume, and keys. Verify the restored originals, audit chains, and downloaded
+      packets while the old deployment is unavailable. SQLite/local qualification
+      cannot stand in for a PostgreSQL/S3 restore.
 - [ ] pip-audit / image CVE scan in CI green for the deployed digest
 
 ## 8. What this product deliberately does not do
@@ -371,8 +383,8 @@ require, which this product does not yet implement.
 Stated so reviewers don't assume otherwise:
 
 - No multi-tenant org model — ACLs scope matters within one firm's install.
-- No built-in S3 client — custody targets a POSIX path; object-lock/KMS/
-  residency are properties of the storage you mount there (§5).
+- S3 support covers originals; local artifacts and database backups still need
+  their own durability, encryption, retention, and restore arrangements.
 - No per-user session revocation list — revocation = cookie-secret rotation
   (all sessions die together).
 - The audit chain proves integrity after the fact; it cannot prevent a
@@ -412,8 +424,7 @@ operator who has completed the license/ToS review and intends to enable it.
   stores `layer_b {strength, label, subject, jti}` and the manifest embeds
   the rewrite record. A post-hoc reviewer can prove exactly which
   authorization produced which rewritten derivative.
-- **Known limits:** single-use enforcement is in-memory plus a DB jti check
-  on the job row — adequate for single-process deployments; multi-worker
-  (Postgres) deployments should add a DB expression index on the jti before
-  relying on replay resistance across replicas (tracked in the PR 21
-  tenancy pass).
+- **Replay protection:** `attestation_uses` enforces the receipt identity in
+  the database. Admission, attestation consumption, job creation, and the audit
+  event commit together. Request retry receipts allow the original authorized
+  submission to be retrieved without consuming the attestation again.

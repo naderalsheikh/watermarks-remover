@@ -120,6 +120,53 @@ def mock_tsa():
 
 # --- §4.5 degradation: every failure mode returns an UNANCHORED result ---
 
+
+def test_suite_tsa_sentinel_retries_without_opening_a_socket(monkeypatch):
+    """The suite's default outage is deterministic on every OS, but must
+    still exercise query construction, both transport attempts, and fallback.
+    """
+    transport = tsa.urllib.request.urlopen
+    attempts = []
+
+    def record_attempt(request, *args, **kwargs):
+        attempts.append(request)
+        return transport(request, *args, **kwargs)
+
+    def unexpected_connection(*args, **kwargs):
+        raise AssertionError("the test TSA sentinel must never open a socket")
+
+    monkeypatch.setattr(socket.socket, "connect", unexpected_connection)
+    monkeypatch.setattr(tsa.urllib.request, "urlopen", record_attempt)
+    assert tsa.anchor_enabled()
+    assert tsa.request_anchor(REAL_SIG_A) == tsa.UNANCHORED
+    assert len(attempts) == 2
+    assert all(request.full_url == "http://127.0.0.1:9" for request in attempts)
+    expected_query = tsa.build_timestamp_query(hashlib.sha256(REAL_SIG_A).digest())
+    assert all(request.data == expected_query for request in attempts)
+
+
+def test_suite_tsa_sentinel_allows_a_test_to_replace_the_transport(monkeypatch):
+    """A test-provided HTTP transport overrides the suite's default outage,
+    including when that test deliberately retains the sentinel URL.
+    """
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    reply = (FIXTURES / "rfc3161_reply_full_a.der").read_bytes()
+    attempts = []
+
+    @contextmanager
+    def successful_transport(request, *args, **kwargs):
+        attempts.append(request)
+        yield SimpleNamespace(status=200, read=lambda: reply)
+
+    monkeypatch.setattr(tsa.urllib.request, "urlopen", successful_transport)
+    result = tsa.request_anchor(REAL_SIG_A)
+    assert result["type"] == "rfc3161-tsa"
+    assert len(attempts) == 1
+    assert attempts[0].full_url == "http://127.0.0.1:9"
+
+
 def test_timeout_degrades_to_unanchored(mock_tsa):
     """A TSA that stalls past the client timeout must produce the exact
     today-shaped unanchored result, never an exception into the release
@@ -173,6 +220,7 @@ def test_unreachable_host_degrades_to_unanchored():
 
 
 # --- §4 happy path: a granted token becomes the anchor dict ---
+
 
 def test_granted_token_produces_rfc3161_anchor(mock_tsa):
     """The end-to-end happy path against the REAL captured DigiCert

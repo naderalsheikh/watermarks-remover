@@ -15,15 +15,15 @@ import uuid
 import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Annotated
 
-import custody as custody_mod  # WORM storage only — never parses documents
 import schemas_meta  # published-schema registry: pins artifacts to contracts (PR 63)
 from common import MAX_INPUT_BYTES  # a size constant, not a parser
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 # Imported as a module (not by name): tests stub IdP calls on the module
@@ -34,10 +34,12 @@ from . import oidc as oidc_mod
 # inspect_bytes/clean_to_bundle — untrusted bytes are parsed only inside
 # isolated worker processes (see app.runner). A test enforces the ban.
 from .acl import OPERATOR, bootstrap_operator, grant, has_perm, list_grants, perms_of, revoke
-from .audit import _terminal_hash_facts, append_event, event_hash, verify_chain
+from .admission import lookup_admission, new_job, remember_admission, stage_document
+from .audit import append_event, event_hash, lock_matter, verify_chain
 from .config import Config
 from .db import make_engine, make_session_factory
 from .dispatcher import BatchDispatcher, sync_release
+from .job_lifecycle import complete_batch, finish_release
 from .malware import get_scanner
 from .migrate import upgrade_head
 from .models import (
@@ -50,10 +52,8 @@ from .models import (
     MatterAcl,
     Release,
     _now,
-    _uuid,
 )
 from .oidc import OidcError
-from .runner import run_job, sync_job
 from .security import (
     ATTEST_STRENGTHS,
     LOCAL_SUBJECT,
@@ -70,8 +70,7 @@ from .security import (
     verify_attestation,
     verify_password,
 )
-from .storage import StorageError as StorageError_
-from .storage import original_key, storage_from_config
+from .storage import StorageError, storage_from_config
 from .tsa import anchor_enabled, request_anchor
 from .tsa import describe_posture as tsa_posture
 
@@ -142,8 +141,7 @@ def _retention_limitations(manifest: dict, actions: list[str]) -> list[str]:
             # The exact combination the test case caught: retained AND no
             # operator justification. Named as such, not buried.
             basis_clause = (
-                " NO OPERATOR LEGAL BASIS WAS SUPPLIED for retaining it "
-                "(legal basis: unspecified)."
+                " NO OPERATOR LEGAL BASIS WAS SUPPLIED for retaining it (legal basis: unspecified)."
             )
         else:
             basis_clause = f" Operator legal basis: {basis}" + (f" — {note}" if note else "") + "."
@@ -422,6 +420,8 @@ def _render_job_certificate_html(
     # recipient reading the certificate inside a packet and the JSON
     # artifacts next to it never sees two words for one fact.
     attestation_kind: str | None = None,
+    release_snapshot: bool = False,
+    audit_evidence_available: bool = True,
 ) -> str:
     """Self-contained per-job custody/transaction certificate (PR 33).
 
@@ -480,7 +480,9 @@ def _render_job_certificate_html(
         if release_context.get("recipient_name"):
             recipient_line += f" — {esc(release_context['recipient_name'])}"
         purpose_line = (
-            f"<br>Purpose: {esc(release_context['purpose'])}" if release_context.get("purpose") else ""
+            f"<br>Purpose: {esc(release_context['purpose'])}"
+            if release_context.get("purpose")
+            else ""
         )
         intent_line = (
             "Intended to leave the organization"
@@ -606,10 +608,12 @@ def _render_job_certificate_html(
         v_pass = verification.get("pass")
         checks = verification.get("checks") or []
         checks_html = (
-            "".join(f"<li>{esc(c)}</li>" for c in checks) if checks else "<li>(no detail recorded)</li>"
+            "".join(f"<li>{esc(c)}</li>" for c in checks)
+            if checks
+            else "<li>(no detail recorded)</li>"
         )
         verification_html = (
-            f"<p>Result: <span class=\"{'chain-ok' if v_pass else 'chain-broken'}\">"
+            f'<p>Result: <span class="{"chain-ok" if v_pass else "chain-broken"}">'
             f"{'passed' if v_pass else 'FAILED'}</span></p><ul>{checks_html}</ul>"
         )
 
@@ -648,7 +652,7 @@ def _render_job_certificate_html(
                 f"<tr><td>{esc(d.get('subtype', ''))}</td>"
                 f"<td>{esc(d.get('action', ''))}</td>"
                 f"<td>{esc(d.get('reason') or '—')}</td>"
-                f"<td><span class=\"{cls}\">{esc(label)}</span></td>"
+                f'<td><span class="{cls}">{esc(label)}</span></td>'
                 f"<td>{esc(basis or 'unspecified')}</td></tr>"
             )
         dispositions_html = (
@@ -679,7 +683,9 @@ def _render_job_certificate_html(
     # retained half stays a policy position on purpose: retention IS the
     # policy's standing decision, independent of what one file contained.
     residual_html = ""
-    if residual_metadata and (residual_metadata.get("stripped") or residual_metadata.get("retained")):
+    if residual_metadata and (
+        residual_metadata.get("stripped") or residual_metadata.get("retained")
+    ):
         stripped = residual_metadata.get("stripped") or []
         retained = residual_metadata.get("retained") or []
         stripped_html = (
@@ -719,6 +725,32 @@ def _render_job_certificate_html(
         "stated here, and it is <strong>not</strong> a legal opinion. Any "
         "limitation listed below is part of the certificate, not a defect in it."
     )
+    generation_html = (
+        f"Snapshot generated: {esc(generated_at)} UTC · Release requested by "
+        f"<code>{esc(generated_by)}</code>"
+        if release_snapshot
+        else f"Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code>"
+    )
+    snapshot_note = (
+        '<p class="disclaimer">This is the preserved certificate snapshot for this release. '
+        "Its statements, including the job audit assessment, describe the recorded facts "
+        "at the snapshot generation time. A later download does not update that assessment. "
+        "Each download is recorded separately in the audit log.</p>"
+        if release_snapshot
+        else ""
+    )
+    custody_html = (
+        f"<p>{esc(audit_event_count)} audit event(s) recorded for this job in the matter's "
+        "hash-chained audit log; each recomputed and confirmed to match its stored hash: "
+        f'<span class="{"chain-ok" if audit_integrity_ok else "chain-broken"}">'
+        f"{'OK' if audit_integrity_ok else 'MISMATCH'}</span>. This is a check of this "
+        "job's own recorded events only, not a walk of the matter's complete audit "
+        "chain — see the matter's audit log (admin access) for that.</p>"
+        if audit_evidence_available
+        else "<p>UNAVAILABLE: no job execution audit event was recorded for this failed "
+        "release. No job audit integrity assessment is available. See the matter's audit "
+        "log (admin access) for its release and cancellation or recovery records.</p>"
+    )
 
     return f"""<!doctype html>
 <html>
@@ -752,7 +784,8 @@ Document ID: <code>{esc(document_id)}</code><br>
 Job ID: <code>{esc(job_id)}</code> · kind: {esc(kind)} · status:
 <span class="status">{esc(status)}</span><br>
 Created: {esc(created_utc)} UTC{f" · Finished: {esc(finished_utc)} UTC" if finished_utc else ""}<br>
-Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
+{generation_html}</p>
+{snapshot_note}
 <div class="disclaimer">{disclaimer}</div>
 
 <div class="limitations">
@@ -786,12 +819,7 @@ Generated: {esc(generated_at)} UTC by <code>{esc(generated_by)}</code></p>
 {verification_html}
 
 <h2>Custody record</h2>
-<p>{esc(audit_event_count)} audit event(s) recorded for this job in the matter's
-hash-chained audit log; each recomputed and confirmed to match its stored hash:
-<span class="{"chain-ok" if audit_integrity_ok else "chain-broken"}">
-{"OK" if audit_integrity_ok else "MISMATCH"}</span>. This is a check of this
-job's own recorded events only, not a walk of the matter's complete audit
-chain — see the matter's audit log (admin access) for that.</p>
+{custody_html}
 
 <div class="limitations">
 <h2>Limitations — read before relying on this certificate</h2>
@@ -801,6 +829,155 @@ chain — see the matter's audit log (admin access) for that.</p>
 </body>
 </html>
 """
+
+
+def _certificate_audit_state(s: Session, matter_id: str, job_id: str):
+    """Current job-scoped evidence, excluding later download/issuance events."""
+    events = [
+        ev
+        for ev in s.query(AuditEvent)
+        .populate_existing()
+        .filter(
+            AuditEvent.matter_id == matter_id,
+            AuditEvent.action.in_(("job.inspect", "job.sanitize")),
+        )
+        .order_by(AuditEvent.seq, AuditEvent.id)
+        .all()
+        if (ev.payload or {}).get("job_id") == job_id
+    ]
+    intact = all(
+        event_hash(ev.prev_hash, ev.seq, ev.actor_id, ev.action, ev.payload) == ev.row_hash
+        for ev in events
+    )
+    evidence = [
+        {
+            "id": ev.id,
+            "seq": ev.seq,
+            "actor_id": ev.actor_id,
+            "action": ev.action,
+            "payload": ev.payload,
+            "prev_hash": ev.prev_hash,
+            "row_hash": ev.row_hash,
+            "at": ev.at,
+        }
+        for ev in events
+    ]
+    digest = hashlib.sha256(
+        json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return events, intact, digest
+
+
+def _store_release_certificate_snapshot(s: Session, release: Release, candidate: dict) -> dict:
+    """Persist only the first candidate and return that winner, including after a race."""
+    s.execute(
+        update(Release)
+        .where(Release.id == release.id, Release.certificate_snapshot.is_(None))
+        .values(certificate_snapshot=candidate)
+        .execution_options(synchronize_session=False)
+    )
+    s.commit()
+    # Sessions retain their identity map after commit. A losing caller must
+    # never return its own candidate or its stale pre-claim Release value.
+    s.refresh(release, attribute_names=["certificate_snapshot"])
+    return release.certificate_snapshot
+
+
+def _certificate_snapshot_checksum(value: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _certificate_source_digest(matter: Matter, job: Job, doc: Document, release: Release) -> str:
+    # Display labels may change; the terminal execution and release intent may
+    # not silently disagree with the preserved certificate used by the packet.
+    return _certificate_snapshot_checksum(
+        {
+            "matter_id": matter.id,
+            "document": {
+                key: getattr(doc, key) for key in ("id", "matter_id", "filename", "sha256")
+            },
+            "job": {
+                key: getattr(job, key)
+                for key in (
+                    "id",
+                    "matter_id",
+                    "document_id",
+                    "kind",
+                    "status",
+                    "error",
+                    "created_utc",
+                    "finished_utc",
+                    "policy_id",
+                    "attestation",
+                    "result_json",
+                )
+            },
+            "release": {
+                key: getattr(release, key)
+                for key in (
+                    "id",
+                    "matter_id",
+                    "document_id",
+                    "job_id",
+                    "batch_id",
+                    "policy_id",
+                    "profile_id",
+                    "recipient_type",
+                    "recipient_name",
+                    "purpose",
+                    "intended_external",
+                    "requested_by",
+                    "predecessor_release_id",
+                    "status",
+                    "created_utc",
+                    "finished_utc",
+                )
+            },
+        }
+    )
+
+
+def _certificate_snapshot_parts(
+    snapshot: dict, evidence_digest: str, source_digest: str
+) -> tuple[str, str | None, list[str]]:
+    """Reject stale evidence or damaged internal state without replacing historical bytes."""
+    if not isinstance(snapshot, dict):
+        raise HTTPException(
+            409, "Stored release certificate snapshot is invalid; review its custody record."
+        )
+    body = snapshot.get("html")
+    policy_id = snapshot.get("policy_id")
+    limitations = snapshot.get("limitations")
+    if (
+        type(snapshot.get("version")) is not int
+        or snapshot.get("version") != 1
+        or not isinstance(body, str)
+        or (policy_id is not None and not isinstance(policy_id, str))
+        or not isinstance(limitations, list)
+        or not all(isinstance(item, str) for item in limitations)
+        or snapshot.get("snapshot_sha256")
+        != _certificate_snapshot_checksum(
+            {key: value for key, value in snapshot.items() if key != "snapshot_sha256"}
+        )
+    ):
+        raise HTTPException(
+            409, "Stored release certificate snapshot is invalid; review its custody record."
+        )
+    if snapshot.get("audit_evidence_sha256") != evidence_digest:
+        raise HTTPException(
+            409,
+            "Job audit evidence changed after this release certificate snapshot. "
+            "Review the custody record; the preserved certificate has not been replaced.",
+        )
+    if snapshot.get("source_facts_sha256") != source_digest:
+        raise HTTPException(
+            409,
+            "Recorded job or release facts changed after this certificate snapshot. "
+            "Review the custody record; the preserved certificate has not been replaced.",
+        )
+    return body, policy_id, list(limitations)
 
 
 # Four frozen v1 default policies (docs/COUNSELCLEAR_DESIGN.md, "Key
@@ -1253,6 +1430,7 @@ class BatchReleaseBody(BaseModel):
     intended_external: bool = True
     reason: str = ""
 
+
 class AttestationBody(BaseModel):
     matter_id: str
     document_id: str
@@ -1343,7 +1521,12 @@ def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
     affected_batch_ids = [
         row[0]
         for row in s.query(Job.batch_id)
-        .filter(Job.status == "running", Job.batch_id.isnot(None))
+        .filter(
+            Job.status == "running",
+            Job.batch_id.isnot(None),
+            Job.lease_token.is_(None),
+            Job.requested_by.is_(None),
+        )
         .distinct()
         .all()
     ]
@@ -1357,8 +1540,9 @@ def _sweep_orphaned_jobs(s: Session) -> tuple[int, list[str]]:
         row[0]
         for row in s.query(Job.id)
         .filter(
-            (Job.status == "running")
-            | ((Job.status == "queued") & (Job.batch_id.is_(None)))
+            Job.lease_token.is_(None),
+            Job.requested_by.is_(None),
+            (Job.status == "running") | ((Job.status == "queued") & (Job.batch_id.is_(None))),
         )
         .all()
     ]
@@ -1443,7 +1627,7 @@ def _log_startup_posture(cfg: Config, swept: int, storage, *, reconciled_release
         )
     if cfg.worker_mode != "docker":
         log.warning(
-            'worker_mode=%s: sanitize/inspect jobs run as a plain child '
+            "worker_mode=%s: sanitize/inspect jobs run as a plain child "
             "process of this API, sharing its filesystem access — not "
             "isolated from a hostile file. Set COUNSELCLEAR_WORKER_MODE="
             "docker (see compose.yaml's legal profile) for real isolation.",
@@ -1698,7 +1882,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
         key = cfg.ensure_custody_signing_key().public_key()
         pem = key.public_bytes(
-            encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
         ).decode("utf-8")
         return {"key_id": custody_key_id(cfg), "algorithm": "ed25519", "public_key_pem": pem}
 
@@ -1713,7 +1898,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         return {
             "product": "CounselClear",
             "message": "This is the CounselClear API root. Authenticated resources live under /v1/...",
-            "unauthenticated_routes": ["/health", "/health/ready", "/v1/auth/login", "/v1/auth/config"],
+            "unauthenticated_routes": [
+                "/health",
+                "/health/ready",
+                "/v1/auth/login",
+                "/v1/auth/config",
+            ],
             "docs": "docs/COUNSELCLEAR_DESIGN.md, docs/COUNSELCLEAR_PRODUCTION.md",
         }
 
@@ -1805,8 +1995,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # COUNSELCLEAR_COOKIE_SECURE=true/false overrides for proxy
         # deployments that cannot forward the proto.
         response.set_cookie(
-            "cc_session", issue_session(cfg),
-            httponly=True, samesite="strict", secure=_cookie_secure(request),
+            "cc_session",
+            issue_session(cfg),
+            httponly=True,
+            samesite="strict",
+            secure=_cookie_secure(request),
         )
         return {"ok": True}
 
@@ -1989,7 +2182,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         }
 
     @app.post("/v1/matters")
-    def create_matter(body: MatterBody, user: str = Depends(principal), s: Session = Depends(db_session)):
+    def create_matter(
+        body: MatterBody, user: str = Depends(principal), s: Session = Depends(db_session)
+    ):
         matter = Matter(name=body.name)
         s.add(matter)
         s.flush()
@@ -2019,42 +2214,28 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     # --- documents ----------------------------------------------------------
 
-    def _upload_document_bytes(matter_id: str, filename: str, data: bytes, user: str, s: Session) -> Document:
+    def _upload_document_bytes(
+        matter_id: str, filename: str, data: bytes, user: str, s: Session
+    ) -> Document:
         """Shared body of upload_document, taking already-read bytes rather
         than an UploadFile -- lets a non-HTTP caller (POST .../demo-seed,
         PR 45) create a real Document through the exact same scan/storage/
         audit path a browser upload uses, instead of a second, divergent
         implementation."""
-        name = Path(filename or "upload").name
-        verdict = get_scanner().scan(data, name)
-        if not verdict.clean:
-            raise HTTPException(422, f"malware scanner flagged upload ({verdict.scanner})")
-        doc = Document(
-            id=_uuid(),
-            matter_id=matter_id,
-            filename=name,
-            sha256=custody_mod.sha256_bytes(data),
-            bytes=len(data),
-            storage_path="",
-        )
-        key = original_key(cfg.org, matter_id, doc.id, name)
         try:
-            doc.storage_path = storage.write_once(key, data)
-        except StorageError_ as e:
-            raise HTTPException(409, str(e)) from e
-        s.add(doc)
-        append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="document.upload",
-            payload={
-                "document_id": doc.id,
-                "filename_ext": Path(name).suffix,
-                "sha256": doc.sha256,
-                "bytes": doc.bytes,
-            },
-        )
+            doc = stage_document(
+                s,
+                cfg=cfg,
+                storage=storage,
+                scanner=get_scanner(),
+                matter_id=matter_id,
+                filename=filename,
+                data=data,
+                actor_id=user,
+                audit_append=append_event,
+            )
+        except StorageError as exc:
+            raise HTTPException(409, str(exc)) from exc
         s.commit()
         return doc
 
@@ -2110,25 +2291,80 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
 
     # --- jobs ---------------------------------------------------------------
 
-    def _create_job(matter_id: str, doc_id: str, kind: str, s: Session, **kw) -> Job:
-        job = Job(matter_id=matter_id, document_id=doc_id, kind=kind, **kw)
-        s.add(job)
+    def _new_job(**values):
+        return new_job(cfg, **values)
+
+    def _admission(s, matter_id, user, operation, key, docs, body=None, policy_id=None):
+        return lookup_admission(
+            s,
+            matter_id=matter_id,
+            actor_id=user,
+            operation=operation,
+            key=key,
+            payload={
+                "documents": [{"id": d.id, "sha256": d.sha256, "bytes": d.bytes} for d in docs],
+                "body": body.model_dump(mode="json") if body is not None else {},
+                "resolved_policy_id": policy_id,
+            },
+        )
+
+    def _respond_job(s, matter_id, job, prefer):
+        job_id, kind, actor = job.id, job.kind, job.requested_by
         s.commit()
-        return job
+        dispatcher.wake()
+        if _wants_async(prefer) and job.status not in ("done", "refused", "failed"):
+            return JSONResponse(
+                status_code=202,
+                content=_job_dict(job),
+                headers={
+                    "Location": f"/v1/matters/{matter_id}/jobs/{job_id}",
+                    "Preference-Applied": "respond-async",
+                    "Retry-After": "1",
+                },
+            )
+        _execute_job(job_id, kind=kind, actor_id=actor)
+        s.expire_all()
+        return _job_dict(_job(matter_id, job_id, s))
 
-    def _execute_job(job_id: str, kind: str) -> None:
-        """Run the queued job in an isolated worker process (PR 17).
+    def _wants_async(prefer):
+        return "respond-async" in [p.strip().lower() for p in (prefer or "").split(",")]
 
-        The worker performs all status transitions; sync_job() is the
-        crash/timeout backstop that guarantees a terminal status.
-        Timeout budget derives from engine Caps per kind (PR 18).
+    def _execute_job(job_id: str, kind: str, actor_id: str) -> int | None:
+        """Compatibility wait over durable background admission/execution.
+
+        Disconnect/restart leaves the admitted job with the dispatcher.
         """
-        s = session_factory()
-        try:
-            res = run_job(cfg, s, job_id, kind=kind, storage=storage)
-            sync_job(s, job_id, res)
-        finally:
-            s.close()
+        dispatcher.wake()
+        deadline = time.monotonic() + cfg.worker_timeout_s + 60
+        while time.monotonic() < deadline:
+            try:
+                with session_factory() as waiting:
+                    job = waiting.get(Job, job_id)
+                    if job is None:
+                        raise HTTPException(404, "job not found")
+                    if job.status in ("done", "refused", "failed"):
+                        release = (
+                            waiting.query(Release).filter(Release.job_id == job_id).one_or_none()
+                        )
+                        return (
+                            _release_event_seq(
+                                waiting, job.matter_id, release.id, "release.terminal"
+                            )
+                            if release is not None
+                            else None
+                        )
+            except OperationalError as exc:
+                # A busy SQLite writer is a transient status-read failure,
+                # not a failed job. End this read transaction and try again.
+                code = getattr(exc.orig, "sqlite_errorcode", 0) or 0
+                if code & 0xFF not in (5, 6):  # SQLITE_BUSY / SQLITE_LOCKED
+                    raise
+            time.sleep(0.05)
+        raise HTTPException(
+            503,
+            detail={"message": "job remains queued or running", "job_id": job_id},
+            headers={"Retry-After": "2"},
+        )
 
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/inspect-jobs")
     def inspect_job(
@@ -2136,27 +2372,19 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         doc_id: str,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
+        prefer: Annotated[str | None, Header()] = None,
     ):
         _require(matter_id, "inspect", s, user)
         doc = _document(matter_id, doc_id, s)
-        job = _create_job(matter_id, doc.id, "inspect", s)
-        _execute_job(job.id, kind="inspect")
-        s.expire_all()
-        finished = _job(matter_id, job.id, s)
-        findings = (finished.result_json or {}).get("findings") or []
-        append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="job.inspect",
-            payload={
-                "job_id": job.id,
-                "document_id": doc.id,
-                "status": finished.status,
-                "findings_count": len(findings),
-            },
-        )
-        return _job_dict(finished)
+        existing, ticket = _admission(s, matter_id, user, "inspect", idempotency_key, [doc])
+        if existing is not None:
+            return _respond_job(s, matter_id, _job(matter_id, existing.resource_id, s), prefer)
+        job = _new_job(matter_id=matter_id, document_id=doc.id, kind="inspect", requested_by=user)
+        s.add(job)
+        s.flush()
+        remember_admission(s, ticket, resource_kind="job", resource_id=job.id)
+        return _respond_job(s, matter_id, job, prefer)
 
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/sanitize-jobs")
     def sanitize_job(
@@ -2165,10 +2393,17 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: SanitizeBody | None = None,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
+        prefer: Annotated[str | None, Header()] = None,
     ):
         _require(matter_id, "sanitize", s, user)
         doc = _document(matter_id, doc_id, s)
         body = body or SanitizeBody()
+        existing, ticket = _admission(
+            s, matter_id, user, "sanitize", idempotency_key, [doc], body, body.policy_id
+        )
+        if existing is not None:
+            return _respond_job(s, matter_id, _job(matter_id, existing.resource_id, s), prefer)
         layer_b: dict | None = None
         attest_claims: dict | None = None
         jti: str | None = None
@@ -2196,7 +2431,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "jti": jti,
             }
             attest_claims = claims
-        job = Job(
+        job = _new_job(
+            requested_by=user,
             matter_id=matter_id,
             document_id=doc.id,
             kind="sanitize",
@@ -2227,44 +2463,21 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 s.rollback()
                 raise HTTPException(403, "attestation token already used") from e
         if layer_b is not None and attest_claims is not None:
-            # Consume only once the job + attestation_uses rows are staged
-            # in this (not-yet-committed) transaction: a rollback above must
-            # not have already burned the token in-memory with no durable
-            # record to show for it.
-            consume_attestation(attest_claims)
+            # Persist authorization with admission; update the in-memory
+            # replay cache only after this whole transaction commits.
             append_event(
                 s,
                 matter_id=matter_id,
                 actor_id=user,
                 action="attest.used",
+                commit=False,
                 payload={"jti": jti, "job_id": job.id, "strength": layer_b["strength"]},
             )
+        remember_admission(s, ticket, resource_kind="job", resource_id=job.id)
         s.commit()
-        _execute_job(job.id, kind="sanitize")
-        s.expire_all()
-        finished = _job(matter_id, job.id, s)
-        result = finished.result_json or {}
-        actions = (result.get("manifest") or {}).get("actions") or []
-        no_decision_count = sum(1 for a in actions if NO_DECISION_MARKER in a)
-        append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="job.sanitize",
-            payload={
-                "job_id": job.id,
-                "document_id": doc.id,
-                "policy_id": body.policy_id,
-                "status": finished.status,
-                "verification_pass": result.get("verification_pass"),
-                "no_decision_count": no_decision_count,
-                # MUST-1: chain-commit the artifact hashes the release
-                # packet will later declare, so a tampered manifest can't
-                # re-hash "clean" (see _terminal_hash_facts).
-                **_terminal_hash_facts(finished),
-            },
-        )
-        return _job_dict(finished)
+        if attest_claims is not None:
+            consume_attestation(attest_claims)
+        return _respond_job(s, matter_id, job, prefer)
 
     def _resolve_release_profile(profile_id: str) -> dict:
         profile = next((p for p in RELEASE_PROFILES if p["id"] == profile_id), None)
@@ -2359,9 +2572,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         machine-checkable". For a done release it's a lightweight,
         always-available companion to the full release_packet.json
         (job_bundle, below), which additionally carries the derivative
-        itself. Computing the certificate here (via _build_certificate_html,
-        which is side-effect-free -- it does not itself append
-        certificate.issued) lets this cite a real, hash-bindable
+        itself. Selecting the preserved certificate here (via
+        _build_certificate_html, which persists its first snapshot but
+        does not append certificate.issued) lets this cite a real, hash-bindable
         certificate without forcing an extra issuance event on every
         release creation; a caller who wants the actual HTML bytes still
         fetches GET .../jobs/{job_id}/certificate, which logs its own
@@ -2410,8 +2623,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # the only structured record the predecessor ever produced.
             # Omitted entirely for a first release (None), never a
             # fabricated or null-typed link.
-            **({"predecessor_release_id": release.predecessor_release_id}
-               if release.predecessor_release_id else {}),
+            **(
+                {"predecessor_release_id": release.predecessor_release_id}
+                if release.predecessor_release_id
+                else {}
+            ),
             "original_sha256": doc.sha256,
             "created_at": release.created_utc,
             "finished_at": release.finished_utc,
@@ -2458,6 +2674,43 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             },
         }
 
+    def _respond_release(s, matter, doc, release, prefer):
+        job_id = release.job_id
+        job = _job(matter.id, job_id, s)
+        s.commit()
+        dispatcher.wake()
+        if _wants_async(prefer) and job.status not in ("done", "refused", "failed"):
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "release": _release_dict(release),
+                    "job": _job_dict(job, release_id=release.id, profile_id=release.profile_id),
+                    "release_result": None,
+                },
+                headers={
+                    "Location": f"/v1/matters/{matter.id}/releases/{release.id}",
+                    "Preference-Applied": "respond-async",
+                    "Retry-After": "1",
+                },
+            )
+        _execute_job(job_id, kind=job.kind, actor_id=release.requested_by)
+        s.expire_all()
+        finished = _job(matter.id, job_id, s)
+        audit_refs = {
+            "release_created_seq": _release_event_seq(s, matter.id, release.id, "release.created"),
+            "release_terminal_seq": _release_event_seq(
+                s, matter.id, release.id, "release.terminal"
+            ),
+        }
+        result = _build_release_result(
+            s, matter=matter, release=release, job=finished, doc=doc, audit_refs=audit_refs
+        )
+        return {
+            "release": _release_dict(release),
+            "job": _job_dict(finished, release_id=release.id, profile_id=release.profile_id),
+            "release_result": result,
+        }
+
     @app.post("/v1/matters/{matter_id}/documents/{doc_id}/releases")
     def create_release(
         matter_id: str,
@@ -2465,6 +2718,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: ReleaseBody,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
+        prefer: Annotated[str | None, Header()] = None,
     ):
         """The Release-first entry point for a single document (PR 39):
         wraps the exact same job-creation/execution path sanitize_job
@@ -2482,6 +2737,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if body.recipient_type not in RECIPIENT_TYPES:
             raise HTTPException(400, f"unknown recipient_type: {body.recipient_type!r}")
         policy_id = profile["policy_id"]
+        existing, ticket = _admission(
+            s, matter_id, user, "release", idempotency_key, [doc], body, policy_id
+        )
+        if existing is not None:
+            return _respond_release(
+                s, matter, doc, _release(matter_id, existing.resource_id, s), prefer
+            )
 
         # SHOULD-4 (review 2026-08-30): a re-run must reference a real
         # Release row of the SAME document in the SAME matter -- the
@@ -2505,7 +2767,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if body.layer_b is not None:
             if not cfg.watermark_tools_enabled:
                 raise HTTPException(403, "watermark tools are disabled")
-            claims = verify_attestation(cfg, body.layer_b.token, matter_id=matter_id, doc_sha256=doc.sha256)
+            claims = verify_attestation(
+                cfg, body.layer_b.token, matter_id=matter_id, doc_sha256=doc.sha256
+            )
             if claims is None:
                 raise HTTPException(403, "invalid or expired attestation token")
             if claims.get("sub") != user:
@@ -2519,7 +2783,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             }
             attest_claims = claims
 
-        job = Job(
+        job = _new_job(
+            requested_by=user,
             matter_id=matter_id,
             document_id=doc.id,
             kind="sanitize",
@@ -2540,12 +2805,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 s.rollback()
                 raise HTTPException(403, "attestation token already used") from e
         if layer_b is not None and attest_claims is not None:
-            consume_attestation(attest_claims)
             append_event(
                 s,
                 matter_id=matter_id,
                 actor_id=user,
                 action="attest.used",
+                commit=False,
                 payload={"jti": jti, "job_id": job.id, "strength": layer_b["strength"]},
             )
 
@@ -2565,11 +2830,12 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         s.add(release)
         s.flush()  # assigns release.id
-        created_event = append_event(
+        append_event(
             s,
             matter_id=matter_id,
             actor_id=user,
             action="release.created",
+            commit=False,
             payload={
                 "release_id": release.id,
                 "document_id": doc.id,
@@ -2582,54 +2848,19 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 # rides the audit chain's own payload too (not just the
                 # Release row) so it is tamper-evident like every other
                 # custody fact -- the chain hash commits to it.
-                **({"predecessor_release_id": predecessor_release_id}
-                   if predecessor_release_id else {}),
+                **(
+                    {"predecessor_release_id": predecessor_release_id}
+                    if predecessor_release_id
+                    else {}
+                ),
             },
         )
+        remember_admission(s, ticket, resource_kind="release", resource_id=release.id)
         s.commit()
+        if attest_claims is not None:
+            consume_attestation(attest_claims)
 
-        _execute_job(job.id, kind="sanitize")
-        s.expire_all()
-        finished = _job(matter_id, job.id, s)
-        result = finished.result_json or {}
-        actions = (result.get("manifest") or {}).get("actions") or []
-        no_decision_count = sum(1 for a in actions if NO_DECISION_MARKER in a)
-        append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="job.sanitize",
-            payload={
-                "job_id": job.id,
-                "document_id": doc.id,
-                "policy_id": policy_id,
-                "status": finished.status,
-                "verification_pass": result.get("verification_pass"),
-                "no_decision_count": no_decision_count,
-                # MUST-1: same chain commitment as the raw sanitize route
-                # and batch children -- one shape everywhere (see
-                # _terminal_hash_facts).
-                **_terminal_hash_facts(finished),
-            },
-        )
-
-        release.status = finished.status
-        release.finished_utc = finished.finished_utc
-        terminal_event = append_event(
-            s,
-            matter_id=matter_id,
-            actor_id=user,
-            action="release.terminal",
-            payload={"release_id": release.id, "job_id": job.id, "status": finished.status},
-        )
-        s.commit()
-
-        audit_refs = {"release_created_seq": created_event.seq, "release_terminal_seq": terminal_event.seq}
-        release_result = _build_release_result(
-            s, matter=matter, release=release, job=finished, doc=doc, audit_refs=audit_refs
-        )
-        job_out = _job_dict(finished, release_id=release.id, profile_id=release.profile_id)
-        return {"release": _release_dict(release), "job": job_out, "release_result": release_result}
+        return _respond_release(s, matter, doc, release, prefer)
 
     @app.post("/v1/matters/demo-seed")
     def demo_seed_matter(user: str = Depends(principal), s: Session = Depends(db_session)):
@@ -2650,7 +2881,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         checks before ever showing the button.
         """
         if cfg.oidc_enabled:
-            raise HTTPException(403, "sample-matter seeding is only available in local-password mode")
+            raise HTTPException(
+                403, "sample-matter seeding is only available in local-password mode"
+            )
 
         matter = s.query(Matter).filter_by(name=_DEMO_MATTER_NAME, is_demo=True).first()
         if matter is None:
@@ -2667,7 +2900,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             )
             s.commit()
 
-        existing_docs = {d.filename: d for d in s.query(Document).filter_by(matter_id=matter.id).all()}
+        existing_docs = {
+            d.filename: d for d in s.query(Document).filter_by(matter_id=matter.id).all()
+        }
         released_doc_ids = {
             r[0] for r in s.query(Release.document_id).filter_by(matter_id=matter.id).all()
         }
@@ -2721,12 +2956,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     ):
         """Raw release_result.json bytes -- the artifact a caller (the
         Airlock CLI, a future verifier) would save to disk as
-        `release_result.json` and hash-check. Deliberately read-only and
-        side-effect-free: a re-fetch of already-committed facts (Release +
-        Job + Document rows), not a new issuance -- unlike
-        job_certificate's own per-pull audit logging (a distinct, explicit
-        product decision for that route), this is a deterministic
-        projection with nothing new to attest to on repeat reads. Audit
+        `release_result.json` and hash-check. This is not a new issuance:
+        unlike job_certificate's own per-pull audit logging, it appends
+        no audit event. A terminal release predating certificate snapshots
+        lazily persists its first snapshot here, at the actual generation
+        time; later reads reuse its bytes after checking its evidence. Audit
         refs cite the release.created/release.terminal events recorded at
         creation time, which don't change on re-fetch either.
         """
@@ -2795,7 +3029,14 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             }
             for j in jobs
         ]
-        summary = {"requested": b.total, "done": 0, "refused": 0, "failed": 0, "queued": 0, "running": 0}
+        summary = {
+            "requested": b.total,
+            "done": 0,
+            "refused": 0,
+            "failed": 0,
+            "queued": 0,
+            "running": 0,
+        }
         for r in results:
             summary[r["status"]] = summary.get(r["status"], 0) + 1
         return {
@@ -2816,6 +3057,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: BulkJobsBody,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
     ):
         """Creates a Batch and its queued child Job rows, returning as soon
         as they're durably recorded instead of blocking the request for the
@@ -2856,6 +3098,23 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if missing:
             raise HTTPException(400, f"not documents of this matter: {', '.join(missing)}")
 
+        docs = [_document(matter_id, doc_id, s) for doc_id in body.document_ids]
+        existing, ticket = _admission(
+            s,
+            matter_id,
+            user,
+            "batch",
+            idempotency_key,
+            docs,
+            body,
+            body.policy_id if body.kind == "sanitize" else None,
+        )
+        if existing is not None:
+            batch = s.get(Batch, existing.resource_id)
+            s.commit()
+            dispatcher.wake()
+            return _batch_dict(batch, s)
+
         batch = Batch(
             matter_id=matter_id,
             kind=body.kind,
@@ -2866,16 +3125,31 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         )
         s.add(batch)
         s.flush()  # assigns batch.id
-        job_kw = {"policy_id": body.policy_id, "reason": body.reason[:500]} if body.kind == "sanitize" else {}
+        job_kw = (
+            {"policy_id": body.policy_id, "reason": body.reason[:500]}
+            if body.kind == "sanitize"
+            else {}
+        )
         for doc_id in body.document_ids:
-            s.add(Job(matter_id=matter_id, document_id=doc_id, kind=body.kind, batch_id=batch.id, **job_kw))
+            s.add(
+                _new_job(
+                    requested_by=user,
+                    matter_id=matter_id,
+                    document_id=doc_id,
+                    kind=body.kind,
+                    batch_id=batch.id,
+                    **job_kw,
+                )
+            )
         append_event(
             s,
             matter_id=matter_id,
             actor_id=user,
             action="batch.created",
+            commit=False,
             payload={"batch_id": batch.id, "kind": body.kind, "total": batch.total},
         )
+        remember_admission(s, ticket, resource_kind="batch", resource_id=batch.id)
         s.commit()
         dispatcher.wake()
         return _batch_dict(batch, s)
@@ -2886,6 +3160,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body: BatchReleaseBody,
         user: str = Depends(principal),
         s: Session = Depends(db_session),
+        idempotency_key: Annotated[str | None, Header()] = None,
     ):
         """Batch release (PR 39): reuses the existing async Batch resource
         (create_batch, above) completely unchanged underneath -- one
@@ -2927,6 +3202,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         if missing:
             raise HTTPException(400, f"not documents of this matter: {', '.join(missing)}")
 
+        docs = [_document(matter_id, doc_id, s) for doc_id in body.document_ids]
+        existing, ticket = _admission(
+            s, matter_id, user, "batch_release", idempotency_key, docs, body, policy_id
+        )
+        if existing is not None:
+            batch = s.get(Batch, existing.resource_id)
+            s.commit()
+            dispatcher.wake()
+            releases = s.query(Release).filter(Release.batch_id == batch.id).all()
+            return {
+                "batch": _batch_dict(batch, s),
+                "releases": [_release_dict(r) for r in releases],
+            }
+
         batch = Batch(
             matter_id=matter_id,
             kind="sanitize",
@@ -2942,11 +3231,13 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             matter_id=matter_id,
             actor_id=user,
             action="batch.created",
+            commit=False,
             payload={"batch_id": batch.id, "kind": "sanitize", "total": batch.total},
         )
         releases: list[Release] = []
         for doc_id in body.document_ids:
-            job = Job(
+            job = _new_job(
+                requested_by=user,
                 matter_id=matter_id,
                 document_id=doc_id,
                 kind="sanitize",
@@ -2977,6 +3268,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 matter_id=matter_id,
                 actor_id=user,
                 action="release.created",
+                commit=False,
                 payload={
                     "release_id": release.id,
                     "document_id": doc_id,
@@ -2989,6 +3281,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 },
             )
             releases.append(release)
+        remember_admission(s, ticket, resource_kind="batch", resource_id=batch.id)
         s.commit()
         dispatcher.wake()
         return {"batch": _batch_dict(batch, s), "releases": [_release_dict(r) for r in releases]}
@@ -3027,74 +3320,45 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # Same permission the batch was created under -- whoever could
         # start this kind of run may also stop its not-yet-started part.
         _require(matter_id, batch.kind, s, user)
-        # Collected up front, before the bulk UPDATE, same reasoning as
-        # _sweep_orphaned_jobs above: the UPDATE itself can't hand back
-        # which rows it touched the way an ORM save would, and each
-        # cancelled job's sibling Release (if any) needs syncing too.
-        cancelled_ids = [
-            row[0]
-            for row in s.query(Job.id).filter(Job.batch_id == batch_id, Job.status == "queued").all()
-        ]
-        cancelled = 0
-        if cancelled_ids:
-            # The status guard is the whole point: between the SELECT above
-            # and this UPDATE the dispatcher may claim one of these rows
-            # (queued -> running) -- flipping a row it now owns would fail a
-            # job that is actively running, and make the reported counts
-            # lie about what actually happened. rowcount, not
-            # len(cancelled_ids), is therefore the truthful "how many did
-            # we cancel" -- anything the guard filtered out was never
-            # cancelled by this call.
-            cancelled = s.execute(
+        # Keep cancellation, its terminal release records and all audit
+        # events together. Use the same matter -> job lock order as workers.
+        lock_matter(s, matter_id)
+        cancelled_ids = list(
+            s.scalars(
                 update(Job)
-                .where(Job.id.in_(cancelled_ids), Job.status == "queued")
+                .where(Job.batch_id == batch_id, Job.status == "queued")
                 .values(status="failed", error="cancelled by operator", finished_utc=_now())
-            ).rowcount
-        if cancelled:
+                .returning(Job.id)
+            )
+        )
+        if cancelled_ids:
             append_event(
                 s,
                 matter_id=matter_id,
                 actor_id=user,
                 action="batch.cancelled",
-                payload={"batch_id": batch_id, "cancelled": cancelled},
+                payload={"batch_id": batch_id, "cancelled": len(cancelled_ids)},
+                commit=False,
             )
+            for job_id in cancelled_ids:
+                job = s.get(Job, job_id, populate_existing=True)
+                append_event(
+                    s,
+                    matter_id=matter_id,
+                    actor_id=user,
+                    action=f"job.{job.kind}",
+                    payload={
+                        "job_id": job.id,
+                        "document_id": job.document_id,
+                        "batch_id": batch_id,
+                        "status": "failed",
+                        "reason": "cancelled",
+                    },
+                    commit=False,
+                )
+                finish_release(s, job, commit=False)
+        complete_batch(s, batch_id, commit=False)
         s.commit()
-        # Only the rows the guarded UPDATE actually flipped, not every id
-        # the pre-SELECT saw: a row claimed mid-race is "running" and is
-        # the dispatcher's to finish -- syncing it here would write a
-        # stale status into its sibling Release. The error literal must
-        # stay in lockstep with the UPDATE above; it re-identifies the
-        # just-failed rows because the UPDATE can't hand back their ids.
-        actually_cancelled = [
-            row[0]
-            for row in s.query(Job.id)
-            .filter(
-                Job.id.in_(cancelled_ids),
-                Job.status == "failed",
-                Job.error == "cancelled by operator",
-            )
-            .all()
-        ]
-        if actually_cancelled:
-            # release_id/profile_id bugfix: a cancelled child's sibling
-            # Release (if any) is stuck "queued" forever, with no
-            # release.terminal event, unless synced here explicitly --
-            # cancel_batch bypasses the dispatcher's own normal per-job
-            # completion path entirely.
-            s.expire_all()
-            for job_id in actually_cancelled:
-                sync_release(s, s.get(Job, job_id))
-            s.commit()
-        # Cancelling every still-queued child can itself be what finishes
-        # the batch (nothing was ever claimed by the dispatcher to trigger
-        # its own completion check) -- most visibly when the whole batch
-        # is cancelled before the dispatcher claims anything at all.
-        dispatcher.check_batch_completion(s, batch_id)
-        # check_batch_completion writes finished_utc via a raw UPDATE,
-        # bypassing this session's identity map -- without a refresh the
-        # `batch` object below (loaded before the check ran) would still
-        # show finished_utc=None in the response even after a completing
-        # cancel (expire_on_commit=False, see db.make_session_factory).
         s.refresh(batch)
         return _batch_dict(batch, s)
 
@@ -3131,7 +3395,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     j,
                     include_result=False,
                     release_id=releases_by_job[j.id].id if j.id in releases_by_job else None,
-                    profile_id=releases_by_job[j.id].profile_id if j.id in releases_by_job else None,
+                    profile_id=releases_by_job[j.id].profile_id
+                    if j.id in releases_by_job
+                    else None,
                 )
                 for j in jobs
             ],
@@ -3176,9 +3442,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         writer = csv.writer(buf)
         writer.writerow(
             [
-                "job_id", "document_id", "document_filename", "kind", "policy_id",
-                "status", "error", "verification_pass", "created_utc", "finished_utc",
-                "release_id", "profile_id",
+                "job_id",
+                "document_id",
+                "document_filename",
+                "kind",
+                "policy_id",
+                "status",
+                "error",
+                "verification_pass",
+                "created_utc",
+                "finished_utc",
+                "release_id",
+                "profile_id",
             ]
         )
         for job, filename in jobs:
@@ -3186,10 +3461,18 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             release = releases_by_job.get(job.id)
             writer.writerow(
                 [
-                    job.id, job.document_id, filename, job.kind, job.policy_id,
-                    job.status, job.error, result.get("verification_pass", ""),
-                    job.created_utc, job.finished_utc or "",
-                    release.id if release else "", release.profile_id if release else "",
+                    job.id,
+                    job.document_id,
+                    filename,
+                    job.kind,
+                    job.policy_id,
+                    job.status,
+                    job.error,
+                    result.get("verification_pass", ""),
+                    job.created_utc,
+                    job.finished_utc or "",
+                    release.id if release else "",
+                    release.profile_id if release else "",
                 ]
             )
         return Response(
@@ -3211,7 +3494,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         _require(matter_id, "read", s, user)
         job = _job(matter_id, job_id, s)
         release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
-        return _job_dict(job, release_id=release.id if release else None, profile_id=release.profile_id if release else None)
+        return _job_dict(
+            job,
+            release_id=release.id if release else None,
+            profile_id=release.profile_id if release else None,
+        )
 
     @app.get("/v1/matters/{matter_id}/jobs/{job_id}/manifest")
     def job_manifest(
@@ -3229,16 +3516,46 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     def _build_certificate_html(
         s: Session, *, matter: Matter, job: Job, doc: Document, generated_by: str
     ) -> tuple[str, str | None, list[str]]:
-        """Shared by job_certificate (PR 33) and job_bundle (PR 36/37, the
-        release packet): the exact same certificate content either way,
-        so a certificate pulled standalone and one embedded in a release
-        packet can never read differently for the same job. Returns
-        (html_body, policy_id, limitations) -- callers append their own
-        certificate.issued audit event (payload needs policy_id, job/doc
-        ids callers already have) rather than this helper doing it, since
-        job_bundle commits it alongside its own bundle.download event in
-        one place.
+        """One preserved terminal Release certificate for results and downloads.
+
+        First use commits a snapshot; later uses check its source/evidence
+        bindings and return the same HTML, policy, and limitations. Legacy
+        jobs without a Release and nonterminal jobs retain live rendering.
+        Callers still append their own per-pull certificate.issued events.
         """
+        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
+        job_events, audit_integrity_ok, evidence_digest = _certificate_audit_state(
+            s, matter.id, job.id
+        )
+        terminal = ("done", "refused", "failed")
+        release_snapshot = release is not None and (
+            release.certificate_snapshot is not None
+            or job.status in terminal
+            or release.status in terminal
+        )
+        source_digest = ""
+        if release_snapshot:
+            if job.status not in terminal or release.status != job.status:
+                raise HTTPException(409, "Release and job terminal facts are not yet consistent.")
+            if not audit_integrity_ok:
+                raise HTTPException(
+                    409, "Job audit evidence is invalid; review the custody record."
+                )
+            matching_terminal_event = any(
+                ev.action == f"job.{job.kind}" and ev.payload.get("status") == job.status
+                for ev in job_events
+            )
+            # Cancellation and boot recovery can legitimately fail a release
+            # without executing a job. They must disclose missing evidence.
+            if not matching_terminal_event and (job.status != "failed" or job_events):
+                raise HTTPException(
+                    409, "Job terminal audit evidence is missing; review the custody record."
+                )
+            source_digest = _certificate_source_digest(matter, job, doc, release)
+            if release.certificate_snapshot is not None:
+                return _certificate_snapshot_parts(
+                    release.certificate_snapshot, evidence_digest, source_digest
+                )
         result = job.result_json or {}
         manifest = result.get("manifest") or {} if job.kind == "sanitize" else {}
         derivative_sha256 = manifest.get("derivative", {}).get("sha256")
@@ -3255,9 +3572,16 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             policy_description = policy_meta["description"] if policy_meta else None
 
         limitations: list[str] = _retention_limitations(manifest, actions)
-        dispositions: list[dict] = [
-            d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)
-        ] if job.kind == "sanitize" else []
+        if release_snapshot and not job_events:
+            limitations.append(
+                "Job audit evidence is unavailable: no job execution audit event was recorded "
+                "for this failed release. No job audit integrity assessment is available."
+            )
+        dispositions: list[dict] = (
+            [d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)]
+            if job.kind == "sanitize"
+            else []
+        )
         # Cross-check, not decoration: the disposition ledger is built from
         # the verifier's own before/after observation, while limitations
         # come from the action records. If the ledger says a finding is
@@ -3269,7 +3593,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # tests/test_disposition_ledger.py so this branch stays unreachable
         # in practice.
         retained_rows = [
-            d for d in dispositions
+            d
+            for d in dispositions
             if d.get("postcondition") in ("retained_as_planned", "retained_unplanned")
         ]
         if retained_rows and not limitations:
@@ -3297,26 +3622,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 "for this certificate's custody claim."
             )
 
-        # Narrow, job-scoped custody assertion: this job's own audit rows,
-        # individually hash-recomputed — never the matter's full chain and
-        # never another job's rows (see the route docstring above).
-        job_events = [
-            ev
-            for ev in s.query(AuditEvent)
-            .filter(AuditEvent.matter_id == matter.id, AuditEvent.action.in_(("job.inspect", "job.sanitize")))
-            .all()
-            if (ev.payload or {}).get("job_id") == job.id
-        ]
-        audit_integrity_ok = all(
-            event_hash(ev.prev_hash, ev.seq, ev.actor_id, ev.action, ev.payload) == ev.row_hash
-            for ev in job_events
-        )
-
         # release_context (PR 44): None for a legacy job with no Release
         # wrapper -- _render_job_certificate_html renders nothing for
         # this section then, same as it already does for policy_html on
         # an inspect job.
-        release = s.query(Release).filter(Release.job_id == job.id).one_or_none()
         release_context = None
         if release is not None:
             profile = next((p for p in RELEASE_PROFILES if p["id"] == release.profile_id), None)
@@ -3352,8 +3661,10 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # derivative is produced): None -> section absent, same as
         # policy_html.
         attestation_kind = (
-            "signature_break_attested" if job.attestation else "none"
-        ) if job.kind == "sanitize" else None
+            ("signature_break_attested" if job.attestation else "none")
+            if job.kind == "sanitize"
+            else None
+        )
 
         body = _render_job_certificate_html(
             matter_id=matter.id,
@@ -3379,7 +3690,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             audit_event_count=len(job_events),
             audit_integrity_ok=audit_integrity_ok,
             generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
-            generated_by=generated_by,
+            generated_by=release.requested_by if release_snapshot else generated_by,
             release_context=release_context,
             legal_justifications=legal_justifications,
             dispositions=dispositions,
@@ -3387,7 +3698,33 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                 manifest.get("residual_metadata") if job.kind == "sanitize" else None
             ),
             attestation_kind=attestation_kind,
+            release_snapshot=release_snapshot,
+            audit_evidence_available=bool(job_events) if release_snapshot else True,
         )
+        if release_snapshot:
+            candidate = {
+                "version": 1,
+                "html": body,
+                "policy_id": policy_id,
+                "limitations": limitations,
+                "audit_evidence_sha256": evidence_digest,
+                "source_facts_sha256": source_digest,
+            }
+            candidate["snapshot_sha256"] = _certificate_snapshot_checksum(candidate)
+            snapshot = _store_release_certificate_snapshot(s, release, candidate)
+            # A competing request may have selected a different first snapshot.
+            # The commit also releases locks. Refresh source objects so both
+            # this check and the caller's result/packet use the validated facts.
+            s.refresh(job)
+            s.refresh(doc)
+            s.refresh(release)
+            current_source = _certificate_source_digest(matter, job, doc, release)
+            _events, intact, current_evidence = _certificate_audit_state(s, matter.id, job.id)
+            if not intact:
+                raise HTTPException(
+                    409, "Job audit evidence is invalid; review the custody record."
+                )
+            return _certificate_snapshot_parts(snapshot, current_evidence, current_source)
         return body, policy_id, limitations
 
     def _append_certificate_issued(
@@ -3447,7 +3784,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         body, policy_id, _limitations = _build_certificate_html(
             s, matter=matter, job=job, doc=doc, generated_by=user
         )
-        _append_certificate_issued(s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id)
+        _append_certificate_issued(
+            s, matter_id=matter_id, actor_id=user, job=job, doc=doc, policy_id=policy_id
+        )
         s.commit()
         return Response(content=body, media_type="text/html")
 
@@ -3489,12 +3828,20 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         doc = _document(matter_id, job.document_id, s)
         if job.status != "done" or not job.bundle_dir:
             raise HTTPException(409, f"job is {job.status}; no bundle")
-        original_ref = None
+        original_bytes = None
         original_name = None
         if include_original:
             _require(matter_id, "download_original", s, user)
-            original_ref = doc.storage_path
             original_name = doc.filename
+            try:
+                original_bytes = storage.read_expected(
+                    doc.storage_path, sha256=doc.sha256, size=doc.bytes
+                )
+            except (StorageError, OSError) as exc:
+                raise HTTPException(
+                    409,
+                    "The recorded original could not be verified; no release packet was produced.",
+                ) from exc
 
         cert_html, policy_id, limitations = _build_certificate_html(
             s, matter=matter, job=job, doc=doc, generated_by=user
@@ -3540,8 +3887,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "  release_packet.json -- machine-readable manifest: content hashes of every\n"
             "                     file in this packet, audit references, an Ed25519\n"
             "                     signature over the whole packet's metadata+hashes\n"
-            "                     (see its \"signature\" field), and the anchoring\n"
-            "                     status (see its own \"anchor\" field). Check it with\n"
+            '                     (see its "signature" field), and the anchoring\n'
+            '                     status (see its own "anchor" field). Check it with\n'
             "                     tools/counselclear_verify_release_packet.py.\n"
             "  README.txt      -- this file\n\n"
             "The packet's signature is made by this CounselClear deployment's\n"
@@ -3587,7 +3934,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         def _sha256(data: bytes) -> str:
             return hashlib.sha256(data).hexdigest()
 
-        policy_version = (job.result_json or {}).get("manifest", {}).get("policy", {}).get("version", 1)
+        policy_version = (
+            (job.result_json or {}).get("manifest", {}).get("policy", {}).get("version", 1)
+        )
         # Nullable: absent for a bundle pulled from a Job created via the
         # legacy, unwrapped /sanitize-jobs route (no Release exists for
         # it). release_id is additive, not a replacement for packet_id --
@@ -3646,8 +3995,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # document. Like attestation above it is part of the SIGNED
             # canonical bytes -- a custody fact the signature must cover
             # -- and omitted for a first release rather than nulled.
-            **({"predecessor_release_id": release.predecessor_release_id}
-               if release and release.predecessor_release_id else {}),
+            **(
+                {"predecessor_release_id": release.predecessor_release_id}
+                if release and release.predecessor_release_id
+                else {}
+            ),
             "policy": {
                 "id": policy_id,
                 "version": policy_version if policy_id else None,
@@ -3705,7 +4057,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         # changes a release (see test_tsa_anchor_client.py for the
         # never-blocks contract).
         if anchor_enabled():
-            release_packet["signature"] = sign_release_packet(cfg, release_packet, exclude_anchor=True)
+            release_packet["signature"] = sign_release_packet(
+                cfg, release_packet, exclude_anchor=True
+            )
             sig_bytes = bytes.fromhex(release_packet["signature"]["value"])
             anchor = request_anchor(sig_bytes)
             if anchor["type"] == "rfc3161-tsa":
@@ -3797,8 +4151,8 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             zf.writestr("certificate.html", cert_bytes)
             zf.writestr("release_packet.json", release_packet_bytes)
             zf.writestr("README.txt", readme_bytes)
-            if original_ref and storage.exists(original_ref):
-                zf.writestr(f"original/{original_name}", storage.read(original_ref))
+            if original_bytes is not None:
+                zf.writestr(f"original/{original_name}", original_bytes)
         s.commit()
         download_name = f"{_safe_download_stem(doc.filename)}-release-packet-{job.id}.zip"
         return Response(
@@ -3849,11 +4203,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
     ):
         _require(matter_id, "admin", s, user)
         _matter(matter_id, s)
-        if (
-            body.user_id == user
-            and body.perm in ("admin", "read")
-            and not body.confirm_self_revoke
-        ):
+        if body.user_id == user and body.perm in ("admin", "read") and not body.confirm_self_revoke:
             raise HTTPException(
                 400,
                 f"revoking your own {body.perm!r} grant requires confirm_self_revoke=true "
@@ -4012,9 +4362,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             result = job.result_json or {}
             manifest = result.get("manifest") or {} if job.kind == "sanitize" else {}
             derivative_sha256 = manifest.get("derivative", {}).get("sha256") or ""
-            dispositions = [
-                d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)
-            ] if job.kind == "sanitize" else []
+            dispositions = (
+                [d for d in (manifest.get("dispositions") or []) if isinstance(d, dict)]
+                if job.kind == "sanitize"
+                else []
+            )
             legal_justifications: dict = job.legal_justifications or {}
 
             common = {
@@ -4036,17 +4388,31 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     sub = str(d.get("subtype") or "")
                     act = str(d.get("action") or "")
                     post = str(d.get("postcondition") or "")
-                    just = legal_justifications.get(sub) if isinstance(legal_justifications, dict) else None
-                    basis = d.get("legal_basis") or (just.get("basis") if isinstance(just, dict) else None) or "unspecified"
-                    note = (just.get("note") if isinstance(just, dict) else None) or d.get("reason") or ""
+                    just = (
+                        legal_justifications.get(sub)
+                        if isinstance(legal_justifications, dict)
+                        else None
+                    )
+                    basis = (
+                        d.get("legal_basis")
+                        or (just.get("basis") if isinstance(just, dict) else None)
+                        or "unspecified"
+                    )
+                    note = (
+                        (just.get("note") if isinstance(just, dict) else None)
+                        or d.get("reason")
+                        or ""
+                    )
                     rec = dict(common)
-                    rec.update({
-                        "finding_subtype": sub,
-                        "action": act,
-                        "postcondition": post,
-                        "legal_basis": basis,
-                        "operator_note": note,
-                    })
+                    rec.update(
+                        {
+                            "finding_subtype": sub,
+                            "action": act,
+                            "postcondition": post,
+                            "legal_basis": basis,
+                            "operator_note": note,
+                        }
+                    )
                     records.append(rec)
             elif legal_justifications:
                 for sub, just in legal_justifications.items():
@@ -4054,31 +4420,39 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     basis = (just.get("basis") if isinstance(just, dict) else None) or "unspecified"
                     note = (just.get("note") if isinstance(just, dict) else None) or ""
                     rec = dict(common)
-                    rec.update({
-                        "finding_subtype": str(sub),
-                        "action": str(act),
-                        "postcondition": "",
-                        "legal_basis": basis,
-                        "operator_note": note,
-                    })
+                    rec.update(
+                        {
+                            "finding_subtype": str(sub),
+                            "action": str(act),
+                            "postcondition": "",
+                            "legal_basis": basis,
+                            "operator_note": note,
+                        }
+                    )
                     records.append(rec)
             else:
                 rec = dict(common)
-                rec.update({
-                    "finding_subtype": "",
-                    "action": "refuse" if release.status == "refused" else (job.kind or ""),
-                    "postcondition": "",
-                    "legal_basis": "unspecified",
-                    "operator_note": job.error if release.status in ("refused", "failed") else "",
-                })
+                rec.update(
+                    {
+                        "finding_subtype": "",
+                        "action": "refuse" if release.status == "refused" else (job.kind or ""),
+                        "postcondition": "",
+                        "legal_basis": "unspecified",
+                        "operator_note": job.error
+                        if release.status in ("refused", "failed")
+                        else "",
+                    }
+                )
                 records.append(rec)
 
         if fmt == "json":
-            return JSONResponse({
-                "matter_id": matter_id,
-                "total_records": len(records),
-                "records": records,
-            })
+            return JSONResponse(
+                {
+                    "matter_id": matter_id,
+                    "total_records": len(records),
+                    "records": records,
+                }
+            )
 
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -4234,7 +4608,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # cross-matter problem list.
             demo_ids = {
                 r[0]
-                for r in s.query(Matter.id).filter(Matter.id.in_(matter_ids), Matter.is_demo.is_(True))
+                for r in s.query(Matter.id).filter(
+                    Matter.id.in_(matter_ids), Matter.is_demo.is_(True)
+                )
             }
             if demo_ids:
                 matter_ids = [m for m in matter_ids if m not in demo_ids]
@@ -4341,7 +4717,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             # second exclusion to keep in sync.
             demo_ids = {
                 r[0]
-                for r in s.query(Matter.id).filter(Matter.id.in_(matter_ids), Matter.is_demo.is_(True))
+                for r in s.query(Matter.id).filter(
+                    Matter.id.in_(matter_ids), Matter.is_demo.is_(True)
+                )
             }
             if demo_ids:
                 matter_ids = [m for m in matter_ids if m not in demo_ids]
@@ -4365,9 +4743,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         }
 
         total_matters = s.query(Matter).filter(Matter.id.in_(matter_ids)).count()
-        total_documents = (
-            s.query(Document).filter(Document.matter_id.in_(matter_ids)).count()
-        )
+        total_documents = s.query(Document).filter(Document.matter_id.in_(matter_ids)).count()
         job_counts = {st: 0 for st in ("queued", "running", "done", "failed", "refused")}
         for status, n in (
             s.query(Job.status, func.count(Job.id))
@@ -4378,9 +4754,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             if status in job_counts:  # never KeyError on an unknown stored value
                 job_counts[status] = n
 
-        matter_names = dict(
-            s.query(Matter.id, Matter.name).filter(Matter.id.in_(matter_ids)).all()
-        )
+        matter_names = dict(s.query(Matter.id, Matter.name).filter(Matter.id.in_(matter_ids)).all())
         attention = [
             item
             for item in _attention_items(s, matter_ids, matter_names)
@@ -4518,9 +4892,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                     "profile_id": (
                         releases_by_job[job.id].profile_id if job.id in releases_by_job else None
                     ),
-                    "detail": (
-                        f"{len(kept_unreviewed)} finding(s) kept without operator review"
-                    ),
+                    "detail": (f"{len(kept_unreviewed)} finding(s) kept without operator review"),
                     "created_utc": job.finished_utc or job.created_utc,
                 }
             )
@@ -4550,7 +4922,9 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                             releases_by_job[job.id].id if job.id in releases_by_job else None
                         ),
                         "profile_id": (
-                            releases_by_job[job.id].profile_id if job.id in releases_by_job else None
+                            releases_by_job[job.id].profile_id
+                            if job.id in releases_by_job
+                            else None
                         ),
                         "detail": job.error[:300] or label,
                         "created_utc": job.created_utc,
@@ -4586,8 +4960,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
                         "matter_id": m.id,
                         "matter_name": m.name,
                         "detail": (
-                            "no audit or job activity since "
-                            f"{latest.isoformat(timespec='seconds')}"
+                            f"no audit or job activity since {latest.isoformat(timespec='seconds')}"
                         ),
                         "created_utc": m.created_utc,
                     }
@@ -4642,7 +5015,11 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         }
 
     def _job_dict(
-        j: Job, *, include_result: bool = True, release_id: str | None = None, profile_id: str | None = None
+        j: Job,
+        *,
+        include_result: bool = True,
+        release_id: str | None = None,
+        profile_id: str | None = None,
     ) -> dict:
         """release_id/profile_id (PR 40): nullable, non-derived from a
         query inside this function on purpose -- an inspect job or a job
@@ -4662,6 +5039,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
             "attestation": j.attestation,
             "layer_b": j.layer_b,
             "worker_image": j.worker_image,
+            "worker_mode": j.worker_mode,
             "created_utc": j.created_utc,
             "finished_utc": j.finished_utc,
             "release_id": release_id,

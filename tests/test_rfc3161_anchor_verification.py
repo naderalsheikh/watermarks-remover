@@ -157,15 +157,18 @@ def build_test_token(
 
     signed_attrs = cms.CMSAttributes(
         [
+            cms.CMSAttribute({"type": "content_type", "values": ["1.2.840.113549.1.9.16.1.4"]}),
             cms.CMSAttribute(
-                {"type": "content_type", "values": ["1.2.840.113549.1.9.16.1.4"]}
-            ),
-            cms.CMSAttribute(
-                {"type": "message_digest", "values": [core.OctetString(hashlib.sha256(econtent).digest())]}
+                {
+                    "type": "message_digest",
+                    "values": [core.OctetString(hashlib.sha256(econtent).digest())],
+                }
             ),
         ]
     )
-    signed_bytes = econtent if sign_over_tstinfo else signed_attrs.untag().dump()  # the forgery: signature over content, not attrs
+    signed_bytes = (
+        econtent if sign_over_tstinfo else signed_attrs.untag().dump()
+    )  # the forgery: signature over content, not attrs
     signature = key.sign(signed_bytes, padding.PKCS1v15(), hashes.SHA256())
 
     cert = asn1x509.Certificate.load(cert_der)
@@ -200,7 +203,10 @@ def build_test_token(
             "version": "v3",
             "digest_algorithms": [{"algorithm": "sha256"}],
             "encap_content_info": cms.EncapsulatedContentInfo(
-                {"content_type": "1.2.840.113549.1.9.16.1.4", "content": cms.ParsableOctetString(econtent)}
+                {
+                    "content_type": "1.2.840.113549.1.9.16.1.4",
+                    "content": cms.ParsableOctetString(econtent),
+                }
             ),
             "certificates": [cert],
             "signer_infos": [signer_info],
@@ -302,7 +308,8 @@ def _oracle_oid_ok(v: bytes) -> bool:
     if count != 0 or len(arcs) < 2:
         return False
     return all(
-        not (bc > 1 and arc < 1 << (7 * (bc - 1))) for arc, bc in zip(arcs, byte_counts, strict=True)
+        not (bc > 1 and arc < 1 << (7 * (bc - 1)))
+        for arc, bc in zip(arcs, byte_counts, strict=True)
     )
 
 
@@ -490,7 +497,10 @@ def _oracle_accepts(token: bytes, expected_digest: bytes, pinned_certs: list[byt
             for choice in sd["certificates"]:
                 c = choice.chosen
                 for ext in c["tbs_certificate"]["extensions"]:
-                    if ext["extn_id"].dotted == "2.5.29.14" and ext["extn_value"].parsed.native == ski:
+                    if (
+                        ext["extn_id"].dotted == "2.5.29.14"
+                        and ext["extn_value"].parsed.native == ski
+                    ):
                         signer_cert = c
                         break
                 if signer_cert is not None:
@@ -505,7 +515,9 @@ def _oracle_accepts(token: bytes, expected_digest: bytes, pinned_certs: list[byt
             spki["public_key"].parsed["modulus"].native,
         ).public_key()
         try:
-            pub.verify(si["signature"].native, attrs.untag().dump(), padding.PKCS1v15(), hashes.SHA256())
+            pub.verify(
+                si["signature"].native, attrs.untag().dump(), padding.PKCS1v15(), hashes.SHA256()
+            )
         except InvalidSignature:
             return False
         tst = tsp.TSTInfo.load(econtent, strict=True)
@@ -531,7 +543,10 @@ def _packet_files(*, signature: dict, anchor: dict) -> dict[str, bytes]:
             "subtype": "comments_and_notes",
             "action": "keep",
             "detail": "kept: reviewed and kept by operator",
-            "legal_justification": {"basis": "privilege", "note": "Attorney-client comments withheld."},
+            "legal_justification": {
+                "basis": "privilege",
+                "note": "Attorney-client comments withheld.",
+            },
         }
     ]
     manifest_json = json.dumps(
@@ -672,7 +687,9 @@ def test_fully_signed_and_anchored_packet_verifies_end_to_end(tmp_path):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     key = Ed25519PrivateKey.generate()
-    pub_raw = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    pub_raw = key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
     key_id = hashlib.sha256(pub_raw).hexdigest()[:16]
 
     # Build the packet exactly like the new release flow: canonical bytes
@@ -709,12 +726,16 @@ def test_condition_a_unpinned_signing_cert_reports_unrecognized_tsa_certificate(
     rsa_key, cert_der, _ = _test_key_and_cert()
     token = build_test_token(digest=DIGEST_A, key=rsa_key, cert_der=cert_der)
 
-    check = verifier.verify_tsa_anchor(token, DIGEST_A, [PIN_CERT])  # only the embedded DigiCert pin
+    check = verifier.verify_tsa_anchor(
+        token, DIGEST_A, [PIN_CERT]
+    )  # only the embedded DigiCert pin
     assert check.status == "unrecognized_tsa_certificate"
     assert "unrecognized tsa certificate" in check.detail.lower()
     assert "signature" not in check.detail.lower()  # not conflated with a signature failure
 
-    files = _packet_files(signature=_real_signature_block(REAL_SIG_A), anchor=_real_anchor(token, DIGEST_A))
+    files = _packet_files(
+        signature=_real_signature_block(REAL_SIG_A), anchor=_real_anchor(token, DIGEST_A)
+    )
     report = verifier.verify_release_packet(_write_dir(tmp_path, files))
     assert not report.valid
     assert report.anchor is not None and report.anchor.status == "unrecognized_tsa_certificate"
@@ -757,7 +778,9 @@ def test_condition_b_noncanonical_der_variants_cannot_verify_anchor():
     pos = tok.find(serial_val)
     assert pos >= 3 and tok[pos - 3] == 0x02, "serial INTEGER not found in built token"
     serial_tlv = tok[pos - 3 : pos + 16]
-    nonmin_int = _surgical(tok, serial_tlv, b"\x02" + bytes([serial_tlv[1] + 1, 0x00]) + serial_tlv[2:])
+    nonmin_int = _surgical(
+        tok, serial_tlv, b"\x02" + bytes([serial_tlv[1] + 1, 0x00]) + serial_tlv[2:]
+    )
     check = verifier.verify_tsa_anchor(nonmin_int, DIGEST_A, [cert_der])
     assert check.status == "cannot_verify"
     assert "cannot verify anchor" in check.detail.lower()
@@ -780,7 +803,9 @@ def test_signedattrs_forgery_tstinfo_direct_signature_rejected():
     from cryptography.hazmat.primitives.asymmetric import padding
 
     rsa_key, cert_der, _ = _test_key_and_cert()
-    forged = build_test_token(digest=DIGEST_A, key=rsa_key, cert_der=cert_der, sign_over_tstinfo=True)
+    forged = build_test_token(
+        digest=DIGEST_A, key=rsa_key, cert_der=cert_der, sign_over_tstinfo=True
+    )
     # The naive check the trap describes: the token's embedded signature
     # verifies over the TSTInfo eContent bytes directly. A naive verifier
     # that checks the signature against the content instead of the
@@ -811,7 +836,9 @@ def test_content_type_attribute_must_be_tst_info():
         {
             "version": "v1",
             "policy": "2.16.840.1.114412.7.1",
-            "message_imprint": tsp.MessageImprint({"hash_algorithm": {"algorithm": "sha256"}, "hashed_message": DIGEST_A}),
+            "message_imprint": tsp.MessageImprint(
+                {"hash_algorithm": {"algorithm": "sha256"}, "hashed_message": DIGEST_A}
+            ),
             "serial_number": 0x0C2F0DD4B7DD2A900C33F5358AD9A5488,
             "gen_time": core.GeneralizedTime("20260901033557Z"),
         }
@@ -820,7 +847,12 @@ def test_content_type_attribute_must_be_tst_info():
     signed_attrs = cms.CMSAttributes(
         [
             cms.CMSAttribute({"type": "content_type", "values": ["1.2.840.113549.1.9.16.1.4"]}),
-            cms.CMSAttribute({"type": "message_digest", "values": [core.OctetString(hashlib.sha256(econtent).digest())]}),
+            cms.CMSAttribute(
+                {
+                    "type": "message_digest",
+                    "values": [core.OctetString(hashlib.sha256(econtent).digest())],
+                }
+            ),
         ]
     )
     # Wrong contentType in the signedAttrs:
@@ -856,7 +888,10 @@ def test_content_type_attribute_must_be_tst_info():
                     "version": "v3",
                     "digest_algorithms": [{"algorithm": "sha256"}],
                     "encap_content_info": cms.EncapsulatedContentInfo(
-                        {"content_type": "1.2.840.113549.1.9.16.1.4", "content": cms.ParsableOctetString(econtent)}
+                        {
+                            "content_type": "1.2.840.113549.1.9.16.1.4",
+                            "content": cms.ParsableOctetString(econtent),
+                        }
                     ),
                     "certificates": [cert_obj],
                     "signer_infos": [signer_info],
@@ -906,12 +941,16 @@ def test_tampered_message_imprint_is_rejected(tmp_path):
     not bound to this packet."""
     files = _packet_files(
         signature=_real_signature_block(REAL_SIG_A),
-        anchor=_real_anchor(REAL_TOKEN_A, DIGEST_B),  # token timestamps SIG_A; packet carries DIGEST_B claim
+        anchor=_real_anchor(
+            REAL_TOKEN_A, DIGEST_B
+        ),  # token timestamps SIG_A; packet carries DIGEST_B claim
     )
     report = verifier.verify_release_packet(_write_dir(tmp_path, files))
     assert not report.valid
     assert report.anchor is not None and report.anchor.status == "cannot_verify"
-    assert "messageimprint" in report.anchor.detail.lower() or "digest" in report.anchor.detail.lower()
+    assert (
+        "messageimprint" in report.anchor.detail.lower() or "digest" in report.anchor.detail.lower()
+    )
 
     # The same token against its own digest still verifies standalone.
     check = verifier.verify_tsa_anchor(REAL_TOKEN_A, DIGEST_B, [PIN_CERT])
@@ -955,7 +994,9 @@ def test_condition_c_differential_fuzz_agrees_with_library_oracle():
         f"{len(disagreements)} of {len(mutations)} mutations; first: {disagreements[:3]}"
     )
     # The differential is only meaningful if both directions occurred:
-    assert accepted_both >= 1, "no mutation was accepted by both -- the fuzz never tested the accept path"
+    assert accepted_both >= 1, (
+        "no mutation was accepted by both -- the fuzz never tested the accept path"
+    )
     assert rejected_both >= len(mutations) // 2, "fuzz unexpectedly accepted most mutations"
 
 
@@ -971,7 +1012,10 @@ def test_tsa_cert_cli_flag_adds_pin(tmp_path, capsys):
     sig = key.sign(b"x")
     token = build_test_token(digest=hashlib.sha256(sig).digest(), key=rsa_key, cert_der=cert_der)
 
-    files = _packet_files(signature=_real_signature_block(sig), anchor=_real_anchor(token, hashlib.sha256(sig).digest()))
+    files = _packet_files(
+        signature=_real_signature_block(sig),
+        anchor=_real_anchor(token, hashlib.sha256(sig).digest()),
+    )
     out = _write_dir(tmp_path, files)
 
     # Without the flag: unrecognized TSA certificate -> exit 1.
@@ -1001,13 +1045,20 @@ def test_report_rendering_avoids_forbidden_claims(tmp_path):
     report = verifier.verify_release_packet(_write_dir(tmp_path, files))
     text = report.to_text().lower()
     for claim in (
-        "is unforgeable", "this is unforgeable",
-        "is independently timestamped", "this is independently timestamped",
-        "is court-proof", "this is court-proof",
-        "is unimpeachable", "this is unimpeachable",
-        "this packet is verified", "packet is verified",
+        "is unforgeable",
+        "this is unforgeable",
+        "is independently timestamped",
+        "this is independently timestamped",
+        "is court-proof",
+        "this is court-proof",
+        "is unimpeachable",
+        "this is unimpeachable",
+        "this packet is verified",
+        "packet is verified",
     ):
-        assert claim not in text, f"affirmative claim {claim!r} must never appear in verifier output"
+        assert claim not in text, (
+            f"affirmative claim {claim!r} must never appear in verifier output"
+        )
 
 
 def test_rsa_pkcs1v15_verify_cross_checks_against_cryptography():
@@ -1042,7 +1093,10 @@ def test_rsa_pkcs1v15_verify_cross_checks_against_cryptography():
 
     # Wrong key
     other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    assert verifier._rsa_pkcs1v15_sha256_verify(other.public_key().public_numbers().n, e, sig, msg) is False
+    assert (
+        verifier._rsa_pkcs1v15_sha256_verify(other.public_key().public_numbers().n, e, sig, msg)
+        is False
+    )
 
     # Signature longer than the modulus must be rejected, not crash.
     assert verifier._rsa_pkcs1v15_sha256_verify(n, e, sig + b"\x00", msg) is False
@@ -1051,9 +1105,15 @@ def test_rsa_pkcs1v15_verify_cross_checks_against_cryptography():
 def test_verifier_source_imports_no_asn1crypto_or_cryptography():
     """The stdlib-only discipline: the shipped verifier module must never
     import the test-only oracle libraries (or anything else new)."""
-    src = (TOOLS / "counselclear_verify_release_packet.py").read_text()
+    src = (TOOLS / "counselclear_verify_release_packet.py").read_text(encoding="utf-8")
     code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
-    for banned in ("asn1crypto", "cryptography", "import requests", "import urllib", "import socket"):
+    for banned in (
+        "asn1crypto",
+        "cryptography",
+        "import requests",
+        "import urllib",
+        "import socket",
+    ):
         assert banned not in code, f"verifier must not reference {banned}"
 
 
@@ -1064,7 +1124,9 @@ def test_signed_fields_marker_switch_and_app_sync():
     verifier must recompute the exact bytes the app produced, and the two
     marker constants must agree with service/app/security.py."""
     assert verifier._SIGNED_FIELDS_CANONICAL == "release_packet.v1.canonical"
-    assert verifier._SIGNED_FIELDS_EXCLUDING_ANCHOR == "release_packet.v1.canonical-excluding-anchor"
+    assert (
+        verifier._SIGNED_FIELDS_EXCLUDING_ANCHOR == "release_packet.v1.canonical-excluding-anchor"
+    )
 
     sys.path.insert(0, str(REPO / "service"))
     try:
@@ -1075,7 +1137,10 @@ def test_signed_fields_marker_switch_and_app_sync():
         )
 
         assert PACKET_SIGNATURE_SIGNED_FIELDS == verifier._SIGNED_FIELDS_CANONICAL
-        assert PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR == verifier._SIGNED_FIELDS_EXCLUDING_ANCHOR
+        assert (
+            PACKET_SIGNATURE_SIGNED_FIELDS_EXCLUDING_ANCHOR
+            == verifier._SIGNED_FIELDS_EXCLUDING_ANCHOR
+        )
 
         packet = {
             "release_id": "R1",
@@ -1087,9 +1152,9 @@ def test_signed_fields_marker_switch_and_app_sync():
         assert verifier._packet_canonical_bytes(packet) == packet_canonical_bytes(packet)
         assert b"anchor" in verifier._packet_canonical_bytes(packet)
         # New marker: anchor excluded from the signed bytes, both sides.
-        assert verifier._packet_canonical_bytes(packet, exclude_anchor=True) == packet_canonical_bytes(
+        assert verifier._packet_canonical_bytes(
             packet, exclude_anchor=True
-        )
+        ) == packet_canonical_bytes(packet, exclude_anchor=True)
         assert b"anchor" not in verifier._packet_canonical_bytes(packet, exclude_anchor=True)
     finally:
         sys.path.remove(str(REPO / "service"))

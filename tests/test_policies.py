@@ -52,8 +52,10 @@ def test_frozen_matrix_spot_checks():
     assert DEFAULT_POLICIES["privacy_only"]["comments_and_notes"] == "keep"
     assert DEFAULT_POLICIES["production"]["comments_and_notes"] == "approve"
     assert DEFAULT_POLICIES["evidence_preservation"]["macros_vba"] == "inspect_only"
-    assert all(DEFAULT_POLICIES[p]["macros_vba"] == "refuse" for p in
-               ("external_sharing", "privacy_only", "production"))
+    assert all(
+        DEFAULT_POLICIES[p]["macros_vba"] == "refuse"
+        for p in ("external_sharing", "privacy_only", "production")
+    )
 
 
 def test_prefix_subtypes_values_are_all_valid_policy_subtypes():
@@ -146,9 +148,7 @@ def test_missing_decision_defaults_to_keep_and_is_recorded():
 
 def test_operator_decisions_are_honored():
     res = inspect_bytes(b"clean text\n", "memo.txt")
-    plan = plan_actions(
-        res, "production", decisions={"comments_and_notes": "approve"}
-    )
+    plan = plan_actions(res, "production", decisions={"comments_and_notes": "approve"})
     assert plan.actions["comments_and_notes"]["action"] == "strip"
     assert plan.actions["comments_and_notes"]["reason"] == "operator_approved"
     keep_plan = plan_actions(res, "production", decisions={"tracked_changes": "keep"})
@@ -409,7 +409,8 @@ def test_operator_keep_records_structured_legal_justification():
 
     _cleaned, records = apply_actions(data, plan)
     record = next(
-        r for r in records
+        r
+        for r in records
         if r.subtype == "comments_and_notes" and r.legal_justification is not None
     )
     assert record.to_dict()["legal_justification"] == {
@@ -448,10 +449,15 @@ def test_policy_rejects_invalid_legal_justification_payloads():
         res,
         "production",
         decisions={"comments_and_notes": "keep", "tracked_changes": "approve"},
-        legal_justifications={"comments_and_notes": {"basis": "other", "note": "Court protective order clause 4"}},
+        legal_justifications={
+            "comments_and_notes": {"basis": "other", "note": "Court protective order clause 4"}
+        },
     )
     assert plan_with_other.actions["comments_and_notes"]["legal_justification"]["basis"] == "other"
-    assert plan_with_other.actions["comments_and_notes"]["legal_justification"]["note"] == "Court protective order clause 4"
+    assert (
+        plan_with_other.actions["comments_and_notes"]["legal_justification"]["note"]
+        == "Court protective order clause 4"
+    )
 
 
 def test_apply_sharing_docx_strips_everything():

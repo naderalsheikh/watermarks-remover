@@ -115,7 +115,9 @@ def legal_findings(scan: dict[str, Any]) -> list[str]:
     # identity. The rest is identity the sharing policy is meant to strip —
     # without this finding, verify's residual-identity check has nothing to
     # fire on and a leftover /Author ships in a derivative labeled clean.
-    identity = sorted(k for k in ("author", "creator", "title", "subject", "keywords") if info.get(k))
+    identity = sorted(
+        k for k in ("author", "creator", "title", "subject", "keywords") if info.get(k)
+    )
     if identity:
         out.append("authoring-props: /Info " + ", ".join(identity))
     return out

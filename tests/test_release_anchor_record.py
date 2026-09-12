@@ -66,9 +66,7 @@ def _client(tmp_path, monkeypatch, tsa_url):
 
 def _release(c):
     mid = c.post("/v1/matters", json={"name": "Anchor record"}).json()["id"]
-    blob = _docx(
-        {"word/document.xml": _document("<w:p><w:r><w:t>Body.</w:t></w:r></w:p>")}
-    )
+    blob = _docx({"word/document.xml": _document("<w:p><w:r><w:t>Body.</w:t></w:r></w:p>")})
     doc = c.post(
         f"/v1/matters/{mid}/documents",
         files={"file": ("a.docx", blob, "application/octet-stream")},
@@ -210,9 +208,7 @@ def test_legacy_job_without_a_release_still_downloads_and_records(tmp_path, monk
     convenience."""
     c = _client(tmp_path, monkeypatch, "off")
     mid = c.post("/v1/matters", json={"name": "legacy"}).json()["id"]
-    blob = _docx(
-        {"word/document.xml": _document("<w:p><w:r><w:t>B.</w:t></w:r></w:p>")}
-    )
+    blob = _docx({"word/document.xml": _document("<w:p><w:r><w:t>B.</w:t></w:r></w:p>")})
     doc = c.post(
         f"/v1/matters/{mid}/documents",
         files={"file": ("a.docx", blob, "application/octet-stream")},
@@ -346,4 +342,3 @@ def test_anchor_cas_prevents_stale_overwrite(tmp_path, monkeypatch):
     # Row still retains first_digest
     re_read = c.get(f"/v1/matters/{mid}/releases/{rid}").json()["last_anchor"]
     assert re_read["digest"] == first_digest
-

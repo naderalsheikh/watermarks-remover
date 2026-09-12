@@ -331,9 +331,7 @@ def test_callback_throttles_repeated_failures(tmp_path, monkeypatch):
     r = c.get("/v1/auth/oidc/login", follow_redirects=False)
     state = r.headers["location"].split("state=")[1].split("&")[0]
     for _ in range(3):
-        resp = c.get(
-            "/v1/auth/oidc/callback", params={"code": "eve-code", "state": state}
-        )
+        resp = c.get("/v1/auth/oidc/callback", params={"code": "eve-code", "state": state})
         assert resp.status_code == 403  # not allowlisted
     locked = c.get("/v1/auth/oidc/callback", params={"code": "eve-code", "state": state})
     assert locked.status_code == 429

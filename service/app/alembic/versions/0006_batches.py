@@ -40,9 +40,7 @@ def upgrade() -> None:
     op.create_index("ix_batches_matter_id", "batches", ["matter_id"])
     with op.batch_alter_table("jobs") as batch_op:
         batch_op.add_column(sa.Column("batch_id", sa.String(16), nullable=True))
-        batch_op.create_foreign_key(
-            "fk_jobs_batch_id_batches", "batches", ["batch_id"], ["id"]
-        )
+        batch_op.create_foreign_key("fk_jobs_batch_id_batches", "batches", ["batch_id"], ["id"])
     op.create_index("ix_jobs_batch_id", "jobs", ["batch_id"])
 
 

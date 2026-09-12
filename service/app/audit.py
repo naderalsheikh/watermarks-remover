@@ -3,21 +3,13 @@
 Tamper-evident: every event commits to its predecessor via
 sha256(prev_hash | seq | actor_id | action | canonical payload).
 
-Three layers keep the chain from forking under concurrent appends:
-1. A process-local threading.Lock per matter (below) — fast, in-process
-   ordering for the common case.
-2. A database-level write lock that also covers multiple processes: on
-   SQLite, BEGIN IMMEDIATE (db.py's make_engine); on Postgres, the
-   unique-constraint conflict handled by the retry below (MVCC lets both
-   transactions read the same max(seq), so serialization happens at
-   commit time instead of lock-acquisition time).
-3. A unique (matter_id, seq) constraint (models.AuditEvent) as the final
-   backstop: if two writers ever raced past both of the above, the
-   database refuses the second insert with IntegrityError instead of
-   silently creating two rows that claim the same seq.
+Database locks serialize writers before they take the process-local matter
+mutex: SQLite uses BEGIN IMMEDIATE; Postgres locks the existing Matter row.
+A unique (matter_id, seq) constraint is the final backstop against duplicate
+sequence numbers. Bounded savepoint retries preserve caller-owned changes.
 Gapless `seq` and the recomputed-hash walk in verify_chain() are what
 detect a chain that was tampered with after the fact, not what prevents
-one from forking during a race — that's what 1-3 are for.
+one from forking during a race — the locks and constraint do that.
 """
 
 from __future__ import annotations
@@ -32,14 +24,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .models import AuditEvent, Job
+from .models import AuditEvent, Job, Matter
 
 GENESIS = "0" * 64
 
-# Bounded retries for layer-3 conflicts (only reachable across processes
-# on Postgres). Each attempt re-reads max(seq), so a loser simply appends
-# at the winner's seq+1; three attempts is far beyond any realistic
-# contention for a per-matter serialized log.
+# Bounded savepoint retries are a backstop for sequence conflicts.
 _APPEND_ATTEMPTS = 3
 
 _locks: dict[str, threading.Lock] = {}
@@ -61,10 +50,27 @@ def event_hash(prev_hash: str, seq: int, actor_id: str, action: str, payload: di
     return hashlib.sha256(material).hexdigest()
 
 
+def lock_matter(s: Session, matter_id: str) -> None:
+    """Serialize matter writes until the caller's transaction ends.
+
+    Acquire the database lock before any process-local audit mutex. SQLite
+    uses BEGIN IMMEDIATE; PostgreSQL holds the existing matter row lock.
+    Flush pending matter creation first so admission can append in one unit.
+    """
+    s.flush()
+    s.execute(select(Matter.id).where(Matter.id == matter_id).with_for_update()).scalar_one()
+
+
 def append_event(
-    s: Session, *, matter_id: str, actor_id: str, action: str, payload: dict
+    s: Session,
+    *,
+    matter_id: str,
+    actor_id: str,
+    action: str,
+    payload: dict,
+    commit: bool = True,
 ) -> AuditEvent:
-    """Serialized per-matter append. Commits.
+    """Serialized per-matter append. Commits unless the caller owns the unit.
 
     Callers routinely s.add() other rows (a Matter, a Document, ACL grants)
     on the same session before calling this, expecting append_event's own
@@ -76,6 +82,7 @@ def append_event(
     attempt's insert, leaving earlier pending objects intact for the next
     attempt (or the final commit) to still pick up.
     """
+    lock_matter(s, matter_id)
     with _matter_lock(matter_id):
         for _attempt in range(_APPEND_ATTEMPTS):
             last_seq = s.execute(
@@ -105,16 +112,14 @@ def append_event(
             try:
                 with s.begin_nested():
                     s.add(ev)
-                    s.commit()
+                    s.flush()
             except IntegrityError:
-                # Another process claimed this seq between our read and our
-                # commit (possible only on Postgres — SQLite's BEGIN IMMEDIATE
-                # holds the write lock across the whole transaction). The
-                # begin_nested() SAVEPOINT already rolled back just this
-                # attempt's insert; re-read and append at the winner's seq+1.
+                # The savepoint rolls back only this insert. Re-read the
+                # chain without discarding the caller's staged changes.
                 continue
             else:
-                s.commit()
+                if commit:
+                    s.commit()
                 return ev
         raise RuntimeError(f"audit append kept colliding on seq for matter {matter_id}")
 

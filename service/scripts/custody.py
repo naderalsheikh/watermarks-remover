@@ -72,9 +72,7 @@ def write_once(dest: Path, data: bytes) -> tuple[Path, bool]:
         if sha256_file(dest) == sha256_bytes(data):
             _lock_readonly(dest)
             return dest, False
-        raise CustodyError(
-            f"write-once violation: {dest} exists with different content"
-        )
+        raise CustodyError(f"write-once violation: {dest} exists with different content")
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
@@ -85,9 +83,7 @@ def write_once(dest: Path, data: bytes) -> tuple[Path, bool]:
         if sha256_file(dest) == sha256_bytes(data):
             _lock_readonly(dest)
             return dest, False
-        raise CustodyError(
-            f"write-once violation: {dest} exists with different content"
-        ) from None
+        raise CustodyError(f"write-once violation: {dest} exists with different content") from None
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)

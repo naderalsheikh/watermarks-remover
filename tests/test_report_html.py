@@ -26,7 +26,11 @@ def _finding(**kw) -> Finding:
 
 def test_empty_findings_renders_clear_verdict():
     out = render_report_html(
-        subject_name="clean.txt", kind="text", format="txt", findings=[], mode="inspect",
+        subject_name="clean.txt",
+        kind="text",
+        format="txt",
+        findings=[],
+        mode="inspect",
     )
     assert "No findings" in out
     assert "clean.txt" in out
@@ -37,11 +41,18 @@ def test_findings_grouped_and_counted_by_risk():
     findings = [
         _finding(subtype="authoring_props", risk_level="high"),
         _finding(subtype="jpeg_gps", category="file_metadata", risk_level="high"),
-        _finding(subtype="layer_a_body", category="invisible_text", risk_level="low",
-                 confidence="informational"),
+        _finding(
+            subtype="layer_a_body",
+            category="invisible_text",
+            risk_level="low",
+            confidence="informational",
+        ),
     ]
     out = render_report_html(
-        subject_name="doc.docx", kind="container", format="docx", findings=findings,
+        subject_name="doc.docx",
+        kind="container",
+        format="docx",
+        findings=findings,
         mode="inspect",
     )
     assert "2 high" in out
@@ -76,7 +87,11 @@ def test_sanitize_mode_includes_actions_checks_and_custody():
         policy_id="external_sharing",
         actions=["authoring_props:strip: blanked dc:creator"],
         checks=[
-            {"name": "reinspect_targeted_gone", "pass": True, "detail": "targeted subtypes cleared"},
+            {
+                "name": "reinspect_targeted_gone",
+                "pass": True,
+                "detail": "targeted subtypes cleared",
+            },
             {"name": "part_inventory", "pass": False, "detail": "added=[] dropped=['x']"},
         ],
         verification_pass=False,
@@ -95,9 +110,13 @@ def test_sanitize_mode_includes_actions_checks_and_custody():
 
 def test_intake_report_without_reveal_hides_identities():
     records = [
-        {"name": "a.docx", "kind": "container", "format": "docx",
-         "findings": [_finding(subtype="authoring_props", risk_level="high")],
-         "identities": {"Author": "Jane Associate"}},
+        {
+            "name": "a.docx",
+            "kind": "container",
+            "format": "docx",
+            "findings": [_finding(subtype="authoring_props", risk_level="high")],
+            "identities": {"Author": "Jane Associate"},
+        },
     ]
     out = render_intake_report(root_label="/received", records=records, reveal_identities=False)
     assert "Jane Associate" not in out
@@ -108,15 +127,33 @@ def test_intake_report_without_reveal_hides_identities():
 def test_intake_report_reveal_rolls_up_identities_across_files():
     common = {"Author": "Jane Associate", "Company": "Preston & Hale LLP"}
     records = [
-        {"name": "a.docx", "kind": "container", "format": "docx",
-         "findings": [_finding(subtype="authoring_props")], "identities": dict(common)},
-        {"name": "b.docx", "kind": "container", "format": "docx",
-         "findings": [_finding(subtype="authoring_props")], "identities": dict(common)},
-        {"name": "c.docx", "kind": "container", "format": "docx",
-         "findings": [], "identities": {"Author": "Bob Partner"}},
+        {
+            "name": "a.docx",
+            "kind": "container",
+            "format": "docx",
+            "findings": [_finding(subtype="authoring_props")],
+            "identities": dict(common),
+        },
+        {
+            "name": "b.docx",
+            "kind": "container",
+            "format": "docx",
+            "findings": [_finding(subtype="authoring_props")],
+            "identities": dict(common),
+        },
+        {
+            "name": "c.docx",
+            "kind": "container",
+            "format": "docx",
+            "findings": [],
+            "identities": {"Author": "Bob Partner"},
+        },
     ]
     out = render_intake_report(
-        root_label="/received", records=records, reveal_identities=True, matter_label="M-42",
+        root_label="/received",
+        records=records,
+        reveal_identities=True,
+        matter_label="M-42",
     )
     assert "M-42" in out
     # Jane Associate shows up in 2 files -> rolled up, not repeated per-row
@@ -145,8 +182,13 @@ def test_intake_report_empty_directory():
 
 def test_mode_inspect_omits_custody_and_actions_sections():
     out = render_report_html(
-        subject_name="x.txt", kind="text", format="txt", findings=[], mode="inspect",
-        policy_id="external_sharing", actions=["should not appear"],
+        subject_name="x.txt",
+        kind="text",
+        format="txt",
+        findings=[],
+        mode="inspect",
+        policy_id="external_sharing",
+        actions=["should not appear"],
     )
     # actions/checks/custody are sanitize-only; inspect mode ignores them
     assert "should not appear" not in out

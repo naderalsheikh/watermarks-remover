@@ -6,8 +6,8 @@ These tests never require a running Postgres server:
 - migration DDL is validated through Alembic's offline (--sql) mode,
   which renders SQL from the migration chain without touching a server.
 
-A live end-to-end run happens in deployment (compose pg profile), not in
-unit tests — CI has no Postgres service.
+The ownership, transaction, admission, and migration suites separately exercise
+a live PostgreSQL service in CI. This module covers dialect and DDL contracts.
 """
 
 from __future__ import annotations
@@ -94,8 +94,9 @@ def test_job_json_columns_render_jsonb_on_postgres():
     from app.models import Job
 
     pg_sql = _create_table_sql(Job.__table__, postgresql.dialect())
-    # result_json, finding_decisions, legal_justifications, layer_b
-    assert pg_sql.count("JSONB") == 4
+    # result_json, finding_decisions, legal_justifications, layer_b, execution_receipt
+    assert pg_sql.count("JSONB") == 5
+    assert "EXECUTION_RECEIPT JSONB" in pg_sql
     assert "LEGAL_JUSTIFICATIONS JSONB" in pg_sql
 
 
@@ -135,18 +136,18 @@ def test_append_event_retries_after_seq_collision(tmp_path, monkeypatch):
         s.commit()
 
     # Patch only now: the seed commit above must go through untouched.
-    real_commit = Session.commit
+    real_flush = Session.flush
     state = {"fail_next": True}
 
-    def racing_commit(self):
-        if state["fail_next"]:
+    def racing_flush(self, objects=None):
+        if state["fail_next"] and any(isinstance(obj, AuditEvent) for obj in self.new):
             from sqlalchemy.exc import IntegrityError
 
             state["fail_next"] = False
             raise IntegrityError("INSERT", {}, Exception("duplicate key"))
-        return real_commit(self)
+        return real_flush(self, objects)
 
-    monkeypatch.setattr(Session, "commit", racing_commit)
+    monkeypatch.setattr(Session, "flush", racing_flush)
 
     with factory() as s:
         ev = append_event(s, matter_id="m", actor_id="operator", action="upload", payload={"n": 1})
@@ -176,10 +177,14 @@ def test_append_event_gives_up_after_bounded_retries(tmp_path, monkeypatch):
         s.add(Matter(id="m", name="m"))
         s.commit()
 
-    def always_collide(self):
-        raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+    real_flush = Session.flush
 
-    monkeypatch.setattr(Session, "commit", always_collide)
+    def always_collide(self, objects=None):
+        if any(isinstance(obj, AuditEvent) for obj in self.new):
+            raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+        return real_flush(self, objects)
+
+    monkeypatch.setattr(Session, "flush", always_collide)
 
     with factory() as s, pytest.raises(RuntimeError, match="kept colliding"):
         append_event(s, matter_id="m", actor_id="operator", action="upload", payload={})

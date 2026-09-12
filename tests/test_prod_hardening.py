@@ -104,9 +104,15 @@ def test_full_app_boot_reconciles_a_stale_release_on_an_already_done_job(tmp_pat
         s.add(Job(id="jdone2", matter_id="m", document_id="d", kind="sanitize", status="done"))
         s.add(
             Release(
-                id="rdone2", matter_id="m", document_id="d", job_id="jdone2",
-                policy_id="external_sharing", profile_id="counterparty_deal_room",
-                recipient_type="other", requested_by="operator", status="running",
+                id="rdone2",
+                matter_id="m",
+                document_id="d",
+                job_id="jdone2",
+                policy_id="external_sharing",
+                profile_id="counterparty_deal_room",
+                recipient_type="other",
+                requested_by="operator",
+                status="running",
             )
         )
         s.commit()
@@ -139,16 +145,28 @@ def test_sweep_syncs_orphaned_jobs_sibling_release_to_failed(tmp_path):
         s.add(Job(id="jqueued", matter_id="m", document_id="d", kind="sanitize", status="queued"))
         s.add(
             Release(
-                id="rrunning", matter_id="m", document_id="d", job_id="jrunning",
-                policy_id="external_sharing", profile_id="counterparty_deal_room",
-                recipient_type="other", requested_by="operator", status="running",
+                id="rrunning",
+                matter_id="m",
+                document_id="d",
+                job_id="jrunning",
+                policy_id="external_sharing",
+                profile_id="counterparty_deal_room",
+                recipient_type="other",
+                requested_by="operator",
+                status="running",
             )
         )
         s.add(
             Release(
-                id="rqueued", matter_id="m", document_id="d", job_id="jqueued",
-                policy_id="external_sharing", profile_id="counterparty_deal_room",
-                recipient_type="other", requested_by="operator", status="queued",
+                id="rqueued",
+                matter_id="m",
+                document_id="d",
+                job_id="jqueued",
+                policy_id="external_sharing",
+                profile_id="counterparty_deal_room",
+                recipient_type="other",
+                requested_by="operator",
+                status="queued",
             )
         )
         s.commit()
@@ -161,7 +179,11 @@ def test_sweep_syncs_orphaned_jobs_sibling_release_to_failed(tmp_path):
             release = s.get(Release, release_id)
             assert release.status == "failed"
             assert release.finished_utc is not None
-        terminal_events = [e for e in s.query(AuditEvent).filter_by(matter_id="m").all() if e.action == "release.terminal"]
+        terminal_events = [
+            e
+            for e in s.query(AuditEvent).filter_by(matter_id="m").all()
+            if e.action == "release.terminal"
+        ]
         assert {e.payload["release_id"] for e in terminal_events} == {"rrunning", "rqueued"}
 
 
@@ -183,8 +205,26 @@ def test_sweep_fails_running_batch_child_but_preserves_queued_batch_child(tmp_pa
         _seed_matter_doc(s)
         s.add(Batch(id="b1", matter_id="m", kind="inspect", requested_by="operator", total=2))
         s.flush()
-        s.add(Job(id="bjrunning", matter_id="m", document_id="d", kind="inspect", status="running", batch_id="b1"))
-        s.add(Job(id="bjqueued", matter_id="m", document_id="d", kind="inspect", status="queued", batch_id="b1"))
+        s.add(
+            Job(
+                id="bjrunning",
+                matter_id="m",
+                document_id="d",
+                kind="inspect",
+                status="running",
+                batch_id="b1",
+            )
+        )
+        s.add(
+            Job(
+                id="bjqueued",
+                matter_id="m",
+                document_id="d",
+                kind="inspect",
+                status="queued",
+                batch_id="b1",
+            )
+        )
         s.commit()
 
     with sf() as s:
@@ -227,11 +267,40 @@ def test_boot_sweep_completes_a_batch_whose_last_child_was_running(tmp_path):
     with sf() as s:
         _seed_matter_doc(s)
         s.add(Batch(id="b_done", matter_id="m", kind="inspect", requested_by="operator", total=1))
-        s.add(Batch(id="b_pending", matter_id="m", kind="inspect", requested_by="operator", total=2))
+        s.add(
+            Batch(id="b_pending", matter_id="m", kind="inspect", requested_by="operator", total=2)
+        )
         s.flush()
-        s.add(Job(id="jd1", matter_id="m", document_id="d", kind="inspect", status="running", batch_id="b_done"))
-        s.add(Job(id="jp1", matter_id="m", document_id="d", kind="inspect", status="running", batch_id="b_pending"))
-        s.add(Job(id="jp2", matter_id="m", document_id="d", kind="inspect", status="queued", batch_id="b_pending"))
+        s.add(
+            Job(
+                id="jd1",
+                matter_id="m",
+                document_id="d",
+                kind="inspect",
+                status="running",
+                batch_id="b_done",
+            )
+        )
+        s.add(
+            Job(
+                id="jp1",
+                matter_id="m",
+                document_id="d",
+                kind="inspect",
+                status="running",
+                batch_id="b_pending",
+            )
+        )
+        s.add(
+            Job(
+                id="jp2",
+                matter_id="m",
+                document_id="d",
+                kind="inspect",
+                status="queued",
+                batch_id="b_pending",
+            )
+        )
         s.commit()
 
     monkey = pytest.MonkeyPatch()

@@ -470,9 +470,7 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                     value_redacted=text,
                 )
             )
-        elif text.startswith("xlsx-hidden-sheets:") or text.startswith(
-            "xlsx-hidden-rows-cols:"
-        ):
+        elif text.startswith("xlsx-hidden-sheets:") or text.startswith("xlsx-hidden-rows-cols:"):
             out.append(
                 Finding(
                     category="hidden_structure",
@@ -536,7 +534,9 @@ def findings_from_container_report(report: dict[str, Any]) -> list[Finding]:
                     format=fmt,
                     risk_level="high",
                     confidence="confirmed",
-                    location=FindingLocation(pane="note" if text.startswith("pptx-notes:") else "comment"),
+                    location=FindingLocation(
+                        pane="note" if text.startswith("pptx-notes:") else "comment"
+                    ),
                     action_recommended="strip",
                     value_redacted=text,
                 )
