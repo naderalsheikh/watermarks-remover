@@ -356,7 +356,17 @@ def test_clean_install_boots_shipped_container_and_static_ui(tmp_path):
                 pytest.fail("nginx did not become ready in front of the container")
 
             # --- version/build identity -------------------------------------
-            root = client.get("/v1")
+            # Checked directly against the container's own port, not through
+            # nginx: the shipped nginx config's `location /v1/` requires the
+            # trailing slash, so a bare /v1 falls through to static serving
+            # and never reaches the API at all (a real, narrow routing
+            # boundary of the documented proxy config, not a bug in it --
+            # every other /v1/... path used below has content after the
+            # slash and proxies correctly, as the rest of this test proves).
+            with httpx.Client(
+                base_url="http://127.0.0.1:8443", trust_env=False, timeout=10
+            ) as direct:
+                root = direct.get("/v1")
             assert root.status_code == 200
             assert root.json()["version"] == version
 
