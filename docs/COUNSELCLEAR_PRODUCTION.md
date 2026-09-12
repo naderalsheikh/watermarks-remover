@@ -73,11 +73,20 @@ The product already enforces part of this:
 Build once, pin once:
 
 ```bash
-docker build -f service/Dockerfile.counselclear -t registry.internal/counselclear service
+docker build -f service/Dockerfile.counselclear \
+  --build-arg CC_VERSION="$(git rev-parse --short HEAD)" \
+  -t registry.internal/counselclear service
 docker push registry.internal/counselclear
 DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' registry.internal/counselclear)
 # use $DIGEST for COUNSELCLEAR_WORKER_IMAGE *and* the cc-api image reference
 ```
+
+`--build-arg CC_VERSION` is baked into the image as `COUNSELCLEAR_VERSION` and
+surfaced unauthenticated at `GET /v1` (`{"version": "..."}`) — the same
+digest pin above proves *which bytes* are running; this proves which
+release/commit an operator or support engineer is looking at without
+needing to already know the digest. Omitting it leaves every deployment
+reporting `"dev"`, indistinguishable from every other unversioned build.
 
 Build the native API checkout and worker image from the same reviewed revision.
 When using the evaluation API container, use that same image digest for both.
@@ -362,6 +371,8 @@ require, which this product does not yet implement.
       `/health/ready`
 - [ ] Startup posture log reviewed: `worker_mode`, `auth_mode`, `db_backend`,
       no warnings about subprocess mode / missing clamscan / empty allowlist
+- [ ] `GET /v1` reports the actual release/commit in `version`, not `"dev"`
+      — the image was built with `--build-arg CC_VERSION=...` (§2)
 - [ ] JSON request logs shipped somewhere durable; `X-Request-ID` echoed to
       clients matches log lines
 - [ ] ClamAV is available and its definitions are current under the deployment
@@ -376,6 +387,15 @@ require, which this product does not yet implement.
       volume, and keys. Verify the restored originals, audit chains, and downloaded
       packets while the old deployment is unavailable. SQLite/local qualification
       cannot stand in for a PostgreSQL/S3 restore.
+- [ ] For the LOCAL/SQLite pilot: a scheduled cold backup
+      (`tools/counselclear_backup.py`, see `COUNSELCLEAR_BACKUP.md`) exists,
+      and at least one of those backups has actually been restored with
+      `tools/counselclear_restore_drill.py` and reported `verified` — a
+      "backup succeeded" report alone does not establish that.
+- [ ] Back up before every upgrade. Schema downgrade is not a byte-preserving
+      rollback once release certificate snapshots exist (migration `0012`,
+      see `PRODUCTION_FOUNDATION.md`) — a pre-upgrade backup is the reliable
+      rollback path, not a schema downgrade of the live database.
 - [ ] pip-audit / image CVE scan in CI green for the deployed digest
 
 ## 8. What this product deliberately does not do

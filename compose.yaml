@@ -46,6 +46,11 @@ services:
     build:
       context: service
       dockerfile: Dockerfile.counselclear
+      args:
+        # Baked into the image as COUNSELCLEAR_VERSION, surfaced at GET /v1.
+        # Set COUNSELCLEAR_VERSION in .env (e.g. to `git rev-parse --short
+        # HEAD` or a release tag) before building; unset stays "dev".
+        CC_VERSION: ${COUNSELCLEAR_VERSION:-dev}
     environment:
       COUNSELCLEAR_DATA_ROOT: /data
       # Required only when OIDC SSO is not configured (the app enforces this
@@ -144,6 +149,8 @@ services:
     build:
       context: service
       dockerfile: Dockerfile.counselclear
+      args:
+        CC_VERSION: ${COUNSELCLEAR_VERSION:-dev}
     entrypoint: ["python3", "-m", "app.worker"]
     command: ["--help"]
     environment:

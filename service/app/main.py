@@ -1779,9 +1779,15 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         os.environ.get("COUNSELCLEAR_ENABLE_DOCS", "").strip() == "1"
         and os.environ.get("COUNSELCLEAR_DISABLE_DOCS", "").strip() != "1"
     )
+    # Build-time identification (COUNSELCLEAR_VERSION): baked into the image
+    # via Dockerfile.counselclear's CC_VERSION build arg, or set by hand for
+    # a native install. "dev" (the default) means no version was supplied at
+    # build/start time -- distinct from an actual unset-vs-empty distinction
+    # an operator might otherwise misread as "version 0" or a real release.
+    app_version = os.environ.get("COUNSELCLEAR_VERSION", "").strip() or "dev"
     app = FastAPI(
         title="CounselClear",
-        version="product-mvp",
+        version=app_version,
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
         openapi_url="/openapi.json" if docs_enabled else None,
@@ -1897,6 +1903,7 @@ def create_app(data_root: str | Path | None = None) -> FastAPI:
         unauthenticated routes as a starting point, not a full API index."""
         return {
             "product": "CounselClear",
+            "version": app_version,
             "message": "This is the CounselClear API root. Authenticated resources live under /v1/...",
             "unauthenticated_routes": [
                 "/health",

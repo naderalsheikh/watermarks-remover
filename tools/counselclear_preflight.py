@@ -14,9 +14,91 @@ import json
 import os
 import re
 import shutil
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
+
+_STALE_DEFINITIONS_DAYS = 7
+
+
+def _add_malware_definitions_check(
+    add: Callable[[str, str, str], None], setting: Callable[[str, str], str], clam: bool
+) -> None:
+    """Definition *freshness*, not merely clamscan's presence (that is the
+    separate "malware_scanner" check above). Filesystem-only, matching this
+    command's own "does not invoke a scanner" promise: it inspects the
+    mtime of the well-known daily.cvd/daily.cld files under the configured
+    COUNSELCLEAR_CLAMAV_DB_DIR (the directory app.malware.clam_db_dir()
+    resolves and the compose cc-freshclam sidecar keeps current) rather
+    than running `clamscan --version` to ask it directly."""
+    if not clam:
+        add("malware_definitions", "not_checked", "clamscan is absent; freshness does not apply.")
+        return
+    db_dir = setting("CLAMAV_DB_DIR")
+    if not db_dir:
+        add(
+            "malware_definitions",
+            "warning",
+            "COUNSELCLEAR_CLAMAV_DB_DIR is not set; clamscan uses its own default database "
+            "location, whose freshness this command cannot inspect from here. Point it at "
+            "the freshclam-updated volume (see compose.yaml's cc-freshclam sidecar) to make "
+            "definition freshness checkable.",
+        )
+        return
+    path = Path(db_dir)
+    try:
+        is_dir = path.is_dir()
+    except OSError:
+        is_dir = False
+    if not is_dir:
+        add(
+            "malware_definitions",
+            "block",
+            f"COUNSELCLEAR_CLAMAV_DB_DIR={db_dir!r} does not exist or is not a directory; "
+            "app.malware.clam_db_dir() silently falls back to clamscan's own default "
+            "location when this is misconfigured, which this command flags rather than "
+            "let pass unnoticed.",
+        )
+        return
+    candidates = [path / name for name in ("daily.cvd", "daily.cld")]
+    existing = []
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                existing.append(candidate)
+        except OSError:
+            continue
+    if not existing:
+        add(
+            "malware_definitions",
+            "block",
+            f"No daily.cvd/daily.cld found under {db_dir!r}; clamscan would run against "
+            "an empty or incomplete database.",
+        )
+        return
+    try:
+        newest = max(p.stat().st_mtime for p in existing)
+    except OSError:
+        add(
+            "malware_definitions",
+            "block",
+            f"daily.cvd/daily.cld under {db_dir!r} exist but could not be read.",
+        )
+        return
+    age_days = (time.time() - newest) / 86400
+    stale = age_days > _STALE_DEFINITIONS_DAYS
+    add(
+        "malware_definitions",
+        "warning" if stale else "pass",
+        f"Definitions under {db_dir!r} are {age_days:.1f} days old"
+        + (
+            f" -- older than {_STALE_DEFINITIONS_DAYS} days; confirm the freshclam "
+            "sidecar/schedule is actually running."
+            if stale
+            else "; presence and age checked, not their actual detection coverage."
+        ),
+    )
 
 
 def inspect_installation(
@@ -180,6 +262,7 @@ def inspect_installation(
         if clam
         else "clamscan is absent; the API would fall back to archive-depth checks only.",
     )
+    _add_malware_definitions_check(add, setting, clam)
     for name, default, minimum, maximum in (
         ("WORKER_TIMEOUT_S", "600", 1, None),
         ("BATCH_MAX_CONCURRENT", "4", 1, None),
@@ -248,7 +331,9 @@ def inspect_installation(
         ),
         (
             "backup_restore",
-            "Rehearse cold restore with independently preserved keys and verify old packets.",
+            "Rehearse a cold backup (tools/counselclear_backup.py) then restore "
+            "(tools/counselclear_restore_drill.py) with independently preserved keys, "
+            "and verify old packets.",
         ),
         (
             "runtime_dependencies",
