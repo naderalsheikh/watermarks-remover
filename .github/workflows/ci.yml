@@ -252,6 +252,31 @@ jobs:
           COUNSELCLEAR_TEST_WEB_ROOT: ${{ github.workspace }}/web/out
         run: python -m pytest tests/test_deployment_http_smoke.py -v
 
+  clean-install-acceptance:
+    name: Clean install of the shipped compose.yaml container
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements-dev.txt
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the same-origin web deployment
+        working-directory: web
+        run: npm ci && npm run build
+      - name: Install the deployment proxy
+        run: sudo apt-get update && sudo apt-get install -y nginx
+      - name: Boot the actual shipped compose.yaml cc-api container and rehearse it
+        env:
+          COUNSELCLEAR_TEST_WEB_ROOT: ${{ github.workspace }}/web/out
+        run: python -m pytest tests/test_clean_install_acceptance.py -v -s
+
   postgres-queue:
     name: PostgreSQL job ownership and recovery
     runs-on: ubuntu-latest

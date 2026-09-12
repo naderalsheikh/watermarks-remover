@@ -51,6 +51,33 @@ services:
         # Set COUNSELCLEAR_VERSION in .env (e.g. to `git rev-parse --short
         # HEAD` or a release tag) before building; unset stays "dev".
         CC_VERSION: ${COUNSELCLEAR_VERSION:-dev}
+    # Same uvicorn invocation as the image's own Dockerfile.counselclear
+    # CMD, plus --proxy-headers so COUNSELCLEAR_COOKIE_SECURE=auto (the
+    # default) actually works when this container sits behind the
+    # documented host-level nginx (deploy/nginx-counselclear.conf.example):
+    # without it, uvicorn never looks at X-Forwarded-Proto, so every
+    # session cookie loses its Secure flag regardless of what the browser
+    # actually connected over. --forwarded-allow-ips=* (not a literal
+    # 127.0.0.1, unlike the native systemd unit) because a proxy on the
+    # host reaches this container through Docker's port publishing
+    # (127.0.0.1:8443:8443 below), which NATs the connection so it never
+    # actually arrives from 127.0.0.1 inside the container's own network
+    # namespace. This is safe specifically because that port binding is
+    # loopback-only: nothing off this host can reach cc-api at all, so
+    # trusting whichever peer *did* reach it trusts only this same host.
+    command:
+      [
+        "-m",
+        "uvicorn",
+        "app.asgi:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8443",
+        "--proxy-headers",
+        "--forwarded-allow-ips",
+        "*",
+      ]
     environment:
       COUNSELCLEAR_DATA_ROOT: /data
       # Required only when OIDC SSO is not configured (the app enforces this
@@ -82,6 +109,23 @@ services:
       # Docs (/docs, /openapi.json) are fail-closed — opt in explicitly for
       # local development only.
       COUNSELCLEAR_ENABLE_DOCS: ${COUNSELCLEAR_ENABLE_DOCS:-}
+      # Not previously wired through this file at all, so no .env setting
+      # could reach it: every compose deployment silently anchored every
+      # release against a public third party (http://timestamp.digicert.com)
+      # with no documented way to change or disable it. Deliberately a
+      # BARE key, not ${COUNSELCLEAR_TSA_URL:-} -- that interpolation form
+      # always sets the container's variable, to an empty string when
+      # unset, and app.tsa.anchor_enabled() treats an *empty* value as an
+      # explicit opt-out, distinct from *absent* (which keeps today's
+      # default: anchor against the public TSA, with a startup warning).
+      # A bare key instead asks compose to look up COUNSELCLEAR_TSA_URL in
+      # the shell/.env at `docker compose` invocation time and, if unset
+      # there too, omit the variable from the container entirely --
+      # preserving that same distinction, not silently flipping every
+      # unconfigured deployment's default to zero-egress. Set it in .env to
+      # your chosen TSA, or to "off" for zero timestamp egress. See
+      # docs/COUNSELCLEAR_PRODUCTION.md section 6b.
+      COUNSELCLEAR_TSA_URL:
       # Live ClamAV definitions from the cc-freshclam sidecar (falls back to
       # the image's build-time seed when the sidecar/volume is absent).
       COUNSELCLEAR_CLAMAV_DB_DIR: /clamav-defs
