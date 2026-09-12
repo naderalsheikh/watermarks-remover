@@ -71,11 +71,20 @@ the parsed tree, and the coordinator does not add an isolated MIME parser or a
 streaming storage reader. Immutable objects left by rolled-back writes need a
 future retention/garbage-collection policy that respects live references.
 
-The current offline LOCAL/SQLite restore tool refuses **any nonempty mail spool**,
-including terminal rows, because its relocation procedure has not qualified
-mail input/output references and delivery recovery. An empty new table is safe
-to preserve. This restriction must be resolved before enabling production mail
-admission; the coordinator is not exposed to live traffic in this change.
+The offline LOCAL/SQLite restore tool (`tools/counselclear_restore_drill.py`,
+`docs/COUNSELCLEAR_RESTORE_DRILL.md`) relocates a mail submission only when
+this table says it is terminal and the registry itself can never again act on
+it: `refused`, `held` permanently (not retryable), or `acknowledged`. It
+refuses the whole run, not a partial restore, for `admitted`, `processing`,
+`held` retryable, `released`, `submitted`, `ambiguous` (terminal per this
+table, but conservatively excluded pending human resolution of its unknown
+delivery outcome), any unrecognised status, or a row whose stored fields
+contradict its status. After relocation it exercises the real registry
+(`get`/`claim`/`prepare_delivery`) against the restored database and
+reconciles the row against its own retained audit trail, proving the record
+can never again be claimed or delivered. An empty new table is trivially safe
+to preserve. This is not a statement about live traffic: the coordinator is
+not exposed to it in this change.
 
 ## Verification
 

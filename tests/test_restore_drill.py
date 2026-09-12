@@ -845,6 +845,7 @@ def test_every_non_reference_table_is_preserved_including_unknown_ones(release_s
     assert report.references["rebased_columns"] == {
         "documents": ["storage_path"],
         "jobs": ["bundle_dir", "execution_receipt"],
+        "mail_submissions": ["input_ref", "output_ref"],
     }
     con = sqlite3.connect(destination / DB)
     restored_rows = con.execute(
@@ -991,38 +992,610 @@ def test_root_mapper_rejects_escapes_and_foreign_flavours(tmp_path):
         drill.RootMapper("cc/data", tmp_path / "new")
 
 
+# --- mail submission restoration (Codex mail-state assignment) ----------------
+#
+# app.mail.submissions.MailSubmissionRegistry can never again claim, process
+# or deliver a submission in exactly three states: refused, permanently held
+# (held with retryable=False), and acknowledged. Every other known state
+# (admitted, processing, retryable held, released, submitted, ambiguous) and
+# any unrecognised status string is refused, so an old snapshot can never
+# resurrect a possible delivery. See docs/COUNSELCLEAR_MAIL_STATE.md and
+# _mail_restorable_problem in the tool.
+
+_MAIL_ROW_DEFAULTS = {
+    "id": "sub-1",
+    "tenant_id": "tenant-a",
+    "request_key": "key-1",
+    "request_id": "req-1",
+    "matter_id": "m1",
+    "actor_id": "actor-1",
+    "policy_id": "external_sharing",
+    "policy_version": 1,
+    "transport": "fixture",
+    "peer_identity": "peer",
+    "binding_sha256": "b" * 64,
+    "envelope": "{}",
+    "limits": "{}",
+    "input_ref": "/old/root/mail/sub-1/input.eml",
+    "input_sha256": "a" * 64,
+    "input_bytes": 10,
+    "status": "admitted",
+    "retryable": 0,
+    "reasons": "[]",
+    "attempt": 0,
+    "lease_token": None,
+    "lease_expires_epoch": None,
+    "output_ref": None,
+    "output_sha256": None,
+    "output_bytes": None,
+    "delivery_token": None,
+    "delivery_expires_epoch": None,
+    "acknowledgment_sha256": None,
+    "created_epoch": 0,
+    "updated_epoch": 0,
+}
+
+
+def _mail_only_schema(con: sqlite3.Connection) -> None:
+    """The other tables _check_drained's active-work check reads, empty --
+    these unit tests exercise the mail eligibility check, not job/release
+    activity, but _check_drained is one function covering both."""
+    columns = list(_MAIL_ROW_DEFAULTS)
+    con.execute(f"CREATE TABLE mail_submissions ({', '.join(columns)})")
+    for table in ("jobs", "releases"):
+        con.execute(f"CREATE TABLE {table} (id TEXT, status TEXT)")
+    con.execute("CREATE TABLE batches (id TEXT, finished_utc TEXT)")
+
+
+def _mail_table_connection(**overrides) -> sqlite3.Connection:
+    """An in-memory connection with the full ``mail_submissions`` schema
+    (every column migration 0017 creates) holding one row, plus empty
+    jobs/releases/batches tables so the rest of _check_drained can run.
+    No application boot required."""
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    _mail_only_schema(con)
+    columns = list(_MAIL_ROW_DEFAULTS)
+    row = dict(_MAIL_ROW_DEFAULTS, **overrides)
+    placeholders = ", ".join("?" for _ in columns)
+    con.execute(
+        f"INSERT INTO mail_submissions ({', '.join(columns)}) VALUES ({placeholders})",  # noqa: S608 - column names from a fixed constant list
+        [row[c] for c in columns],
+    )
+    return con
+
+
 @pytest.mark.parametrize(
-    "mail_state",
+    ("status", "retryable"),
     [
-        "admitted",
-        "processing",
-        "held",
-        "refused",
-        "released",
-        "submitted",
-        "acknowledged",
-        "ambiguous",
+        ("admitted", 0),
+        ("processing", 0),
+        ("held", 1),  # retryable held: the registry can still claim it again
+        ("released", 0),
+        ("submitted", 0),
+        ("ambiguous", 0),
+        ("no-such-status", 0),
     ],
 )
-def test_restore_refuses_any_retained_mail_spool_before_relocation(mail_state):
-    # A minimal snapshot proves the precondition is checked before any document
-    # rebasing; even terminal mail rows carry refs this tool cannot relocate yet.
-    with sqlite3.connect(":memory:") as con:
-        con.row_factory = sqlite3.Row
-        con.execute("CREATE TABLE mail_submissions (id TEXT, status TEXT)")
-        con.execute("INSERT INTO mail_submissions VALUES (?, ?)", ("retained", mail_state))
-        report = drill.DrillReport("source", "destination", "old-root")
-        with pytest.raises(drill.Refused, match="mail spool relocation is not qualified"):
-            drill._check_drained(con, report)
-        assert report.database["mail_submissions"] == 1
+def test_check_drained_refuses_every_non_terminal_mail_state(status, retryable):
+    con = _mail_table_connection(status=status, retryable=retryable)
+    report = drill.DrillReport("source", "destination", "old-root")
+    with pytest.raises(drill.Refused, match=r"mail_submissions: submission sub-1"):
+        drill._check_drained(con, report)
+
+
+@pytest.mark.parametrize(
+    ("status", "extra"),
+    [
+        ("refused", {}),
+        ("held", {"retryable": 0}),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "d" * 32,
+                "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 9999999999,
+            },
+        ),
+    ],
+)
+def test_check_drained_accepts_demonstrably_terminal_mail_rows(status, extra):
+    con = _mail_table_connection(status=status, **extra)
+    report = drill.DrillReport("source", "destination", "old-root")
+    drill._check_drained(con, report)  # must not raise
+    assert report.database["mail_submissions"] == 1
+    assert report.database["mail_submissions_by_status"] == {status: 1}
+
+
+@pytest.mark.parametrize(
+    ("status", "bad_overrides", "fragment"),
+    [
+        (
+            "refused",
+            {"output_ref": "/old/root/mail/sub-1/outputs/x.eml"},
+            "unexpectedly carries output_ref",
+        ),
+        (
+            "held",
+            {"retryable": 0, "delivery_token": "x" * 32},
+            "unexpectedly carries delivery_token",
+        ),
+        ("acknowledged", {}, "is missing output_ref"),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "d" * 32,
+                "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 9999999999,
+                "lease_token": "l" * 32,
+            },
+            "unexpectedly still carries lease_token",
+        ),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "d" * 32,
+                "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 9999999999,
+                "retryable": 1,
+            },
+            "unexpectedly marked retryable",
+        ),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "not-hex",
+                "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 9999999999,
+            },
+            "malformed delivery_token",
+        ),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "d" * 32,
+                "acknowledgment_sha256": "not-a-digest",
+                "delivery_expires_epoch": 9999999999,
+            },
+            "malformed acknowledgment_sha256",
+        ),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "d" * 32,
+                "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 0,
+            },
+            "malformed delivery_expires_epoch",
+        ),
+    ],
+    ids=[
+        "refused-with-output",
+        "held-with-delivery-token",
+        "acknowledged-missing-output",
+        "acknowledged-with-lease",
+        "acknowledged-retryable",
+        "acknowledged-bad-delivery-token",
+        "acknowledged-bad-acknowledgment-sha256",
+        "acknowledged-bad-expiry",
+    ],
+)
+def test_check_drained_refuses_inconsistent_terminal_mail_rows(status, bad_overrides, fragment):
+    con = _mail_table_connection(status=status, **bad_overrides)
+    report = drill.DrillReport("source", "destination", "old-root")
+    with pytest.raises(drill.Refused, match=fragment):
+        drill._check_drained(con, report)
 
 
 def test_empty_mail_table_does_not_change_drained_snapshot_check():
     with sqlite3.connect(":memory:") as con:
         con.row_factory = sqlite3.Row
-        for table in ("mail_submissions", "jobs", "releases"):
-            con.execute(f"CREATE TABLE {table} (id TEXT, status TEXT)")
-        con.execute("CREATE TABLE batches (id TEXT, finished_utc TEXT)")
+        _mail_only_schema(con)
         report = drill.DrillReport("source", "destination", "old-root")
         drill._check_drained(con, report)
         assert report.database["mail_submissions"] == 0
+        assert report.database["mail_submissions_by_status"] == {}
+
+
+# --- real registry: build history, relocate, prove no possible resurrection ---
+
+
+def _build_mail_history_root(tmp_path: Path, monkeypatch, *, encrypted: bool = True) -> dict:
+    """Boot a real app, admit and resolve three mail submissions into every
+    demonstrably terminal state the registry has, then stop the app:
+
+    - ``refused``: a macro-enabled DOCX the engine's external_sharing policy
+      refuses (same construction as test_mail_adapter_engine.py).
+    - ``held`` (permanent): an unsupported attachment format; MailAdapter
+      holds it without ever reaching the processor.
+    - ``acknowledged``: an ordinary DOCX, released, delivered, and
+      acknowledged with a synthetic trusted receipt.
+    """
+    from app.config import Config
+    from app.mail import Envelope, PolicyReference, TrustedCallerContext
+    from app.mail.durable_processor import DurableAttachmentProcessor, TenantJobBinding
+    from app.mail.fixtures import AttachmentSpec, build_message, synthetic_docx
+    from app.mail.submissions import MailSubmissionRegistry
+    from app.main import create_app
+    from app.malware import get_scanner
+    from app.storage import storage_from_config
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", PASSWORD)
+    keyfile = tmp_path / "keys" / "volume.key"
+    if encrypted:
+        monkeypatch.setenv("COUNSELCLEAR_VOLUME_KEY_FILE", str(keyfile))
+    else:
+        monkeypatch.delenv("COUNSELCLEAR_VOLUME_KEY_FILE", raising=False)
+
+    cfg = Config(tmp_path / "data")
+    # A real deployment provisions the custody signing key long before its
+    # first "done" sanitize job -- mail-originated or otherwise -- exists;
+    # the restored root's custody-depends-on-key check requires it once any
+    # done sanitize job is present, mail-admitted ones included.
+    cfg.ensure_custody_signing_key()
+    app = create_app(cfg.data_root)
+    docx_ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    facts: dict = {}
+    with TestClient(app) as c:
+        assert c.post("/v1/auth/login", json={"password": PASSWORD}).status_code == 200
+        matter = c.post("/v1/matters", json={"name": "Mail restore"}).json()["id"]
+        actor = "mail:tenant-a"
+        for permission in ("read", "upload", "sanitize"):
+            c.put(
+                f"/v1/matters/{matter}/acl", json={"user_id": actor, "perm": permission}
+            ).raise_for_status()
+        dispatcher = app.state.batch_dispatcher
+        sessions = dispatcher._session_factory
+        storage = storage_from_config(cfg)
+        binding = TenantJobBinding(
+            "tenant-a", matter, actor, PolicyReference("external_sharing", 1)
+        )
+        registry = MailSubmissionRegistry(
+            cfg=cfg, session_factory=sessions, storage=storage, binding=binding
+        )
+        processor = DurableAttachmentProcessor(
+            cfg=cfg,
+            session_factory=sessions,
+            storage=storage,
+            scanner=get_scanner(),
+            dispatcher=dispatcher,
+            binding=binding,
+            wait_s=30,
+            allow_development=True,
+        )
+        envelope = Envelope("sender@example.test", ("to@example.test", "bcc@example.test"))
+
+        def caller(request_id: str) -> TrustedCallerContext:
+            return TrustedCallerContext(
+                "tenant-a", "fixture-transport", True, request_id, "fixture-peer"
+            )
+
+        # refused: macro-enabled DOCX, real engine refusal.
+        macro = synthetic_docx("macro", creator=None)
+        with zipfile.ZipFile(io.BytesIO(macro)) as zin:
+            out = io.BytesIO()
+            with zipfile.ZipFile(out, "w") as zout:
+                for name in zin.namelist():
+                    zout.writestr(name, zin.read(name))
+                zout.writestr("word/vbaProject.bin", b"\xd0\xcf\x11\xe0" + b"\x00" * 32)
+        refused_raw = build_message(
+            attachments=(AttachmentSpec("macro.docx", out.getvalue(), docx_ct),)
+        )
+        refused_row = registry.admit(refused_raw, envelope, caller("req-refused"))
+        refused_result = registry.process(refused_row.id, processor)
+        assert refused_result.status == "refused", refused_result
+
+        # permanently held: an unsupported attachment format never reaches the processor.
+        held_raw = build_message(
+            attachments=(
+                AttachmentSpec("archive.zip", b"PK\x03\x04unsupported", "application/zip"),
+            )
+        )
+        held_row = registry.admit(held_raw, envelope, caller("req-held"))
+        held_result = registry.process(held_row.id, processor)
+        assert held_result.status == "held" and not held_result.retryable, held_result
+
+        # acknowledged: ordinary DOCX, released, delivered, acknowledged.
+        ack_content = synthetic_docx("Synthetic mail history", creator="Private Author")
+        ack_raw = build_message(
+            attachments=(AttachmentSpec("Agreement.docx", ack_content, docx_ct),)
+        )
+        ack_row = registry.admit(ack_raw, envelope, caller("req-ack"))
+        ack_result = registry.process(ack_row.id, processor)
+        assert ack_result.status == "released", ack_result
+        ticket = registry.prepare_delivery(ack_row.id)
+        acknowledged = registry.acknowledge(ticket, "trusted-exchange-receipt")
+        assert acknowledged.status == "acknowledged"
+
+        facts = {
+            "matter": matter,
+            "actor": actor,
+            "policy": binding.policy,
+            "refused": {"id": refused_row.id, "input_sha256": refused_row.input_sha256},
+            "held": {"id": held_row.id, "input_sha256": held_row.input_sha256},
+            "acknowledged": {
+                "id": ack_row.id,
+                "input_sha256": ack_row.input_sha256,
+                "output_sha256": acknowledged.output_sha256,
+            },
+        }
+    _stop_app(app)
+    _checkpoint(cfg.data_root)
+    facts["root"] = cfg.data_root
+    facts["keyfile"] = keyfile if encrypted else None
+    return facts
+
+
+@pytest.fixture()
+def mail_history_snapshot(tmp_path, monkeypatch):
+    built = _build_mail_history_root(tmp_path, monkeypatch, encrypted=True)
+    snapshot = _cold_snapshot(built["root"], tmp_path / "backup" / "data")
+    gone = built["root"].with_name("data.gone")
+    os.rename(built["root"], gone)
+    built["old_root"] = str(built["root"])
+    built["snapshot"] = snapshot
+    built["gone"] = gone
+    return built
+
+
+def test_restore_relocates_terminal_mail_history_and_proves_no_resurrection(
+    mail_history_snapshot, tmp_path, monkeypatch
+):
+    from app.config import Config
+    from app.mail.submissions import MailSubmissionRegistry, SubmissionConflict
+    from app.storage import storage_from_config
+
+    built = mail_history_snapshot
+    restored_key = tmp_path / "restored.key"
+    shutil.copyfile(built["keyfile"], restored_key)
+    destination = tmp_path / "restored" / "data"
+    destination.parent.mkdir()
+
+    report = _run(built["snapshot"], destination, built["old_root"], volume_key_file=restored_key)
+    assert report.outcome == "verified", (report.refusal, report.failures)
+    assert not built["gone"].with_name("data").exists()  # the old root really is gone
+
+    assert report.mail["submissions"] == 3
+    assert report.mail["by_status"] == {"refused": 1, "held": 1, "acknowledged": 1}
+    assert report.mail["bytes_verified"] == 4  # 3 inputs + 1 output (acknowledged only)
+    assert report.mail["encrypted"] == 4
+    assert report.mail["registry_exercised"] == 3
+    assert report.mail["claims_returned_none"] == 3
+    assert report.mail["delivery_refused"] == 3  # none of the three is "released"
+    assert report.references["mail_input_refs_rebased"] == 3
+    assert report.references["mail_output_refs_rebased"] == 1
+    assert "mail_submissions" in report.references["preserved_tables"]
+    assert report.key_material["used"] is True
+
+    # The report never carries envelope addresses, message content, or
+    # capability tokens -- only counts, status, and hashes.
+    blob = json.dumps(report.to_dict())
+    for secret in (
+        "sender@example.test",
+        "to@example.test",
+        "bcc@example.test",
+        "trusted-exchange-receipt",
+    ):
+        assert secret not in blob
+    for identifying in (built["refused"]["id"], built["held"]["id"], built["acknowledged"]["id"]):
+        assert identifying not in blob  # submission ids are not exposed either
+
+    # Independently -- not merely trusting the drill's own self-report --
+    # exercise a fresh registry against the restored database and prove
+    # every relocated terminal record is inert: no owner, no delivery.
+    monkeypatch.setenv("COUNSELCLEAR_VOLUME_KEY_FILE", str(restored_key))
+    cfg = Config(destination)
+    storage = storage_from_config(cfg)
+    from app.db import make_engine, make_session_factory
+    from app.mail.durable_processor import TenantJobBinding
+
+    engine = make_engine(cfg)
+    try:
+        sessions = make_session_factory(engine)
+        tenant_binding = TenantJobBinding(
+            "tenant-a", built["matter"], built["actor"], built["policy"]
+        )
+        registry = MailSubmissionRegistry(
+            cfg=cfg, session_factory=sessions, storage=storage, binding=tenant_binding
+        )
+        for key in ("refused", "held", "acknowledged"):
+            submission_id = built[key]["id"]
+            view = registry.get(submission_id)
+            assert view.status == key
+            assert registry.claim(submission_id) is None
+            with pytest.raises(SubmissionConflict):
+                registry.prepare_delivery(submission_id)
+    finally:
+        engine.dispose()
+
+
+def test_mail_input_corruption_fails_verification(mail_history_snapshot, tmp_path):
+    built = mail_history_snapshot
+    con = sqlite3.connect(built["snapshot"] / DB)
+    ref = con.execute(
+        "SELECT input_ref FROM mail_submissions WHERE id = ?", (built["refused"]["id"],)
+    ).fetchone()[0]
+    con.close()
+    path = built["snapshot"] / Path(ref).relative_to(built["old_root"])
+    data = bytearray(path.read_bytes())
+    data[-1] ^= 0xFF
+    os.chmod(path, 0o600)
+    path.write_bytes(bytes(data))
+    destination = tmp_path / "corrupt-mail"
+    report = _run(
+        built["snapshot"], destination, built["old_root"], volume_key_file=built["keyfile"]
+    )
+    assert report.outcome == "failed" and report.exit_code == 3
+    # A one-byte flip in an AES-GCM envelope fails the authentication tag
+    # before any hash comparison runs -- a stronger, earlier detection than
+    # a plaintext hash mismatch, and still an unambiguous verification
+    # failure naming the retained input.
+    assert "retained input" in report.failures[0]
+    assert built["refused"]["id"] in report.failures[0]
+    assert not destination.exists()
+
+
+def test_mail_submission_with_no_document_dependency_needs_its_own_key(tmp_path, monkeypatch):
+    """The permanently-held case creates a mail submission with no engine
+    Document at all, so this isolates the mail-specific missing-key path
+    from the document-side check the other test already covers."""
+    from app.config import Config
+    from app.mail import Envelope, PolicyReference, TrustedCallerContext
+    from app.mail.durable_processor import DurableAttachmentProcessor, TenantJobBinding
+    from app.mail.fixtures import AttachmentSpec, build_message
+    from app.mail.submissions import MailSubmissionRegistry
+    from app.main import create_app
+    from app.malware import get_scanner
+    from app.storage import storage_from_config
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", PASSWORD)
+    keyfile = tmp_path / "keys" / "volume.key"
+    monkeypatch.setenv("COUNSELCLEAR_VOLUME_KEY_FILE", str(keyfile))
+    cfg = Config(tmp_path / "data")
+    app = create_app(cfg.data_root)
+    with TestClient(app) as c:
+        assert c.post("/v1/auth/login", json={"password": PASSWORD}).status_code == 200
+        matter = c.post("/v1/matters", json={"name": "Mail restore"}).json()["id"]
+        actor = "mail:tenant-a"
+        for permission in ("read", "upload", "sanitize"):
+            c.put(
+                f"/v1/matters/{matter}/acl", json={"user_id": actor, "perm": permission}
+            ).raise_for_status()
+        dispatcher = app.state.batch_dispatcher
+        storage = storage_from_config(cfg)
+        binding = TenantJobBinding(
+            "tenant-a", matter, actor, PolicyReference("external_sharing", 1)
+        )
+        registry = MailSubmissionRegistry(
+            cfg=cfg, session_factory=dispatcher._session_factory, storage=storage, binding=binding
+        )
+        processor = DurableAttachmentProcessor(
+            cfg=cfg,
+            session_factory=dispatcher._session_factory,
+            storage=storage,
+            scanner=get_scanner(),
+            dispatcher=dispatcher,
+            binding=binding,
+            wait_s=30,
+            allow_development=True,
+        )
+        raw = build_message(
+            attachments=(
+                AttachmentSpec("archive.zip", b"PK\x03\x04unsupported", "application/zip"),
+            )
+        )
+        envelope = Envelope("sender@example.test", ("to@example.test",))
+        caller = TrustedCallerContext(
+            "tenant-a", "fixture-transport", True, "req-1", "fixture-peer"
+        )
+        row = registry.admit(raw, envelope, caller)
+        result = registry.process(row.id, processor)
+        assert result.status == "held" and not result.retryable
+        con = sqlite3.connect(cfg.data_root / DB)
+        assert con.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+        con.close()
+    _stop_app(app)
+    _checkpoint(cfg.data_root)
+
+    snapshot = _cold_snapshot(cfg.data_root, tmp_path / "backup" / "data")
+    old_root = str(cfg.data_root)
+    os.rename(cfg.data_root, cfg.data_root.with_name("data.gone"))
+    destination = tmp_path / "no-key-mail"
+    report = _run(snapshot, destination, old_root)  # no --volume-key-file
+    assert report.outcome == "refused"
+    assert "encrypted mail submissions present but no --volume-key-file" in report.refusal
+    assert not destination.exists()
+
+
+# --- ambient environment isolation + audit reconciliation regressions -------
+#
+# Config(destination) and storage_from_config(cfg) both read ambient
+# COUNSELCLEAR_* environment variables that have nothing to do with an
+# offline exercise of the restored destination -- a COUNSELCLEAR_DATABASE_URL
+# left set in the shell could point the registry exercise at an entirely
+# different database, and a COUNSELCLEAR_VOLUME_KEY_FILE could make
+# storage_from_config's LocalKeyring silently generate a fresh key outside
+# the restored root. Separately, a status column edited directly in a
+# snapshot never touches audit_events, so it can still revalidate against
+# get()'s own binding-hash recompute (which does not cover status). These
+# three tests build one real mail-history root and cold-snapshot it fresh
+# for each scenario, mirroring how each defect was independently reproduced.
+
+
+@pytest.fixture(scope="module")
+def mail_ambient_history(tmp_path_factory):
+    """One real mail-history root shared by the three tests below. All
+    ambient COUNSELCLEAR_* variables are cleared for the fixture's whole
+    lifetime so a variable one test sets cannot leak into another; the
+    shared root itself is read-only after this returns -- each test cold-
+    snapshots its own copy and corrupts only that copy."""
+    root = tmp_path_factory.mktemp("mail-ambient-regression")
+    with pytest.MonkeyPatch.context() as mp:
+        for name in tuple(os.environ):
+            if name.startswith("COUNSELCLEAR_"):
+                mp.delenv(name, raising=False)
+        built = _build_mail_history_root(root, mp, encrypted=False)
+        yield built, root
+
+
+def _mail_ambient_snapshot(mail_ambient_history, name):
+    built, root = mail_ambient_history
+    return built, root, _cold_snapshot(built["root"], root / name)
+
+
+def test_restore_does_not_generate_environment_volume_key(mail_ambient_history, monkeypatch):
+    built, root, source = _mail_ambient_snapshot(mail_ambient_history, "key-source")
+    surprise_key = root / "unrequested-volume.key"
+    monkeypatch.setenv("COUNSELCLEAR_VOLUME_KEY_FILE", str(surprise_key))
+    report = _run(source, root / "key-restored", str(built["root"]))
+    assert not surprise_key.exists(), "offline restore generated a key from ambient environment"
+    assert report.outcome == "verified", (report.refusal, report.failures)
+
+
+def test_restore_checks_destination_even_with_ambient_sqlite_url(mail_ambient_history, monkeypatch):
+    """peer_identity, not binding_sha256, is corrupted: binding_sha256 stays
+    intact so this isolates the ambient-database fix specifically. If
+    _exercise_mail_registry honoured the ambient COUNSELCLEAR_DATABASE_URL,
+    it would silently read the OTHER (pristine, uncorrupted) database and
+    report the corrupted destination verified anyway; only get()'s own
+    _bound_fields recompute -- run against whichever database the exercise
+    actually opens -- can catch it, and only if that database is really the
+    destination."""
+    built, root, source = _mail_ambient_snapshot(mail_ambient_history, "db-source")
+    with sqlite3.connect(source / DB) as con:
+        con.execute("UPDATE mail_submissions SET peer_identity = ?", ("corrupted-peer",))
+    monkeypatch.setenv("COUNSELCLEAR_DATABASE_URL", f"sqlite:///{built['root'] / DB}")
+    report = _run(source, root / "db-restored", str(built["root"]))
+    assert report.outcome == "failed", (
+        "restore verified a corrupted destination by reading the other database"
+    )
+
+
+def test_restore_reconciles_terminal_state_with_audit(mail_ambient_history):
+    built, root, source = _mail_ambient_snapshot(mail_ambient_history, "audit-source")
+    with sqlite3.connect(source / DB) as con:
+        con.execute("UPDATE mail_submissions SET status = 'refused' WHERE status = 'held'")
+    report = _run(source, root / "audit-restored", str(built["root"]))
+    assert report.outcome in ("failed", "refused"), (
+        "altered terminal status contradicted retained audit but restore verified"
+    )

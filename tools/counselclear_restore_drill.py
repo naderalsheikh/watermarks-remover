@@ -15,8 +15,10 @@ What it qualifies: that a *cold, drained* snapshot of a local data root can
 be copied into a NEW root, its database filesystem references rebased from
 the declared old root, and the result verified end to end -- database
 integrity, per-matter audit chains, original plaintext hashes and sizes
-(decrypting envelopes with explicitly supplied key material), and the
-released artifact evidence each terminal job left behind.
+(decrypting envelopes with explicitly supplied key material), the released
+artifact evidence each terminal job left behind, and the retained input and
+output of every demonstrably terminal mail submission (refused, permanently
+held, or acknowledged -- see "Mail submissions" below).
 
 What it does not qualify: live backup acquisition (the snapshot is an
 input), S3 object storage, PostgreSQL, KMS-wrapped keys, external identity,
@@ -27,12 +29,21 @@ Rules the tool holds itself to:
 - The source is never opened for writing and never modified. Every file is
   copied byte-for-byte into the destination and the copy is digest-checked
   before anything opens it. The database is opened only in the destination.
-- Only the three known filesystem references are rebased:
-  ``documents.storage_path``, ``jobs.bundle_dir`` and
-  ``jobs.execution_receipt.output_dir``. Every other row -- audit events,
-  release rows, certificate snapshots, attestation uses -- is left exactly
-  as copied, and a digest over those tables is proven unchanged. Signed
-  JSON on disk is never rewritten.
+- Only known filesystem references are rebased: ``documents.storage_path``,
+  ``jobs.bundle_dir``, ``jobs.execution_receipt.output_dir``, and (for
+  demonstrably terminal rows only) ``mail_submissions.input_ref`` /
+  ``mail_submissions.output_ref``. Every other row -- audit events, release
+  rows, certificate snapshots, attestation uses, and every other mail
+  submission column -- is left exactly as copied, and a digest over those
+  columns is proven unchanged. Signed JSON on disk is never rewritten.
+- A mail submission is relocated only when it is in a state the coordinator
+  (``app.mail.submissions.MailSubmissionRegistry``) can never again act on:
+  ``refused``, permanently ``held`` (not retryable), or ``acknowledged``.
+  Anything else -- admitted, processing, retryable held, released,
+  submitted, ambiguous, or an unrecognised status -- is a refusal, so a
+  restored snapshot can never resurrect a possible delivery. After
+  relocation the real registry is exercised against the restored database
+  to prove the row cannot be claimed or obtain a new delivery ticket.
 - A reference that is not an absolute path under the declared old root,
   that contains ``..`` segments, or that would resolve outside the new root
   is a refusal, not a best effort. So is any symlink in the snapshot.
@@ -57,6 +68,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -90,7 +102,101 @@ ACTIVE_JOB_STATES = ("queued", "running")
 REBASED_COLUMNS = {
     "documents": ("storage_path",),
     "jobs": ("bundle_dir", "execution_receipt"),
+    "mail_submissions": ("input_ref", "output_ref"),
 }
+
+# Every status app.mail.submissions.MailSubmissionRegistry can assign
+# (docs/COUNSELCLEAR_MAIL_STATE.md's delivery-state table). A status outside
+# this set is unrecognised and refused, never guessed at.
+MAIL_KNOWN_STATUSES = frozenset(
+    {
+        "admitted",
+        "processing",
+        "held",
+        "refused",
+        "released",
+        "submitted",
+        "acknowledged",
+        "ambiguous",
+    }
+)
+# Columns the registry's own _publish()/prepare_delivery()/acknowledge() never
+# set for a message that was blocked before release (refused, or held and not
+# retryable). Any of these present on such a row is a stored inconsistency.
+_MAIL_NO_DELIVERY_COLUMNS = (
+    "output_ref",
+    "output_sha256",
+    "output_bytes",
+    "delivery_token",
+    "delivery_expires_epoch",
+    "acknowledgment_sha256",
+    "lease_token",
+    "lease_expires_epoch",
+)
+# Columns an acknowledged row must carry: release then prepare_delivery then
+# acknowledge all ran, and acknowledge() never clears the delivery token or
+# its expiry -- they are retained, not erased.
+_MAIL_ACK_REQUIRED_COLUMNS = (
+    "output_ref",
+    "output_sha256",
+    "output_bytes",
+    "delivery_token",
+    "acknowledgment_sha256",
+    "delivery_expires_epoch",
+)
+# uuid.uuid4().hex (delivery_token) and hashlib.sha256(...).hexdigest()
+# (acknowledgment_sha256 / binding_sha256) are the only shapes the registry
+# ever writes to these columns -- a value that does not match is stored
+# data the registry itself never produced.
+_HEX32_RE = re.compile(r"[0-9a-f]{32}")
+_HEX64_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _mail_restorable_problem(row: sqlite3.Row) -> str | None:
+    """``None`` iff this row is a demonstrably terminal record the registry
+    can never again claim, process, or deliver -- so relocating it can never
+    resurrect a possible send. Checks the actual stored fields the registry's
+    own state machine would have left, not only the status string: a row
+    whose fields contradict its status is refused as inconsistent rather
+    than restored anyway."""
+    status = row["status"]
+    retryable = bool(row["retryable"])
+    if status not in MAIL_KNOWN_STATUSES:
+        return f"unknown status {status!r}"
+    permanently_held = status == "held" and not retryable
+    if not (status in ("refused", "acknowledged") or permanently_held):
+        detail = f"held (retryable={retryable})" if status == "held" else status
+        return f"status {detail} is not a demonstrably terminal record"
+    if status == "acknowledged":
+        for column in _MAIL_ACK_REQUIRED_COLUMNS:
+            if row[column] is None:
+                return f"acknowledged submission is missing {column}"
+        for column in ("lease_token", "lease_expires_epoch"):
+            if row[column] is not None:
+                return f"acknowledged submission unexpectedly still carries {column}"
+        # acknowledge() only ever reaches an already-released, non-retryable
+        # row (retryable is never set True again after release); a stray
+        # True here is stored data the state machine could not have left.
+        if retryable:
+            return "acknowledged submission unexpectedly marked retryable"
+        if not isinstance(row["delivery_token"], str) or not _HEX32_RE.fullmatch(
+            row["delivery_token"]
+        ):
+            return "acknowledged submission has a malformed delivery_token"
+        if not isinstance(row["acknowledgment_sha256"], str) or not _HEX64_RE.fullmatch(
+            row["acknowledgment_sha256"]
+        ):
+            return "acknowledged submission has a malformed acknowledgment_sha256"
+        expiry = row["delivery_expires_epoch"]
+        if not isinstance(expiry, (int, float)) or isinstance(expiry, bool) or expiry <= 0:
+            return "acknowledged submission has a malformed delivery_expires_epoch"
+    else:
+        for column in _MAIL_NO_DELIVERY_COLUMNS:
+            if row[column] is not None:
+                return f"{status} submission unexpectedly carries {column}"
+    if not isinstance(row["input_ref"], str) or not row["input_ref"]:
+        return "submission has no retained input reference"
+    return None
 
 
 class Refused(Exception):
@@ -118,11 +224,16 @@ class DrillReport:
     originals: dict[str, Any] = field(default_factory=dict)
     releases: dict[str, Any] = field(default_factory=dict)
     auth: dict[str, Any] = field(default_factory=dict)
+    mail: dict[str, Any] = field(default_factory=dict)
     key_material: dict[str, Any] = field(default_factory=dict)
     destination_removed: bool = False
     scope: dict[str, Any] = field(
         default_factory=lambda: {
-            "qualifies": "cold local data-root restore into a new root (LOCAL storage, SQLite)",
+            "qualifies": (
+                "cold local data-root restore into a new root (LOCAL storage, SQLite), "
+                "including demonstrably terminal mail submissions (refused, permanently "
+                "held, or acknowledged)"
+            ),
             "does_not_qualify": [
                 "live backup acquisition",
                 "S3 object storage",
@@ -130,7 +241,8 @@ class DrillReport:
                 "KMS-wrapped key material",
                 "external identity providers",
                 "cloud restore",
-                "retained mail spool relocation",
+                "mail submissions in a non-terminal state (admitted, processing, "
+                "retryable held, released, submitted, ambiguous, or unrecognised)",
             ],
         }
     )
@@ -152,6 +264,7 @@ class DrillReport:
             "originals": self.originals,
             "releases": self.releases,
             "auth": self.auth,
+            "mail": self.mail,
             "key_material": self.key_material,
             "destination_removed": self.destination_removed,
             "scope": self.scope,
@@ -370,17 +483,20 @@ def _open_database(destination: Path, report: DrillReport) -> sqlite3.Connection
 
 
 def _check_drained(con: sqlite3.Connection, report: DrillReport) -> None:
-    mail_table = con.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mail_submissions'"
-    ).fetchone()
-    mail_count = (
-        con.execute("SELECT COUNT(*) FROM mail_submissions").fetchone()[0] if mail_table else 0
-    )
-    report.database["mail_submissions"] = mail_count
-    if mail_count:
-        raise Refused(
-            "mail spool relocation is not qualified: snapshot contains retained mail submissions"
-        )
+    mail_table = "mail_submissions" in _table_names(con)
+    mail_status_counts: dict[str, int] = {}
+    if mail_table:
+        for row in con.execute(
+            "SELECT id, status, retryable, input_ref, output_ref, output_sha256, "
+            "output_bytes, delivery_token, delivery_expires_epoch, acknowledgment_sha256, "
+            "lease_token, lease_expires_epoch FROM mail_submissions"
+        ):
+            mail_status_counts[row["status"]] = mail_status_counts.get(row["status"], 0) + 1
+            problem = _mail_restorable_problem(row)
+            if problem:
+                raise Refused(f"mail_submissions: submission {row['id']}: {problem}")
+    report.database["mail_submissions"] = sum(mail_status_counts.values())
+    report.database["mail_submissions_by_status"] = mail_status_counts
     active_jobs = [
         (row["id"], row["status"])
         for row in con.execute(
@@ -407,23 +523,32 @@ def _check_drained(con: sqlite3.Connection, report: DrillReport) -> None:
         )
 
 
+def _local_ref_or_refuse(ref: str, *, column: str) -> None:
+    """Refuse a reference this drill cannot relocate: an object-storage
+    (versioned or bare-key) reference, or anything that is not an absolute
+    local filesystem path. Shared by documents, jobs and mail submissions --
+    every reference table this drill knows how to rebase."""
+    if ref.startswith("s3v1:"):
+        raise Refused(
+            f"{column}: object-storage (S3) references present; this drill "
+            "restores LOCAL storage only"
+        )
+
+
 def _rebase_references(
     con: sqlite3.Connection, mapper: RootMapper, destination: Path, report: DrillReport
 ) -> dict[str, Any]:
     before = _digest_tables(con)
     documents: dict[str, dict[str, Any]] = {}
     jobs: dict[str, dict[str, Any]] = {}
-    updates: list[tuple[str, str, str]] = []
+    mail: dict[str, dict[str, Any]] = {}
+    updates: list[tuple[str, str, str, str]] = []
 
     for row in con.execute("SELECT id, filename, storage_path, sha256, bytes FROM documents"):
         ref = row["storage_path"]
         if not isinstance(ref, str) or not ref:
             raise Refused(f"documents.storage_path: document {row['id']} has no reference")
-        if ref.startswith("s3v1:"):
-            raise Refused(
-                "documents.storage_path: object-storage (S3) references present; this drill "
-                "restores LOCAL storage only"
-            )
+        _local_ref_or_refuse(ref, column="documents.storage_path")
         if not mapper.is_absolute_reference(ref):
             raise Refused(
                 "documents.storage_path: reference is not an absolute local path (a relative "
@@ -436,7 +561,7 @@ def _rebase_references(
             "sha256": row["sha256"],
             "bytes": row["bytes"],
         }
-        updates.append(("documents", row["id"], str(new)))
+        updates.append(("documents", "storage_path", row["id"], str(new)))
 
     receipt_updates: list[tuple[str, str]] = []
     for row in con.execute(
@@ -452,7 +577,7 @@ def _rebase_references(
         }
         if row["bundle_dir"]:
             entry["bundle"] = mapper.rebase(row["bundle_dir"], column="jobs.bundle_dir")
-            updates.append(("jobs", row["id"], str(entry["bundle"])))
+            updates.append(("jobs", "bundle_dir", row["id"], str(entry["bundle"])))
         receipt_text = row["execution_receipt"]
         if receipt_text:
             try:
@@ -469,11 +594,76 @@ def _rebase_references(
                 receipt_updates.append((row["id"], json.dumps(receipt)))
         jobs[row["id"]] = entry
 
+    # _check_drained already refused any mail submission that is not a
+    # demonstrably terminal record; every row seen here is eligible, so this
+    # loop only relocates references and records what it relocated.
+    if "mail_submissions" in _table_names(con):
+        for row in con.execute(
+            "SELECT id, tenant_id, matter_id, actor_id, policy_id, policy_version, status, "
+            "retryable, binding_sha256, request_key, attempt, envelope, input_ref, "
+            "input_sha256, input_bytes, output_ref, output_sha256, output_bytes "
+            "FROM mail_submissions"
+        ):
+            envelope_raw = row["envelope"]
+            try:
+                envelope_obj = (
+                    json.loads(envelope_raw)
+                    if isinstance(envelope_raw, str)
+                    else (envelope_raw or {})
+                )
+            except ValueError:
+                raise Refused(
+                    f"mail_submissions: submission {row['id']}: envelope is not valid JSON"
+                ) from None
+            # Only a recipient COUNT is derived and retained here, never the
+            # addresses themselves -- the same audit-payload field selection
+            # app.mail.submissions._event already uses.
+            recipient_count = (
+                len(envelope_obj.get("rcpt_to", [])) if isinstance(envelope_obj, dict) else 0
+            )
+            input_ref = row["input_ref"]
+            _local_ref_or_refuse(input_ref, column="mail_submissions.input_ref")
+            if not mapper.is_absolute_reference(input_ref):
+                raise Refused(
+                    "mail_submissions.input_ref: reference is not an absolute local path; "
+                    "this drill restores LOCAL storage only"
+                )
+            new_input = mapper.rebase(input_ref, column="mail_submissions.input_ref")
+            updates.append(("mail_submissions", "input_ref", row["id"], str(new_input)))
+            new_output = None
+            if row["output_ref"] is not None:
+                _local_ref_or_refuse(row["output_ref"], column="mail_submissions.output_ref")
+                if not mapper.is_absolute_reference(row["output_ref"]):
+                    raise Refused(
+                        "mail_submissions.output_ref: reference is not an absolute local path; "
+                        "this drill restores LOCAL storage only"
+                    )
+                new_output = mapper.rebase(row["output_ref"], column="mail_submissions.output_ref")
+                updates.append(("mail_submissions", "output_ref", row["id"], str(new_output)))
+            mail[row["id"]] = {
+                "path_input": new_input,
+                "path_output": new_output,
+                "input_sha256": row["input_sha256"],
+                "input_bytes": row["input_bytes"],
+                "output_sha256": row["output_sha256"],
+                "output_bytes": row["output_bytes"],
+                "tenant_id": row["tenant_id"],
+                "matter_id": row["matter_id"],
+                "actor_id": row["actor_id"],
+                "policy_id": row["policy_id"],
+                "policy_version": row["policy_version"],
+                "status": row["status"],
+                "binding_sha256": row["binding_sha256"],
+                "retryable": bool(row["retryable"]),
+                "request_key": row["request_key"],
+                "attempt": row["attempt"],
+                "recipient_count": recipient_count,
+            }
+
     con.execute("BEGIN")
     try:
-        for table, row_id, value in updates:
-            column = "storage_path" if table == "documents" else "bundle_dir"
-            con.execute(f'UPDATE "{table}" SET {column} = ? WHERE id = ?', (value, row_id))  # noqa: S608 - constants
+        for table, column, row_id, value in updates:
+            con.execute(f'UPDATE "{table}" SET "{column}" = ? WHERE id = ?', (value, row_id))  # noqa: S608 - constants
         for row_id, text in receipt_updates:
             con.execute("UPDATE jobs SET execution_receipt = ? WHERE id = ?", (text, row_id))
         con.execute("COMMIT")
@@ -489,19 +679,24 @@ def _rebase_references(
 
     stale = 0
     old_text = str(mapper.old)
-    for table, column in (
+    stale_columns = [
         ("documents", "storage_path"),
         ("jobs", "bundle_dir"),
         ("jobs", "execution_receipt"),
-    ):
+    ]
+    if "mail_submissions" in _table_names(con):
+        stale_columns += [("mail_submissions", "input_ref"), ("mail_submissions", "output_ref")]
+    for table, column in stale_columns:
         stale += con.execute(
-            f'SELECT COUNT(*) FROM "{table}" WHERE {column} LIKE ?',  # noqa: S608 - constants
+            f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" LIKE ?',  # noqa: S608 - constants
             (f"{old_text}%",),
         ).fetchone()[0]
     report.references = {
         "documents_rebased": len(documents),
         "bundle_dirs_rebased": sum(1 for j in jobs.values() if j["bundle"] is not None),
         "receipt_output_dirs_rebased": len(receipt_updates),
+        "mail_input_refs_rebased": len(mail),
+        "mail_output_refs_rebased": sum(1 for m in mail.values() if m["path_output"] is not None),
         "old_root_mentions_remaining_in_reference_columns": stale,
         "preserved_tables_digest_unchanged": True,
         "preserved_tables": sorted(after),
@@ -509,13 +704,20 @@ def _rebase_references(
     }
     if stale:
         raise VerificationFailed("old data root still present in a reference column after rebase")
-    return {"documents": documents, "jobs": jobs}
+    return {"documents": documents, "jobs": jobs, "mail": mail}
 
 
-def _verify_audit(con: sqlite3.Connection, report: DrillReport) -> None:
+def _verify_audit(con: sqlite3.Connection, report: DrillReport) -> dict[str, SimpleNamespace]:
+    """Verify every matter's tamper-evident audit chain and, in the same
+    pass, index the latest ``mail.*`` event recorded for each mail
+    submission -- returned so the caller can reconcile a relocated
+    submission's current row against what its own (now hash-verified)
+    audit trail actually recorded, since a directly edited column would
+    never touch audit_events at all."""
     from app.audit import verify_chain
 
     per_matter: dict[str, list[SimpleNamespace]] = {}
+    last_mail_event: dict[str, SimpleNamespace] = {}
     for row in con.execute(
         "SELECT matter_id, seq, prev_hash, actor_id, action, payload, row_hash FROM audit_events"
     ):
@@ -526,16 +728,22 @@ def _verify_audit(con: sqlite3.Connection, report: DrillReport) -> None:
             raise VerificationFailed(
                 f"audit event payload is not valid JSON (matter {row['matter_id']}, seq {row['seq']})"
             ) from None
-        per_matter.setdefault(row["matter_id"], []).append(
-            SimpleNamespace(
-                seq=row["seq"],
-                prev_hash=row["prev_hash"],
-                actor_id=row["actor_id"],
-                action=row["action"],
-                payload=payload_obj,
-                row_hash=row["row_hash"],
-            )
+        event = SimpleNamespace(
+            seq=row["seq"],
+            prev_hash=row["prev_hash"],
+            actor_id=row["actor_id"],
+            action=row["action"],
+            payload=payload_obj,
+            row_hash=row["row_hash"],
+            matter_id=row["matter_id"],
         )
+        per_matter.setdefault(row["matter_id"], []).append(event)
+        if row["action"].startswith("mail.") and isinstance(payload_obj, dict):
+            submission_id = payload_obj.get("submission_id")
+            if isinstance(submission_id, str):
+                prior = last_mail_event.get(submission_id)
+                if prior is None or event.seq > prior.seq:
+                    last_mail_event[submission_id] = event
     matters = [row["id"] for row in con.execute("SELECT id FROM matters")]
     results: dict[str, str] = {}
     broken: list[str] = []
@@ -555,6 +763,108 @@ def _verify_audit(con: sqlite3.Connection, report: DrillReport) -> None:
         raise VerificationFailed("audit chain verification failed: " + "; ".join(broken))
     if orphaned:
         raise VerificationFailed("audit events reference matters that do not exist")
+    return last_mail_event
+
+
+# The only action a demonstrably terminal submission's last mail.* event can
+# be: refused/permanently-held rows are set by _publish's "decision" event;
+# acknowledged rows by acknowledge()'s "delivery.acknowledged" event. Nothing
+# else ever leaves a row in one of these three statuses.
+_MAIL_TERMINAL_EVENT_ACTION = {
+    "refused": "mail.decision",
+    "held": "mail.decision",
+    "acknowledged": "mail.delivery.acknowledged",
+}
+
+
+def _verify_mail_audit_consistency(
+    mail_rows: dict[str, dict[str, Any]],
+    last_mail_event: dict[str, SimpleNamespace],
+    report: DrillReport,
+) -> None:
+    """Cross-check each demonstrably terminal mail submission against the
+    last ``mail.*`` audit event recorded for it, now that _verify_audit has
+    proven the chain those events sit in is internally unbroken.
+
+    ``binding_sha256`` never covers ``status`` (see
+    ``MailSubmissionRegistry._bound_fields`` / ``_row``), so a row whose
+    ``status`` column was edited directly -- for example a permanently held
+    submission flipped to refused in the stored snapshot -- still
+    revalidates against ``get()``'s own recomputed binding hash. The audit
+    trail is a second, independently-written record of what decision was
+    actually made, so disagreement here means the mail_submissions row was
+    altered separately from its own audit trail.
+
+    This is internal consistency between two parts of the same database,
+    not independent authentication: an unbroken hash chain only proves the
+    events are self-consistent with each other, not that they were written
+    by the real coordinator rather than fabricated, together with a
+    matching row, by whatever produced this snapshot. A single database
+    file cannot prove its own provenance; that's a property of how the
+    snapshot was acquired, outside this tool's scope."""
+    failures: list[str] = []
+    for submission_id, row in mail_rows.items():
+        event = last_mail_event.get(submission_id)
+        if event is None:
+            failures.append(
+                f"mail submission {submission_id}: no audit event recorded for a "
+                "demonstrably terminal submission"
+            )
+            continue
+        payload = event.payload
+        expected_action = _MAIL_TERMINAL_EVENT_ACTION.get(row["status"])
+        if expected_action is not None and event.action != expected_action:
+            failures.append(
+                f"mail submission {submission_id}: last audit event is {event.action!r}, "
+                f"not the {expected_action!r} a {row['status']!r} submission requires"
+            )
+        if event.matter_id != row["matter_id"]:
+            failures.append(
+                f"mail submission {submission_id}: audit event matter disagrees with "
+                "the retained row"
+            )
+        if event.actor_id != row["actor_id"]:
+            failures.append(
+                f"mail submission {submission_id}: audit event actor disagrees with "
+                "the retained row"
+            )
+        if payload.get("status") != row["status"]:
+            failures.append(
+                f"mail submission {submission_id}: retained status {row['status']!r} "
+                f"disagrees with the last audit event's recorded status "
+                f"{payload.get('status')!r}"
+            )
+        if payload.get("binding_sha256") != row["binding_sha256"]:
+            failures.append(
+                f"mail submission {submission_id}: retained binding_sha256 disagrees "
+                "with the audit trail"
+            )
+        if payload.get("input_sha256") != row["input_sha256"]:
+            failures.append(
+                f"mail submission {submission_id}: retained input_sha256 disagrees "
+                "with the audit trail"
+            )
+        if payload.get("output_sha256") != row["output_sha256"]:
+            failures.append(
+                f"mail submission {submission_id}: retained output_sha256 disagrees "
+                "with the audit trail"
+            )
+        if "request_key" in payload and payload["request_key"] != row["request_key"]:
+            failures.append(
+                f"mail submission {submission_id}: retained request_key disagrees "
+                "with the audit trail"
+            )
+        if "attempt" in payload and payload["attempt"] != row["attempt"]:
+            failures.append(
+                f"mail submission {submission_id}: retained attempt disagrees with the audit trail"
+            )
+        if "recipient_count" in payload and payload["recipient_count"] != row["recipient_count"]:
+            failures.append(
+                f"mail submission {submission_id}: retained recipient count disagrees "
+                "with the audit trail"
+            )
+    if failures:
+        raise VerificationFailed("mail audit reconciliation failed: " + "; ".join(failures))
 
 
 def _load_keyring(volume_key_file: Path | None, report: DrillReport):
@@ -625,6 +935,187 @@ def _verify_originals(
     }
     if failures:
         raise VerificationFailed("original verification failed: " + "; ".join(failures))
+
+
+def _exercise_mail_registry(
+    destination: Path, mail_rows: dict[str, dict[str, Any]], keyring
+) -> dict[str, Any]:
+    """Prove, against the real coordinator, that a relocated terminal mail
+    submission can never again be claimed, processed, or delivered.
+
+    This calls MailSubmissionRegistry.get / claim / prepare_delivery -- the
+    production methods -- against a fresh engine on the restored database.
+    ``get`` revalidates the retained admission binding hash and the matter
+    ACL the same way live code would; it is not reimplemented here. No
+    shared registry API changes were needed for this: everything used is
+    already public.
+    """
+    if not mail_rows:
+        return {"registry_exercised": 0, "claims_returned_none": 0, "delivery_refused": 0}
+    from app.config import Config
+    from app.db import make_engine, make_session_factory
+    from app.mail.contract import PolicyReference
+    from app.mail.durable_processor import TenantJobBinding
+    from app.mail.submissions import MailStateError, MailSubmissionRegistry, SubmissionConflict
+    from app.storage import EncryptedStorage, LocalStorage
+
+    cfg = Config(destination)
+    # Config() reads ambient COUNSELCLEAR_* environment variables that have
+    # nothing to do with this offline exercise. COUNSELCLEAR_DATABASE_URL in
+    # particular could point at a live or unrelated database -- this drill
+    # must only ever exercise the restored destination's own SQLite file, so
+    # the ambient override is discarded regardless of what the environment
+    # sets. db_url() falls back to the destination's sqlite file whenever
+    # database_url is empty.
+    cfg.database_url = ""
+    engine = make_engine(cfg)
+    try:
+        sessions = make_session_factory(engine)
+        # storage_from_config(cfg) would likewise read COUNSELCLEAR_STORAGE /
+        # COUNSELCLEAR_VOLUME_KEY_FILE / COUNSELCLEAR_CMK_ARN from the
+        # environment -- an ambient backend that could point at S3/KMS, or a
+        # LocalKeyring that GENERATES a fresh key file outside the restored
+        # root the first time it is asked for a nonexistent path. Build
+        # storage explicitly instead, the same way _verify_mail_submissions
+        # already does: local to the destination, encrypted only with the
+        # keyring this drill was actually handed via --volume-key-file.
+        storage = LocalStorage(destination)
+        if keyring is not None:
+            storage = EncryptedStorage(storage, keyring)
+        exercised = claims_none = delivery_refused = 0
+        for submission_id, row in mail_rows.items():
+            binding = TenantJobBinding(
+                row["tenant_id"],
+                row["matter_id"],
+                row["actor_id"],
+                PolicyReference(row["policy_id"], row["policy_version"]),
+            )
+            registry = MailSubmissionRegistry(
+                cfg=cfg, session_factory=sessions, storage=storage, binding=binding
+            )
+            try:
+                view = registry.get(submission_id)
+            except MailStateError as exc:
+                raise VerificationFailed(
+                    f"mail submission {submission_id}: retained admission did not "
+                    f"revalidate against the restored database ({exc})"
+                ) from exc
+            if view.status != row["status"]:
+                raise VerificationFailed(
+                    f"mail submission {submission_id}: restored status {view.status!r} "
+                    f"differs from the recorded {row['status']!r}"
+                )
+            exercised += 1
+            if registry.claim(submission_id) is not None:
+                raise VerificationFailed(
+                    f"mail submission {submission_id}: a terminal record was claimable "
+                    "after restore"
+                )
+            claims_none += 1
+            try:
+                registry.prepare_delivery(submission_id)
+            except SubmissionConflict:
+                delivery_refused += 1
+            else:
+                raise VerificationFailed(
+                    f"mail submission {submission_id}: a terminal record obtained a "
+                    "delivery ticket after restore"
+                )
+        return {
+            "registry_exercised": exercised,
+            "claims_returned_none": claims_none,
+            "delivery_refused": delivery_refused,
+        }
+    finally:
+        engine.dispose()
+
+
+def _verify_mail_submissions(
+    destination: Path, mail_rows: dict[str, dict[str, Any]], keyring, report: DrillReport
+) -> None:
+    """Byte-level verification of every relocated mail submission's retained
+    input (and output, if released) plus a live exercise of the real
+    registry proving none of them can be claimed, processed, or delivered
+    again. The report carries only counts, status, and hashes -- never
+    envelope addresses, message content, or capability tokens (matching
+    the audit-event field selection in app.mail.submissions._event)."""
+    from app.storage import EncryptedStorage, LocalStorage, StorageError
+
+    local = LocalStorage(destination)
+    encrypted_backend = EncryptedStorage(local, keyring) if keyring is not None else None
+    failures: list[str] = []
+    verified = 0
+    encrypted = 0
+    by_status: dict[str, int] = {}
+
+    def _read_plain(path: Path, submission_id: str, what: str) -> bytes | None:
+        nonlocal encrypted
+        if not path.is_file():
+            failures.append(
+                f"mail submission {submission_id}: retained {what} missing at restored path"
+            )
+            return None
+        head = path.read_bytes()
+        kid = _envelope_key_id(head)
+        if kid is None:
+            return head
+        encrypted += 1
+        if kid != "local":
+            raise Refused(
+                f"mail submission {submission_id}: retained {what} is sealed under key id "
+                f"{kid!r}; this drill can only open envelopes sealed with the local volume key"
+            )
+        if encrypted_backend is None:
+            raise Refused(
+                "encrypted mail submissions present but no --volume-key-file was supplied; "
+                "the drill does not infer or generate key material"
+            )
+        report.key_material["used"] = True
+        try:
+            return encrypted_backend.read(str(path))
+        except StorageError as exc:
+            failures.append(
+                f"mail submission {submission_id}: retained {what} envelope did not open ({exc})"
+            )
+            return None
+
+    for submission_id, row in mail_rows.items():
+        by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+        plain = _read_plain(row["path_input"], submission_id, "input")
+        if plain is not None:
+            if len(plain) != row["input_bytes"] or _sha256_bytes(plain) != row["input_sha256"]:
+                failures.append(
+                    f"mail submission {submission_id}: retained input differs from its "
+                    "recorded hash or size"
+                )
+            else:
+                verified += 1
+        if row["path_output"] is not None:
+            plain = _read_plain(row["path_output"], submission_id, "output")
+            if plain is not None:
+                if (
+                    len(plain) != row["output_bytes"]
+                    or _sha256_bytes(plain) != row["output_sha256"]
+                ):
+                    failures.append(
+                        f"mail submission {submission_id}: retained output differs from its "
+                        "recorded hash or size"
+                    )
+                else:
+                    verified += 1
+
+    if failures:
+        raise VerificationFailed("mail submission verification failed: " + "; ".join(failures))
+
+    exercised = _exercise_mail_registry(destination, mail_rows, keyring)
+    report.mail = {
+        "submissions": len(mail_rows),
+        "by_status": by_status,
+        "bytes_verified": verified,
+        "encrypted": encrypted,
+        "audit_reconciled": len(mail_rows),
+        **exercised,
+    }
 
 
 def _confined_child(base: Path, name: object, *, what: str, job_id: str) -> Path:
@@ -913,8 +1404,10 @@ def run_drill(
         con = _open_database(destination, report)
         _check_drained(con, report)
         refs = _rebase_references(con, mapper, destination, report)
-        _verify_audit(con, report)
+        last_mail_event = _verify_audit(con, report)
+        _verify_mail_audit_consistency(refs["mail"], last_mail_event, report)
         _verify_originals(destination, refs["documents"], keyring, report)
+        _verify_mail_submissions(destination, refs["mail"], keyring, report)
         _verify_releases(con, refs["documents"], refs["jobs"], destination, report)
         custody_depends_on_key = bool(
             con.execute("SELECT 1 FROM releases WHERE status = 'done' LIMIT 1").fetchone()
