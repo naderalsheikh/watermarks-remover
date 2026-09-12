@@ -298,6 +298,12 @@ def test_clean_install_boots_shipped_container_and_static_ui(tmp_path):
         "COUNSELCLEAR_WORKER_IMAGE": "",
         "COUNSELCLEAR_WORKER_MODE": "",  # stay on the real shipped default: subprocess
         "COUNSELCLEAR_DATABASE_URL": "",
+        # cc-postgres is never started (SQLite pilot profile), but compose
+        # interpolates every service's environment block up front, for the
+        # whole file, regardless of which service is targeted -- and
+        # POSTGRES_PASSWORD uses the required-variable form (${VAR:?...}),
+        # so a value must exist even though it is never actually used.
+        "COUNSELCLEAR_PG_PASSWORD": "unused-cc-postgres-not-started",
     }
     container = f"{PROJECT}-cc-api-1"
 
