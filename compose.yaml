@@ -51,6 +51,33 @@ services:
         # Set COUNSELCLEAR_VERSION in .env (e.g. to `git rev-parse --short
         # HEAD` or a release tag) before building; unset stays "dev".
         CC_VERSION: ${COUNSELCLEAR_VERSION:-dev}
+    # Same uvicorn invocation as the image's own Dockerfile.counselclear
+    # CMD, plus --proxy-headers so COUNSELCLEAR_COOKIE_SECURE=auto (the
+    # default) actually works when this container sits behind the
+    # documented host-level nginx (deploy/nginx-counselclear.conf.example):
+    # without it, uvicorn never looks at X-Forwarded-Proto, so every
+    # session cookie loses its Secure flag regardless of what the browser
+    # actually connected over. --forwarded-allow-ips=* (not a literal
+    # 127.0.0.1, unlike the native systemd unit) because a proxy on the
+    # host reaches this container through Docker's port publishing
+    # (127.0.0.1:8443:8443 below), which NATs the connection so it never
+    # actually arrives from 127.0.0.1 inside the container's own network
+    # namespace. This is safe specifically because that port binding is
+    # loopback-only: nothing off this host can reach cc-api at all, so
+    # trusting whichever peer *did* reach it trusts only this same host.
+    command:
+      [
+        "-m",
+        "uvicorn",
+        "app.asgi:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8443",
+        "--proxy-headers",
+        "--forwarded-allow-ips",
+        "*",
+      ]
     environment:
       COUNSELCLEAR_DATA_ROOT: /data
       # Required only when OIDC SSO is not configured (the app enforces this

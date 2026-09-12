@@ -60,6 +60,18 @@ browser -- HTTPS --> nginx (static web/out and same-origin API proxy)
   ingress/identity and restore behavior are qualified for the target environment.
 - The login throttle and ClamAV-definition cache remain per-process. A
   multi-replica deployment also needs proxy-level connection throttling.
+- `cc-api`'s `COUNSELCLEAR_CLAMAV_DB_DIR` is hardcoded to `/clamav-defs`, a
+  volume only the `cc-freshclam` sidecar ever populates. Starting `cc-api`
+  alone, without `cc-freshclam`, points that variable at an unpopulated
+  directory -- exactly the configuration `tools/counselclear_preflight.py`'s
+  `malware_definitions` check blocks on (no `daily.cvd`/`daily.cld` present).
+  Either start both services together, or explicitly clear
+  `COUNSELCLEAR_CLAMAV_DB_DIR` to fall back to the image's own build-time
+  freshclam seed (which goes stale the day the image is built -- a floor,
+  not a substitute for real updates). The clean-install acceptance rehearsal
+  (`tests/test_clean_install_acceptance.py`) does the latter, for CI
+  purposes only, to avoid a live dependency on `database.clamav.net`; it is
+  not a recommendation to run `cc-api` without `cc-freshclam` in production.
 
 ## 2. Images: pin everything
 
@@ -263,7 +275,13 @@ Two supported postures:
 
 Behind a TLS-terminating proxy, cookies get their `secure` flag automatically
 (the flag follows the request scheme when uvicorn runs with `--proxy-headers`,
-as the shipped systemd unit does). If your proxy cannot forward the proto
+as the shipped systemd unit does, and as compose.yaml's `cc-api` now also
+does -- `--forwarded-allow-ips '*'` there instead of a literal loopback
+address, because a host-level proxy reaches the container through Docker's
+port publishing, which NATs the connection so it never actually arrives
+from `127.0.0.1` inside the container's own network namespace; safe
+specifically because `127.0.0.1:8443:8443` already means nothing off the
+host can reach `cc-api` at all). If your proxy cannot forward the proto
 (e.g. TCP passthrough), set `COUNSELCLEAR_COOKIE_SECURE=true` explicitly;
 use `false` only for loopback-only development. Keep `/health` and
 `/health/ready` off the public listener if your compliance checklist demands

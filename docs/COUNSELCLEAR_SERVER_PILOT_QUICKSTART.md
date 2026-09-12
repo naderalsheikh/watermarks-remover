@@ -73,9 +73,15 @@ Bring up the stack (`docker compose up --build -d` for the pilot profile,
 or the systemd unit for native `cc-api`), then rehearse — login, a
 synthetic upload/inspect/release/refusal cycle, packet download, standalone
 signature verification, browser packet verification, process restart.
-`tests/test_deployment_http_smoke.py` is the reference rehearsal this
-project's own CI runs against a real pinned worker image and a real nginx
-TLS proxy; read it before improvising your own.
+Two reference rehearsals, covering the two documented topologies:
+`tests/test_deployment_http_smoke.py` (native `cc-api` host process + a
+real pinned Docker worker image, fronted by nginx TLS — the topology that
+gets you per-job Docker isolation) and
+`tests/test_clean_install_acceptance.py` (the actual shipped
+`compose.yaml` `cc-api` container, `docker compose up`, subprocess-mode
+worker — the topology `docker compose up` gives you out of the box, no
+Docker socket handed to the container). Read whichever matches your
+target topology before improvising your own.
 
 ## 5. Back it up, then prove you can recover
 
