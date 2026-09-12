@@ -8,13 +8,16 @@ export type AuthConfig = { oidc_enabled: boolean; demo_seed_enabled?: boolean };
 // caller's own grants on this matter, service/app/main.py's _matter_dict)
 // -- not on list_matters items, which don't compute it per-row. Frontend
 // uses it to hide/disable controls that would otherwise 403.
-export type Matter = { id: string; name: string; created_utc: string; is_demo?: boolean; perms?: string[] };
+export type Matter = { id: string; name: string; created_utc: string; is_demo?: boolean; perms?: string[]; client_name?: string; matter_number?: string; status?: "active" | "closed"; organization_version?: number };
 export type Perm = "read" | "upload" | "inspect" | "sanitize" | "download_original" | "admin";
 
 export type Document = {
   id: string;
   matter_id: string;
   filename: string;
+  category?: string;
+  previous_revision_id?: string | null;
+  organization_version?: number;
   sha256: string;
   bytes: number;
   created_utc: string;

@@ -14,6 +14,10 @@ const PAGE_SIZE = 50;
 
 export default function MattersPage() {
   const router = useRouter();
+  const [status, setStatus] = useState("");
+  const [client, setClient] = useState("");
+  const [number, setNumber] = useState("");
+  const [details, setDetails] = useState(false);
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebouncedValue(search.trim(), 300);
   // PR 45: gates the "Load sample matter" button on the same bit the
@@ -49,7 +53,7 @@ export default function MattersPage() {
     (offset) =>
       api
         .get<{ matters: Matter[]; total: number }>(
-          `/v1/matters?limit=${PAGE_SIZE}&offset=${offset}&q=${encodeURIComponent(debouncedSearch)}`,
+          `/v1/matters?limit=${PAGE_SIZE}&offset=${offset}&q=${encodeURIComponent(debouncedSearch)}&status=${status}`,
         )
         .then((r) => ({ items: r.matters, total: r.total })),
     // The key includes the debounced search text: changing it resets
@@ -57,7 +61,7 @@ export default function MattersPage() {
     // matter-id change does elsewhere. The search itself runs on the
     // server (GET /v1/matters?q=...) across every matter this principal
     // can read, not just what's already loaded.
-    `matters:${debouncedSearch}`,
+    `matters:${debouncedSearch}:${status}`,
   );
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -69,8 +73,10 @@ export default function MattersPage() {
     setCreating(true);
     setCreateError(null);
     try {
-      await api.post("/v1/matters", { name: name.trim() });
+      await api.post("/v1/matters", { name: name.trim(), client_name: client.trim(), matter_number: number.trim() });
       setName("");
+      setClient("");
+      setNumber("");
       reload();
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Couldn't create the matter");
@@ -92,13 +98,16 @@ export default function MattersPage() {
           </div>
         </div>
 
-        <form onSubmit={createMatter} className="mb-6 flex gap-2">
+        <form onSubmit={createMatter} className="mb-6 space-y-3">
+          <div className="flex flex-wrap gap-2">
           <input
+            maxLength={200}
+            disabled={creating}
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="New matter name"
             aria-label="New matter name"
-            className="flex-1 rounded-md border border-border bg-transparent px-3 py-2 text-sm focus-visible:border-accent"
+            className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-2 text-sm focus-visible:border-accent"
           />
           <button
             type="submit"
@@ -107,6 +116,12 @@ export default function MattersPage() {
           >
             {creating ? "Creating…" : "New matter"}
           </button>
+          </div>
+          <button type="button" className="text-sm underline underline-offset-4" aria-expanded={details} onClick={() => setDetails(!details)}>Client and matter number (optional)</button>
+          {details && <fieldset disabled={creating} className="grid gap-3 sm:grid-cols-2">
+            <label className="space-y-1 text-sm" htmlFor="new-client"><span>Client name</span><input id="new-client" className="w-full rounded-md border border-border bg-transparent px-3 py-2" maxLength={200} value={client} onChange={e => setClient(e.target.value)} /></label>
+            <label className="space-y-1 text-sm" htmlFor="new-number"><span>Matter number</span><input id="new-number" className="w-full rounded-md border border-border bg-transparent px-3 py-2" maxLength={80} value={number} onChange={e => setNumber(e.target.value)} /></label>
+          </fieldset>}
         </form>
         {createError && (
           <p className="mb-6 rounded-md border border-red-600/30 bg-red-600/5 px-3 py-2 text-sm text-red-600">
@@ -156,19 +171,24 @@ export default function MattersPage() {
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search matters by name…"
-          aria-label="Search matters by name"
+          placeholder="Search name, client, or matter number…"
+          aria-label="Search matters by name, client, or matter number"
           className="mb-1 w-full rounded-md border border-border bg-transparent px-3 py-1.5 text-sm focus-visible:border-accent"
         />
         <p className="mb-3 text-xs text-muted">
           Searches every matter you can read on the server — not just what&apos;s loaded below.
         </p>
 
+        <label className="mb-5 flex items-center gap-3 text-sm" htmlFor="matter-status-filter">Matter status
+          <select id="matter-status-filter" className="rounded-md border border-border bg-transparent px-3 py-2" value={status} onChange={e => setStatus(e.target.value)}>
+            <option value="">All matters</option><option value="active">Active</option><option value="closed">Closed</option>
+          </select>
+        </label>
         {!loading && matters.length === 0 && (
           <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
             {debouncedSearch
               ? `No matters match "${debouncedSearch}".`
-              : "No matters yet — create one above to get started."}
+              : status ? `No ${status} matters.` : "No matters yet — create one above to get started."}
           </div>
         )}
 
@@ -185,10 +205,12 @@ export default function MattersPage() {
                 <li key={m.id}>
                   <Link
                     href={`/matters/view?id=${m.id}`}
-                    className="flex items-center justify-between px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
+                    className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-black/[0.03] dark:hover:bg-white/[0.03]"
                   >
-                    <span className="flex items-center gap-2">
-                      <span className="font-medium">{m.name}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block break-words font-medium">{m.name}</span>
+                      {(m.client_name || m.matter_number) && <span className="mt-1 block break-words text-sm text-muted">{[m.client_name, m.matter_number].filter(Boolean).join(" · ")}</span>}
+                      {m.status === "closed" && <span className="mt-1 block text-xs text-muted">Closed</span>}
                       {m.is_demo && (
                         <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">
                           Demo
