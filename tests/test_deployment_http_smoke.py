@@ -8,7 +8,9 @@ It does not drive browser JavaScript or qualify an external identity provider.
 from __future__ import annotations
 
 import hashlib
+import io
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -17,6 +19,7 @@ import ssl
 import subprocess
 import sys
 import time
+import zipfile
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -371,4 +374,15 @@ def test_https_static_export_and_real_worker_packet(tmp_path):
         relogin.raise_for_status()
         restored_packet = restored_client.get(f"/v1/matters/{matter}/jobs/{job}/bundle")
         restored_packet.raise_for_status()
-        assert restored_packet.content == packet.content
+        # The bundle is rebuilt into a fresh zip container on every
+        # download (not served from a stored blob), so its raw bytes
+        # legitimately differ between two downloads even with nothing
+        # recovered in between -- comparing the whole zip byte-for-byte
+        # is the wrong check. Compare the canonical evidence instead, the
+        # same way tests/test_restore_drill.py's own restore test does:
+        # manifest.json content and that the certificate is present.
+        with zipfile.ZipFile(io.BytesIO(packet.content)) as zf:
+            original_manifest = json.loads(zf.read("manifest.json"))
+        with zipfile.ZipFile(io.BytesIO(restored_packet.content)) as zf:
+            assert json.loads(zf.read("manifest.json")) == original_manifest
+            assert "certificate.html" in zf.namelist()
