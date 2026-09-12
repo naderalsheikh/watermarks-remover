@@ -43,7 +43,8 @@ It does not qualify, and refuses rather than pretends:
 | Live backup acquisition (quiescing the app, snapshotting a running root) | The snapshot is an input; the drill checks it is drained and copies it |
 | S3 object storage (`s3v1:` or key-only references) | Refused: "object-storage (S3) references present" |
 | PostgreSQL (`COUNSELCLEAR_DATABASE_URL` not SQLite) | Refused |
-| Mail submissions in a non-terminal state (admitted, processing, retryable held, released, submitted, ambiguous, or unrecognised) | Refused -- see "Mail submissions" |
+| Mail submissions the registry could still act on (admitted, processing, retryable held, released, submitted), or an unrecognised status | Refused -- see "Mail submissions" |
+| `ambiguous` mail submissions -- terminal (no automatic resend), but conservatively excluded from relocation | Refused -- see "Mail submissions" |
 | KMS-wrapped envelopes (`kms:` key id in the envelope header) | Refused: only the local volume key can be opened offline |
 | External identity (OIDC) | Not exercised; the drill verifies the local password hash file only by presence |
 | Cloud restore, cross-region replication | Not exercised |
@@ -207,19 +208,27 @@ the status string alone.
 **Refused (the whole drill run refuses, before any copy proceeds further):**
 
 - `admitted`, `processing`, `held` with `retryable=True`, `released`,
-  `submitted`, `ambiguous` -- every one of these means the registry could
-  still act on the row (claim it, finish processing it, or obtain/retry a
-  delivery ticket). Relocating any of them risks resurrecting a possible
-  send after restore, which this drill's entire design exists to prevent.
+  `submitted` -- every one of these means the registry could still act on
+  the row (claim it, finish processing it, or obtain/retry a delivery
+  ticket). Relocating any of them risks resurrecting a possible send after
+  restore, which this drill's entire design exists to prevent.
+- `ambiguous` -- terminal per `docs/COUNSELCLEAR_MAIL_STATE.md` (no
+  automatic resend; the registry cannot claim, process, or deliver it
+  either), but conservatively excluded anyway: it means a delivery attempt's
+  outcome is unknown, and this drill only ever relocates evidence, not
+  resolves it -- an ambiguous row belongs to a human decision, not a cold
+  restore.
 - Any status string the registry does not define. An unrecognised status
   is inconsistent data, not an assumed-safe one.
 - A row whose stored fields contradict its status: a `refused` or
   permanently-`held` row that unexpectedly carries `output_ref`,
   `delivery_token`, or `acknowledgment_sha256`; or an `acknowledged` row
-  missing any of them. `acknowledge()` never clears `delivery_token` or
-  `delivery_expires_epoch` -- they are retained, not erased -- so an
-  acknowledged row is expected to still carry them, and a check that
-  required them to be null would itself be wrong.
+  missing any of them, marked `retryable`, or carrying a malformed
+  `delivery_token` / `acknowledgment_sha256` / `delivery_expires_epoch` (not
+  the shape the registry itself ever writes there). `acknowledge()` never
+  clears `delivery_token` or `delivery_expires_epoch` -- they are retained,
+  not erased -- so an acknowledged row is expected to still carry them, and
+  a check that required them to be null would itself be wrong.
 
 **What is relocated and verified.** Only `input_ref` (always present) and
 `output_ref` (present on `acknowledged` rows only) are rebased, the same
@@ -233,6 +242,26 @@ retained input (and output, if present) is read through the same
 supplied key material, and compared byte-for-byte with its recorded
 `input_sha256`/`input_bytes` (and `output_sha256`/`output_bytes`).
 
+**Reconciled against its own retained audit trail, before the registry is
+even touched.** `binding_sha256` never covers `status` (see
+`MailSubmissionRegistry._bound_fields` / `_row`), so a row whose `status`
+column was edited directly in the snapshot -- a permanently held submission
+flipped to refused, say -- still revalidates against `get()`'s own
+recomputed binding hash: nothing about that recompute would notice. Once
+`_verify_audit` has proven the matter's audit chain is internally unbroken,
+the drill finds the last `mail.*` event recorded for each relocated
+submission and checks it against the row: the expected terminal action
+(`mail.decision` for refused/held, `mail.delivery.acknowledged` for
+acknowledged), the event's matter and actor, and the retained
+`status`/`binding_sha256`/`input_sha256`/`output_sha256`/`request_key`/
+`attempt`/recipient count where the event payload carries them. This is
+internal consistency between two parts of the same database, not
+independent authentication of the snapshot's origin -- an unbroken hash
+chain proves the events are self-consistent with each other, not that they
+were written by the real coordinator rather than fabricated, together with
+a matching row, by whatever produced the snapshot. Proving where a snapshot
+actually came from is outside this tool's scope.
+
 **Proof against the real registry, not a reimplementation of its checks.**
 For every relocated submission, the drill constructs the tenant/matter/
 actor/policy binding recorded on the row, builds a real
@@ -244,13 +273,26 @@ binding hash and the matter ACL exactly as it would in production;
 `SubmissionConflict` (none of the three eligible states is `released`). No
 change to the registry's public API was needed for this.
 
+This exercise is pinned to the restored destination and to explicitly
+supplied key material only: `Config(destination)` still reads
+`COUNSELCLEAR_*` environment variables meant for a live deployment, so an
+ambient `COUNSELCLEAR_DATABASE_URL` is discarded before the engine is built
+-- the exercise always opens the destination's own SQLite file, never
+whatever an inherited environment happens to name. Storage for the
+exercise is built the same explicit way originals are verified (local to
+the destination, wrapped in `EncryptedStorage` only when `--volume-key-file`
+supplied a keyring) rather than through `storage_from_config`, which would
+otherwise read an ambient `COUNSELCLEAR_VOLUME_KEY_FILE` and have
+`LocalKeyring` silently *generate* a fresh key at that path outside the
+restored root the first time it is asked for one that does not exist.
+
 **Report privacy.** `report.mail` carries only aggregate counts and a
 per-status tally (`submissions`, `by_status`, `bytes_verified`,
-`encrypted`, `registry_exercised`, `claims_returned_none`,
-`delivery_refused`) -- never a submission id, envelope address, message
-content, or capability token, matching the same field selection
-`app.mail.submissions._event` already uses for audit payloads.
-`report.database.mail_submissions_by_status` and
+`encrypted`, `audit_reconciled`, `registry_exercised`,
+`claims_returned_none`, `delivery_refused`) -- never a submission id,
+envelope address, message content, or capability token, matching the same
+field selection `app.mail.submissions._event` already uses for audit
+payloads. `report.database.mail_submissions_by_status` and
 `report.references.mail_input_refs_rebased` /
 `mail_output_refs_rebased` are the only other mail-specific fields.
 
@@ -272,6 +314,7 @@ content, or capability token, matching the same field selection
 | Mail submission in a non-terminal or unrecognised state | exit 2, `mail_submissions: submission …` names the status |
 | Terminal mail row inconsistent with its own status (e.g. `refused` carrying `output_ref`) | exit 2, names the unexpected or missing column |
 | Retained mail input/output corrupted or wrong key supplied | exit 3, `retained input/output differs` / `envelope did not open` |
+| Mail row's status, hashes, actor, matter, or request facts disagree with its own retained audit trail | exit 3, `mail audit reconciliation failed` |
 
 A `verified` outcome means the restored root is internally consistent and
 its evidence matches the database. It does not mean the snapshot was the

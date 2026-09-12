@@ -1097,6 +1097,7 @@ def test_check_drained_refuses_every_non_terminal_mail_state(status, retryable):
                 "output_bytes": 20,
                 "delivery_token": "d" * 32,
                 "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 9999999999,
             },
         ),
     ],
@@ -1131,9 +1132,59 @@ def test_check_drained_accepts_demonstrably_terminal_mail_rows(status, extra):
                 "output_bytes": 20,
                 "delivery_token": "d" * 32,
                 "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 9999999999,
                 "lease_token": "l" * 32,
             },
             "unexpectedly still carries lease_token",
+        ),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "d" * 32,
+                "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 9999999999,
+                "retryable": 1,
+            },
+            "unexpectedly marked retryable",
+        ),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "not-hex",
+                "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 9999999999,
+            },
+            "malformed delivery_token",
+        ),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "d" * 32,
+                "acknowledgment_sha256": "not-a-digest",
+                "delivery_expires_epoch": 9999999999,
+            },
+            "malformed acknowledgment_sha256",
+        ),
+        (
+            "acknowledged",
+            {
+                "output_ref": "/old/root/mail/sub-1/outputs/x.eml",
+                "output_sha256": "c" * 64,
+                "output_bytes": 20,
+                "delivery_token": "d" * 32,
+                "acknowledgment_sha256": "e" * 64,
+                "delivery_expires_epoch": 0,
+            },
+            "malformed delivery_expires_epoch",
         ),
     ],
     ids=[
@@ -1141,6 +1192,10 @@ def test_check_drained_accepts_demonstrably_terminal_mail_rows(status, extra):
         "held-with-delivery-token",
         "acknowledged-missing-output",
         "acknowledged-with-lease",
+        "acknowledged-retryable",
+        "acknowledged-bad-delivery-token",
+        "acknowledged-bad-acknowledgment-sha256",
+        "acknowledged-bad-expiry",
     ],
 )
 def test_check_drained_refuses_inconsistent_terminal_mail_rows(status, bad_overrides, fragment):
@@ -1470,3 +1525,77 @@ def test_mail_submission_with_no_document_dependency_needs_its_own_key(tmp_path,
     assert report.outcome == "refused"
     assert "encrypted mail submissions present but no --volume-key-file" in report.refusal
     assert not destination.exists()
+
+
+# --- ambient environment isolation + audit reconciliation regressions -------
+#
+# Config(destination) and storage_from_config(cfg) both read ambient
+# COUNSELCLEAR_* environment variables that have nothing to do with an
+# offline exercise of the restored destination -- a COUNSELCLEAR_DATABASE_URL
+# left set in the shell could point the registry exercise at an entirely
+# different database, and a COUNSELCLEAR_VOLUME_KEY_FILE could make
+# storage_from_config's LocalKeyring silently generate a fresh key outside
+# the restored root. Separately, a status column edited directly in a
+# snapshot never touches audit_events, so it can still revalidate against
+# get()'s own binding-hash recompute (which does not cover status). These
+# three tests build one real mail-history root and cold-snapshot it fresh
+# for each scenario, mirroring how each defect was independently reproduced.
+
+
+@pytest.fixture(scope="module")
+def mail_ambient_history(tmp_path_factory):
+    """One real mail-history root shared by the three tests below. All
+    ambient COUNSELCLEAR_* variables are cleared for the fixture's whole
+    lifetime so a variable one test sets cannot leak into another; the
+    shared root itself is read-only after this returns -- each test cold-
+    snapshots its own copy and corrupts only that copy."""
+    root = tmp_path_factory.mktemp("mail-ambient-regression")
+    with pytest.MonkeyPatch.context() as mp:
+        for name in tuple(os.environ):
+            if name.startswith("COUNSELCLEAR_"):
+                mp.delenv(name, raising=False)
+        built = _build_mail_history_root(root, mp, encrypted=False)
+        yield built, root
+
+
+def _mail_ambient_snapshot(mail_ambient_history, name):
+    built, root = mail_ambient_history
+    return built, root, _cold_snapshot(built["root"], root / name)
+
+
+def test_restore_does_not_generate_environment_volume_key(mail_ambient_history, monkeypatch):
+    built, root, source = _mail_ambient_snapshot(mail_ambient_history, "key-source")
+    surprise_key = root / "unrequested-volume.key"
+    monkeypatch.setenv("COUNSELCLEAR_VOLUME_KEY_FILE", str(surprise_key))
+    report = _run(source, root / "key-restored", str(built["root"]))
+    assert not surprise_key.exists(), "offline restore generated a key from ambient environment"
+    assert report.outcome == "verified", (report.refusal, report.failures)
+
+
+def test_restore_checks_destination_even_with_ambient_sqlite_url(mail_ambient_history, monkeypatch):
+    """peer_identity, not binding_sha256, is corrupted: binding_sha256 stays
+    intact so this isolates the ambient-database fix specifically. If
+    _exercise_mail_registry honoured the ambient COUNSELCLEAR_DATABASE_URL,
+    it would silently read the OTHER (pristine, uncorrupted) database and
+    report the corrupted destination verified anyway; only get()'s own
+    _bound_fields recompute -- run against whichever database the exercise
+    actually opens -- can catch it, and only if that database is really the
+    destination."""
+    built, root, source = _mail_ambient_snapshot(mail_ambient_history, "db-source")
+    with sqlite3.connect(source / DB) as con:
+        con.execute("UPDATE mail_submissions SET peer_identity = ?", ("corrupted-peer",))
+    monkeypatch.setenv("COUNSELCLEAR_DATABASE_URL", f"sqlite:///{built['root'] / DB}")
+    report = _run(source, root / "db-restored", str(built["root"]))
+    assert report.outcome == "failed", (
+        "restore verified a corrupted destination by reading the other database"
+    )
+
+
+def test_restore_reconciles_terminal_state_with_audit(mail_ambient_history):
+    built, root, source = _mail_ambient_snapshot(mail_ambient_history, "audit-source")
+    with sqlite3.connect(source / DB) as con:
+        con.execute("UPDATE mail_submissions SET status = 'refused' WHERE status = 'held'")
+    report = _run(source, root / "audit-restored", str(built["root"]))
+    assert report.outcome in ("failed", "refused"), (
+        "altered terminal status contradicted retained audit but restore verified"
+    )
