@@ -10,11 +10,20 @@
 # user, read-only-rootfs-compatible layout (state lives under /data).
 
 ARG VERSION=dev
+# CounselClear's own build identification, distinct from the upstream
+# watermarks-remover utility's VERSION/WATERMARKS_SERVER_VERSION above (that
+# ARG/ENV pair is read by scripts/server.py, the wr-core utility this image
+# also happens to be able to run). Pass the CounselClear release/commit
+# identity explicitly at build time, e.g.:
+#   docker build -f service/Dockerfile.counselclear \
+#     --build-arg CC_VERSION="$(git rev-parse --short HEAD)" -t counselclear service
+ARG CC_VERSION=dev
 
 # python:3.14-slim linux/amd64 digest (same pin as service/Dockerfile).
 FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
 
 ARG VERSION
+ARG CC_VERSION
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -58,6 +67,7 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin remover
 USER remover
 
 ENV WATERMARKS_SERVER_VERSION=${VERSION} \
+    COUNSELCLEAR_VERSION=${CC_VERSION} \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

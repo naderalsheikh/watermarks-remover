@@ -38,13 +38,17 @@ identity automatically.
 
 After resolving blockers, rehearse HTTPS/proxy routing, login/logout, a synthetic
 inspect/release/refusal workflow, verification of the downloaded packet against
-the separately obtained fingerprint, and a cold restore with separately retained
-keys. Use `tests/test_deployment_http_smoke.py` as the synthetic deployment
-rehearsal reference and `tools/counselclear_restore_drill.py` for the supported
-cold-restore check. Database migration state, available disk space, actual Docker
-image execution/isolation, scanner definitions, and backup acquisition still need
-verification on the intended host. `/health/ready` remains a database reachability
-probe; this command does not change its API or orchestrator semantics.
+the separately obtained fingerprint, and a cold backup-then-restore with
+separately retained keys. Use `tests/test_deployment_http_smoke.py` as the
+synthetic deployment rehearsal reference, `tools/counselclear_backup.py` (see
+`COUNSELCLEAR_BACKUP.md`) to take the cold backup, and
+`tools/counselclear_restore_drill.py` for the supported cold-restore check —
+a "verified" backup report only means the copy is faithful and drained, not
+that a restore has actually been exercised. Database migration state,
+available disk space, and actual Docker image execution/isolation and scanner
+definitions still need verification on the intended host. `/health/ready`
+remains a database reachability probe; this command does not change its API
+or orchestrator semantics.
 
 SSO/multiuser, PostgreSQL, S3/KMS, Desktop distribution, and live mail delivery need
 their own qualification. This command intentionally covers the installed local

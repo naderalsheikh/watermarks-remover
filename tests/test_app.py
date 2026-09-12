@@ -55,6 +55,26 @@ def test_v1_root_is_a_helpful_unauthenticated_message_not_a_bare_404(tmp_path, m
     assert "/v1/auth/login" in body["unauthenticated_routes"]
 
 
+def test_v1_root_reports_build_version(tmp_path, monkeypatch):
+    """COUNSELCLEAR_VERSION (baked into the image via Dockerfile.counselclear's
+    CC_VERSION build arg) is surfaced unauthenticated at /v1 and in the
+    OpenAPI version field, so an operator or support engineer can tell which
+    build is running without already knowing its image digest."""
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    monkeypatch.setenv("COUNSELCLEAR_VERSION", "1.2.3-rc1")
+    app = create_app(tmp_path / "d")
+    assert app.version == "1.2.3-rc1"
+    c = TestClient(app)
+    assert c.get("/v1").json()["version"] == "1.2.3-rc1"
+
+
+def test_v1_root_version_defaults_to_dev_when_unset(tmp_path, monkeypatch):
+    monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
+    monkeypatch.delenv("COUNSELCLEAR_VERSION", raising=False)
+    c = TestClient(create_app(tmp_path / "d"))
+    assert c.get("/v1").json()["version"] == "dev"
+
+
 def test_login_cookie_not_secure_over_plain_http_and_docs_fail_closed(tmp_path, monkeypatch):
     monkeypatch.setenv("COUNSELCLEAR_LOCAL_PASSWORD", "pw12345")
     c = TestClient(create_app(tmp_path / "d"))

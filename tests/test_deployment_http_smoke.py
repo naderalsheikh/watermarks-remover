@@ -288,3 +288,87 @@ def test_https_static_export_and_real_worker_packet(tmp_path):
         assert audit.json()["chain_ok"] is True
         client.post("/v1/auth/logout").raise_for_status()
         assert client.get("/v1/matters").status_code == 401
+
+    # The API and proxy are stopped once the context managers above exit --
+    # exercise the documented cold-backup/restore lifecycle against this
+    # same real, Docker-worker-produced root: the reference-environment
+    # acceptance case for backup/restore, distinct from the in-process
+    # TestClient rehearsals in tests/test_backup.py and
+    # tests/test_restore_drill.py.
+    data_root = tmp_path / "data"
+    backup_dest = tmp_path / "backup"
+    backup_run = subprocess.run(
+        [
+            sys.executable,
+            str(REPO / "tools/counselclear_backup.py"),
+            "--source",
+            str(data_root),
+            "--destination",
+            str(backup_dest),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert backup_run.returncode == 0, backup_run.stdout + backup_run.stderr
+
+    restored_root = tmp_path / "restored"
+    restore_run = subprocess.run(
+        [
+            sys.executable,
+            str(REPO / "tools/counselclear_restore_drill.py"),
+            "--source",
+            str(backup_dest),
+            "--destination",
+            str(restored_root),
+            "--old-data-root",
+            str(data_root),
+            "--volume-key-file",
+            str(tmp_path / "volume.key"),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert restore_run.returncode == 0, restore_run.stdout + restore_run.stderr
+
+    # Boot the restored root as a second, independent process (no proxy
+    # needed this time -- plain HTTP loopback is enough to prove the
+    # application itself serves the same evidence after recovery) and
+    # confirm it serves the same packet the original release produced.
+    restored_env = dict(env)
+    restored_env["COUNSELCLEAR_DATA_ROOT"] = str(restored_root)
+    restored_port = _ports()[0]
+    restored_log = tmp_path / "restored-api.log"
+    with (
+        _process(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "app.asgi:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(restored_port),
+            ],
+            cwd=REPO / "service",
+            env=restored_env,
+            log=restored_log,
+        ) as restored_api,
+        httpx.Client(
+            base_url=f"http://127.0.0.1:{restored_port}", trust_env=False, timeout=15
+        ) as restored_client,
+    ):
+        _wait_ready(restored_client, [restored_api], [restored_log])
+        relogin = restored_client.post(
+            "/v1/auth/login", json={"password": "synthetic-deployment-password"}
+        )
+        relogin.raise_for_status()
+        restored_packet = restored_client.get(f"/v1/matters/{matter}/jobs/{job}/bundle")
+        restored_packet.raise_for_status()
+        assert restored_packet.content == packet.content

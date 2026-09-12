@@ -155,6 +155,54 @@ def test_invalid_signing_key_does_not_become_a_new_identity(installation):
     assert "private-invalid-key-sentinel" not in json.dumps(report)
 
 
+def test_malware_definitions_not_checked_when_clamscan_absent(installation):
+    data, web, _, env = installation
+    report = preflight.inspect_installation(data, web, environ=env, which=lambda name: None)
+    assert check(report, "malware_definitions")["status"] == "not_checked"
+
+
+def test_malware_definitions_warns_when_db_dir_unset(installation):
+    report = run(installation)
+    assert check(report, "malware_definitions")["status"] == "warning"
+
+
+def test_malware_definitions_blocked_when_configured_dir_missing(installation, tmp_path):
+    missing = tmp_path / "no-such-clamav-dir"
+    report = run(installation, COUNSELCLEAR_CLAMAV_DB_DIR=str(missing))
+    assert check(report, "malware_definitions")["status"] == "block"
+
+
+def test_malware_definitions_blocked_when_no_daily_database_present(installation, tmp_path):
+    db_dir = tmp_path / "clamav-defs"
+    db_dir.mkdir()
+    report = run(installation, COUNSELCLEAR_CLAMAV_DB_DIR=str(db_dir))
+    assert check(report, "malware_definitions")["status"] == "block"
+
+
+def test_malware_definitions_pass_when_fresh(installation, tmp_path):
+    db_dir = tmp_path / "clamav-defs"
+    db_dir.mkdir()
+    (db_dir / "daily.cvd").write_bytes(b"synthetic-fresh-database")
+    report = run(installation, COUNSELCLEAR_CLAMAV_DB_DIR=str(db_dir))
+    assert check(report, "malware_definitions")["status"] == "pass"
+
+
+def test_malware_definitions_warns_when_stale(installation, tmp_path):
+    import os
+    import time
+
+    db_dir = tmp_path / "clamav-defs"
+    db_dir.mkdir()
+    daily = db_dir / "daily.cld"
+    daily.write_bytes(b"synthetic-stale-database")
+    stale_time = time.time() - (preflight._STALE_DEFINITIONS_DAYS + 1) * 86400
+    os.utime(daily, (stale_time, stale_time))
+    report = run(installation, COUNSELCLEAR_CLAMAV_DB_DIR=str(db_dir))
+    result = check(report, "malware_definitions")
+    assert result["status"] == "warning"
+    assert "older than" in result["detail"]
+
+
 def test_cli_exit_code_tracks_blockers_and_output_is_json(installation, monkeypatch, capsys):
     data, web, _, env = installation
     for name in tuple(preflight.os.environ):
