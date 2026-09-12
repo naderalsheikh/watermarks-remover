@@ -109,6 +109,23 @@ services:
       # Docs (/docs, /openapi.json) are fail-closed — opt in explicitly for
       # local development only.
       COUNSELCLEAR_ENABLE_DOCS: ${COUNSELCLEAR_ENABLE_DOCS:-}
+      # Not previously wired through this file at all, so no .env setting
+      # could reach it: every compose deployment silently anchored every
+      # release against a public third party (http://timestamp.digicert.com)
+      # with no documented way to change or disable it. Deliberately a
+      # BARE key, not ${COUNSELCLEAR_TSA_URL:-} -- that interpolation form
+      # always sets the container's variable, to an empty string when
+      # unset, and app.tsa.anchor_enabled() treats an *empty* value as an
+      # explicit opt-out, distinct from *absent* (which keeps today's
+      # default: anchor against the public TSA, with a startup warning).
+      # A bare key instead asks compose to look up COUNSELCLEAR_TSA_URL in
+      # the shell/.env at `docker compose` invocation time and, if unset
+      # there too, omit the variable from the container entirely --
+      # preserving that same distinction, not silently flipping every
+      # unconfigured deployment's default to zero-egress. Set it in .env to
+      # your chosen TSA, or to "off" for zero timestamp egress. See
+      # docs/COUNSELCLEAR_PRODUCTION.md section 6b.
+      COUNSELCLEAR_TSA_URL:
       # Live ClamAV definitions from the cc-freshclam sidecar (falls back to
       # the image's build-time seed when the sidecar/volume is absent).
       COUNSELCLEAR_CLAMAV_DB_DIR: /clamav-defs

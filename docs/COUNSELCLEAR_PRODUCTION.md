@@ -308,6 +308,19 @@ intended TSA explicitly before deployment. Disabling it removes timestamp
 egress; it does not disable OIDC, object storage/KMS, malware-definition updates,
 or an explicitly enabled rewrite provider.
 
+`compose.yaml`'s `cc-api` now passes `COUNSELCLEAR_TSA_URL` through as a
+bare key (looked up from the shell/`.env` where `docker compose` itself
+runs, omitted from the container entirely if unset there too) rather than
+the `${VAR:-}` form every other optional variable in that file uses --
+deliberately, because that interpolation form always sets the container's
+variable to an empty string when unset, and `app.tsa.anchor_enabled()`
+treats an *empty* value as an explicit opt-out, distinct from *absent*
+(which keeps today's documented default: anchor against the public TSA,
+with a startup warning). Before this fix, `COUNSELCLEAR_TSA_URL` was not
+wired into `compose.yaml` at all, so no `.env` setting could reach it —
+every compose deployment silently got the public-TSA default with no way
+to change or disable it.
+
 The default is deliberate. An RFC 3161 token is the only claim CounselClear
 makes that does not rest on the operator's own key: everything else — the
 manifest, the certificate, the audit chain, the Ed25519 packet signature —
